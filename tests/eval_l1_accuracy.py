@@ -66,12 +66,14 @@ def _similarity(pred: str, truth: str) -> tuple[bool, bool]:
 
 
 async def run(sample_size: int, sheet_id: str) -> None:
-    # 1. 从飞书日表抽样
-    log.info("抽样 %d 条产品 from sheet %s ...", sample_size, sheet_id)
-    # 读前 50 行保证够取
-    rows = lc.read_range(VIOLATION_SHEET_TOKEN, f"{sheet_id}!A1:M{min(50, sample_size * 3)}")
+    # 1. 从飞书日表抽样 (过滤 ground truth='default' 的, 因为那是沃尔玛自己没识别)
+    log.info("抽样 %d 条产品 (过滤 default) from sheet %s ...", sample_size, sheet_id)
+    # 读更多行保证过滤后够取 (default 占比约 30-40%, 乘以 2.5 保底)
+    fetch_rows = min(400, sample_size * 3)
+    rows = lc.read_range(VIOLATION_SHEET_TOKEN, f"{sheet_id}!A1:M{fetch_rows}")
 
     samples: list[dict] = []
+    skipped_default = 0
     for idx, row in enumerate(rows):
         if idx == 0:
             continue  # header
@@ -83,6 +85,9 @@ async def run(sample_size: int, sheet_id: str) -> None:
         pt_truth = _flatten(padded[4])  # ProductType
         if not asin or not name_raw or not pt_truth:
             continue
+        if pt_truth.lower() == "default":
+            skipped_default += 1
+            continue
         title, amazon_cat = _extract_title_from_raw(name_raw)
         if not title:
             continue
@@ -91,7 +96,7 @@ async def run(sample_size: int, sheet_id: str) -> None:
         if len(samples) >= sample_size:
             break
 
-    log.info("拿到 %d 条有效样本", len(samples))
+    log.info("拿到 %d 条有效样本 (跳过 %d 条 truth='default')", len(samples), skipped_default)
 
     # 2. 批跑 L1 (带 amazon_category_path, 更接近真实场景)
     async def _one(sample):
