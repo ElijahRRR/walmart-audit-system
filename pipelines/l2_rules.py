@@ -116,10 +116,15 @@ def _rule_brand_blacklist(product: ProductInfo) -> list[RuleHit]:
     return []
 
 
-def _rule_title_desc_blacklist(product: ProductInfo) -> list[RuleHit]:
-    """R2: title/bullet/description 子串 word-boundary 命中黑名单 → 每次 -30。
+R2_PER_HIT_PENALTY = -5      # 每命中 1 次黑名单品牌 (降权; 原 -30)
+R2_TOTAL_CAP = -15           # R2 总扣分上限 (R2+R5 合计 ≤ -30, 不单独触发 reject)
 
-    同一品牌多次命中只扣一次 (避免同一品牌出现在 title+desc 算两次)。
+
+def _rule_title_desc_blacklist(product: ProductInfo) -> list[RuleHit]:
+    """R2: title/bullet/description 子串 word-boundary 命中黑名单 → 每次 -5, 总扣 ≤ -30。
+
+    大幅降权: 黑名单里含大量通用英文词 (simple/America 等), 避免正常产品被 reject。
+    真实品牌侵权由 L3 LLM 语义判断。
     """
     hay = product.searchable_text
     if not hay:
@@ -128,7 +133,6 @@ def _rule_title_desc_blacklist(product: ProductInfo) -> list[RuleHit]:
     seen: set[str] = set()
     for brand, pattern in _compile_blacklist_patterns():
         if brand == (product.brand or "").strip().lower():
-            # R1 已经处理, R2 不重复扣
             continue
         if brand in seen:
             continue
@@ -138,12 +142,13 @@ def _rule_title_desc_blacklist(product: ProductInfo) -> list[RuleHit]:
             matches.append({"brand": brand, "matched_phrase": m.group()})
     if not matches:
         return []
+    penalty = max(R2_TOTAL_CAP, R2_PER_HIT_PENALTY * len(matches))
     return [
         RuleHit(
             stage="L2",
             rule_code="title_desc_blacklist",
-            penalty=-30 * len(matches),
-            detail={"matches": matches, "count": len(matches)},
+            penalty=penalty,
+            detail={"matches": matches, "count": len(matches), "penalty_capped": penalty == R2_TOTAL_CAP},
         )
     ]
 
@@ -281,14 +286,25 @@ def _rule_trademark_live(product: ProductInfo, l1: L1Result) -> list[RuleHit]:
     marks_unique = sorted(set(marks), key=str.lower)
     if not marks_unique:
         return []
+    # 大幅降权: USPTO LIVE 商标含大量通用词 (Garden/Bird/Premium 等), 避免误杀
+    penalty = max(R5_TOTAL_CAP, R5_PER_HIT_PENALTY * len(marks_unique))
     return [
         RuleHit(
             stage="L2",
             rule_code="trademark_live",
-            penalty=-20 * len(marks_unique),
-            detail={"matched_marks": marks_unique, "count": len(marks_unique), "token_variants": len(variants_list)},
+            penalty=penalty,
+            detail={
+                "matched_marks": marks_unique,
+                "count": len(marks_unique),
+                "token_variants": len(variants_list),
+                "penalty_capped": penalty == R5_TOTAL_CAP,
+            },
         )
     ]
+
+
+R5_PER_HIT_PENALTY = -3      # 每命中 1 个 LIVE 商标 (降权; 原 -20)
+R5_TOTAL_CAP = -15           # R5 总扣分上限 (R2+R5 合计 ≤ -30, 不单独触发 reject)
 
 
 # =============================================================
