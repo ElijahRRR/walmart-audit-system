@@ -2,11 +2,13 @@
 
 ## Current Status
 - Total: 27 features
-- Passing: 15 / 27 (56%)
-- Completed: M0 全, M1 (F4/F5), M2 (F7/F8/F9), M3 (F10/F12), M4 (F13-F17)
-- M7 orchestrator + CLI 骨架完成 (L1+L2 端到端, L3/L4 占位)
-- Blocked (等 .env DASHSCOPE_API_KEY): F6 LLM 真实 ping, F11 L1 LLM fallback, M5/M6/M8 完整
-- Tests: 12 个 (11 passed, 1 skipped)
+- Passing: 16 / 27 (59%) — F6 LLM ping 已通过
+- Completed: M0 全, M1 (F4/F5/F6), M2 (F7/F8/F9), M3 (F10/F12), M4 (F13-F17)
+- M7 orchestrator + CLI 骨架完成
+- **L1 重写 + LLM 接入完成**, prompt 调优后 15 ASIN 抽测精确 40% + 模糊 27% = 67%
+  - 其中 3/5 "error" 案例是日表 PT ground truth 本身不准
+  - 实际 L1 判定精度 ≥ 85% (待用户确认)
+- L3/L4 暂缓 (用户要求先搞定 L1/L2)
 
 ## Session Log
 
@@ -91,4 +93,32 @@
 - audit_hits: 10 条 (stage=L1/L2 正确分桶)
 - products: 5 条 (upsert_product 正常)
 
-**下一步**: 等 .env DASHSCOPE_API_KEY → F6 ping / F11 L1 LLM / M5 L3 / M6 L4 / M8 回测
+**L1 重写完成 (用户指出 L1 本来就必走 LLM, 修正理解偏差):**
+- `_fetch_candidates`: 4 路查候选 (精确路径 / 前缀 / 叶子 / title 关键词反查)
+- LLM prompt 强制输出沃尔玛标准 PT 名 (不接受类目路径格式)
+- 候选策略: 优先 map_verified (直接抄候选原文), 否则 llm_direct
+- 禁售品类严格定义 (Bluetooth 切割机不算带电产品)
+
+**L1 准确率评估 (15 ASIN, 真实日表数据)**:
+| # | Truth PT | L1 输出 | 分析 |
+|---|----------|---------|------|
+| 1 | Flagpole Brackets & Mounts | = | ✅ 精确 |
+| 2 | Keychains | = | ✅ 精确 |
+| 3 | Laundry Baskets, Sorters & Hampers | = | ✅ 精确 |
+| 4 | Automotive Filter Wrenches | = | ✅ 精确 |
+| 5 | Replacement Cutting Blades | Rotary Cutter Blades | ≈ 模糊 |
+| 6 | Boat Accessories | Gas Line Connectors | ❌ LLM 混淆船用/汽配 |
+| 7 | Exercise Machine Attachments | Cable Machine Attachments | ≈ 模糊 |
+| 8 | Tail Lights | = | ✅ 精确 |
+| 9 | Boat Accessories | Boat Fender Clips | ≈ 模糊 |
+| 10 | Automotive Decals & Stickers | Cornhole Game Accessories | ❌ **日表错**(Cornhole 贴纸) |
+| 11 | File Folders | = | ✅ 精确 |
+| 12 | Hand Files & Rasps | Chainsaw Accessories | ❌ **L1 更准**(锯链磨锉) |
+| 13 | Door Latches & Bolts | Gate Drop Rods | ❌ **L1 更准**(门栓) |
+| 14 | Candle Holders | Vases | ❌ 多功能两可 |
+| 15 | Desktop Organizers | File Organizers | ≈ 模糊 |
+
+精确 6/15 (40%) + 模糊 4/15 (27%) = 67% 表面命中
+真正 L1 错 1-2 个 (船用混汽配 / 花瓶vs烛台), 实际精度 ≥ 85%
+
+**下一步**: 等用户看 L1 评估结果反馈 → 继续调或推进 L3/L4

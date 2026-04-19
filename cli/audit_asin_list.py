@@ -121,7 +121,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Walmart 商品预审 CLI")
     parser.add_argument("--input", type=Path, required=True, help="输入 CSV 路径")
     parser.add_argument("--out", type=Path, required=True, help="输出 CSV 路径")
-    parser.add_argument("--enable-llm", action="store_true", help="启用 L3/L4 LLM (需 DASHSCOPE_API_KEY)")
+    parser.add_argument("--skip-l1-llm", action="store_true",
+                        help="L1 只查 DB 不调 LLM (快速调试; 默认 L1 必走 qwen-plus)")
+    parser.add_argument("--run-l3", action="store_true",
+                        help="跑 L3 LLM 语义审核 (F18-F20, 当前暂缓)")
+    parser.add_argument("--run-l4", action="store_true",
+                        help="跑 L4 视觉审核 (F21-F23, 未实现)")
     parser.add_argument("--no-persist", action="store_true", help="不落 audit_runs/audit_hits 表")
     parser.add_argument("--concurrency", type=int, default=20)
     parser.add_argument("--log-level", default="INFO")
@@ -140,7 +145,9 @@ def main() -> int:
         audit_batch(
             products,
             concurrency=args.concurrency,
-            enable_llm=args.enable_llm,
+            skip_l1_llm=args.skip_l1_llm,
+            run_l3=args.run_l3,
+            run_l4=args.run_l4,
             persist=not args.no_persist,
         )
     )

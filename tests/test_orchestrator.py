@@ -21,8 +21,9 @@ def _p(**kw) -> ProductInfo:
 
 @pytest.mark.asyncio
 async def test_orchestrator_audit_one_passes_neutral_product():
+    # skip_l1_llm=True 让单测走 DB-only, 不消耗 LLM 配额
     p = _p(asin="OR_01", title="simple wooden toy", brand="UNBRANDED")
-    outcome = await audit_one(p, enable_llm=False, persist=False)
+    outcome = await audit_one(p, skip_l1_llm=True, persist=False)
     assert outcome.asin == "OR_01"
     assert outcome.verdict in {"pass", "reject"}
     assert outcome.l1 is not None
@@ -33,7 +34,7 @@ async def test_orchestrator_audit_one_passes_neutral_product():
 async def test_orchestrator_rejects_excluded_category():
     p = _p(asin="OR_02", title="Lithium battery rechargeable pack",
            amazon_category_path="Electronics > Power Bank")
-    outcome = await audit_one(p, enable_llm=False, persist=False)
+    outcome = await audit_one(p, skip_l1_llm=True, persist=False)
     assert outcome.verdict == "reject"
     assert any(h.rule_code == "excluded_category" for h in outcome.all_hits)
 
@@ -44,6 +45,6 @@ async def test_orchestrator_batch():
         _p(asin=f"BATCH_{i}", title="simple neutral product", brand="UNBRANDED")
         for i in range(3)
     ]
-    outcomes = await audit_batch(products, concurrency=3, enable_llm=False, persist=False)
+    outcomes = await audit_batch(products, concurrency=3, skip_l1_llm=True, persist=False)
     assert len(outcomes) == 3
     assert all(o.asin.startswith("BATCH_") for o in outcomes)

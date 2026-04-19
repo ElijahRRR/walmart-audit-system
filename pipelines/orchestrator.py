@@ -125,12 +125,21 @@ def upsert_product(product: ProductInfo) -> None:
 async def audit_one(
     product: ProductInfo,
     *,
-    enable_llm: bool = False,
+    skip_l1_llm: bool = False,
+    run_l3: bool = False,
+    run_l4: bool = False,
     persist: bool = True,
 ) -> AuditOutcome:
-    """对单个产品跑完整审核流水线。"""
-    # L1 类目判定
-    l1 = l1_category.classify(product, llm_fallback=enable_llm)
+    """对单个产品跑审核流水线。
+
+    flags:
+      - skip_l1_llm: True 时 L1 只查 DB 不调 LLM (测试/离线场景)
+      - run_l3:      True 时跑 L3 LLM 语义 (F18-F20, 需 DASHSCOPE_API_KEY)
+      - run_l4:      True 时跑 L4 视觉 (F21-F23, 未实现)
+      - persist:     落 audit_runs / audit_hits / products 表
+    """
+    # L1 类目判定 (默认必走 LLM)
+    l1 = await l1_category.classify(product, skip_llm=skip_l1_llm)
 
     # L2 硬规则打分
     l2 = l2_rules.evaluate(product, l1)
@@ -145,18 +154,13 @@ async def audit_one(
     )
 
     # L3 (占位)
-    if l2.verdict == "pass":
-        if enable_llm:
-            # TODO(F18-F20): 调 pipelines.l3_llm.judge(product, l1, l2)
-            log.warning("L3 LLM 尚未实现, ASIN %s 默认 pass 穿透", product.asin)
-        # 占位 pass 直接进 L4
-        # 若 L3 实现后 reject → outcome.verdict=reject, outcome.stage_stopped_at='L3'
+    if l2.verdict == "pass" and run_l3:
+        # TODO(F18-F20): 调 pipelines.l3_llm.judge(product, l1, l2)
+        log.warning("run_l3=True 但 L3 暂缓接入 (用户要求先搞定 L1/L2)")
 
     # L4 (占位)
-    if outcome.verdict == "pass":
-        if enable_llm:
-            # TODO(F21-F23): 调 pipelines.l4_vision.judge(product, outcome)
-            log.warning("L4 视觉尚未实现, ASIN %s 默认 pass 穿透", product.asin)
+    if outcome.verdict == "pass" and run_l4:
+        log.warning("run_l4=True 但 L4 尚未实现")
 
     # 持久化
     if persist:
@@ -173,15 +177,23 @@ async def audit_batch(
     products: list[ProductInfo],
     *,
     concurrency: int = 20,
-    enable_llm: bool = False,
+    skip_l1_llm: bool = False,
+    run_l3: bool = False,
+    run_l4: bool = False,
     persist: bool = True,
 ) -> list[AuditOutcome]:
-    """批量审核。并发控制用 Semaphore。"""
+    """批量审核。并发由 Semaphore + llm_client 内部 Semaphore(100) 控。"""
     sem = asyncio.Semaphore(concurrency)
 
     async def _one(p: ProductInfo) -> AuditOutcome:
         async with sem:
-            return await audit_one(p, enable_llm=enable_llm, persist=persist)
+            return await audit_one(
+                p,
+                skip_l1_llm=skip_l1_llm,
+                run_l3=run_l3,
+                run_l4=run_l4,
+                persist=persist,
+            )
 
     return await asyncio.gather(*(_one(p) for p in products))
 

@@ -35,7 +35,7 @@ def _sample(**kw) -> ProductInfo:
 
 
 def test_l1_map_direct_exact_match():
-    """Amazon 路径精确命中映射表应直接返回 PT + 高置信度。"""
+    """Amazon 路径精确命中映射表应直接返回 PT + 高置信度 (走 classify_by_map 兼容 API)。"""
     p = _sample(
         asin="B_TEST_1",
         amazon_category_path="Pet Supplies > Dog Supplies > Feeding & Watering > Automatic Feeders",
@@ -55,10 +55,10 @@ def test_l1_map_miss_returns_none():
 
 
 def test_l1_classify_seeds_excluded_when_no_map():
-    """映射 miss 但 title 含 'Battery' → seed yaml 判禁售。"""
+    """映射 miss 但 title 含 'Battery' → seed yaml 判禁售 (skip_llm=True 走 DB-only)。"""
     p = _sample(asin="B_BAT", title="Rechargeable Lithium Battery Pack 12V",
                 amazon_category_path="")
-    l1 = l1_category.classify(p, llm_fallback=False)
+    l1 = l1_category.classify_sync(p, skip_llm=True)
     assert l1.is_forbidden
     assert l1.excluded_category_reason is not None
     assert any(h.rule_code == "excluded_category" and h.penalty == -100 for h in l1.hits)
