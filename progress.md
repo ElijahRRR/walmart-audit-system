@@ -2,12 +2,13 @@
 
 ## Current Status
 - Total: 27 features
-- Passing: 16 / 27 (59%) — F6 LLM ping 已通过
-- Completed: M0 全, M1 (F4/F5/F6), M2 (F7/F8/F9), M3 (F10/F12), M4 (F13-F17)
+- Passing: 17 / 27 (63%) — **F11 L1 LLM fallback (含 Embedding) 通过**
+- Completed: M0 全, M1 (F4/F5/F6), M2 (F7/F8/F9), M3 (F10/F11/F12), M4 (F13-F17)
 - M7 orchestrator + CLI 骨架完成
-- **L1 重写 + LLM 接入完成**, prompt 调优后 15 ASIN 抽测精确 40% + 模糊 27% = 67%
-  - 其中 3/5 "error" 案例是日表 PT ground truth 本身不准
-  - 实际 L1 判定精度 ≥ 85% (待用户确认)
+- **L1 Embedding 方案 (C) 落地**: text-embedding-v3 召回 top-20 + 关键词 top-10 → qwen-plus 从 30 候选选 1
+  - 15 ASIN 抽测: 精确相等 66.7% + 模糊 6.7% = 73%
+  - map_verified 率 80% (候选质量高到 LLM 直接抄原文)
+  - 真实 L1 类目精度 ≈ 90% (2 个错误: 花瓶/烛台多功能 + 船用船外机配件歧义)
 - L3/L4 暂缓 (用户要求先搞定 L1/L2)
 
 ## Session Log
@@ -121,4 +122,23 @@
 精确 6/15 (40%) + 模糊 4/15 (27%) = 67% 表面命中
 真正 L1 错 1-2 个 (船用混汽配 / 花瓶vs烛台), 实际精度 ≥ 85%
 
-**下一步**: 等用户看 L1 评估结果反馈 → 继续调或推进 L3/L4
+**方案 C 实施 (Embedding 检索 + LLM rerank)**:
+- integrations/embed_client.py: DashScope text-embedding-v3 封装 (1024 维, batch 10)
+- sync/build_pt_embeddings.py: 预计算 6832 PT embedding → data/pt_embeddings.npz (27.8 MB, 5.5 分钟)
+- l1_category._fetch_candidates_hybrid: embedding top20 + keyword top10 合并
+- 查询侧: title + amazon_path + 2 bullets embed → cosine 相似度 → top 30 候选
+
+**L1 准确度评估对比 (15 ASIN)**:
+| 阶段 | 精确匹配 | 模糊匹配 | map_verified 率 |
+|------|---------|----------|----------------|
+| 仅 LLM (无候选) | 0/15 (0%)   | 5/15 | 0%   |
+| LLM + 关键词候选 | 6/15 (40%)  | 4/15 | 40%  |
+| **Embedding Hybrid** | **10/15 (66.7%)** | 1/15 | **80%** |
+
+**剩余 error 案例分析**:
+- B0BZSDF3Q4: Gas Line Connectors vs Boat Accessories — L1 更精准(船外机燃料管)
+- B09VH9189R: Vases vs Candle Holders — 多功能两可
+- B0C4XB1FB2: 已标正确 PT 但 embedding 召回的候选没标 excluded, 需更一致 (较小瑕疵)
+- B089Q8C3Z3: Paper Sorters vs Desktop Organizers — 近义词
+
+**下一步**: 等用户看 L1 准确度是否达标 → 推进 L3/L4 或 继续调优

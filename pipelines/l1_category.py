@@ -25,10 +25,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import yaml
 
 from config import ROOT
-from integrations import llm_client
+from integrations import embed_client, llm_client
 from sync._common import db_conn
 
 from .models import L1Result, ProductInfo, RuleHit
@@ -36,6 +37,7 @@ from .models import L1Result, ProductInfo, RuleHit
 log = logging.getLogger(__name__)
 
 SEED_YAML = ROOT / "db" / "seed" / "forbidden_categories_zh_seller.yaml"
+PT_EMBEDDINGS_FILE = ROOT / "data" / "pt_embeddings.npz"
 
 
 # =============================================================
@@ -50,6 +52,77 @@ def _load_excluded_rules() -> list[dict[str, Any]]:
     with SEED_YAML.open("r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     return data.get("excluded_categories", []) or []
+
+
+# =============================================================
+# PT embeddings 缓存 (方案 C 核心)
+# =============================================================
+
+_PT_CACHE: dict[str, Any] | None = None
+
+
+def _load_pt_embeddings() -> dict[str, Any] | None:
+    """懒加载 data/pt_embeddings.npz。返回 None 表示文件不存在。"""
+    global _PT_CACHE
+    if _PT_CACHE is not None:
+        return _PT_CACHE
+    if not PT_EMBEDDINGS_FILE.exists():
+        log.warning(
+            "PT embeddings 文件不存在 %s, embedding 召回将跳过 (跑 sync/build_pt_embeddings.py 生成)",
+            PT_EMBEDDINGS_FILE,
+        )
+        return None
+    data = np.load(PT_EMBEDDINGS_FILE, allow_pickle=True)
+    _PT_CACHE = {
+        "pt_names": data["pt_names"],
+        "pt_context": data["pt_context"],
+        "pt_metadata": data["pt_metadata"],
+        "vectors": data["vectors"],
+    }
+    log.info("加载 %d 个 PT embeddings (dim=%d) from %s",
+             len(_PT_CACHE["pt_names"]), _PT_CACHE["vectors"].shape[1], PT_EMBEDDINGS_FILE)
+    return _PT_CACHE
+
+
+async def _fetch_embedding_candidates(product: ProductInfo, top_k: int = 30) -> list[dict[str, Any]]:
+    """embedding 语义召回 top-k 候选 PT。"""
+    cache = _load_pt_embeddings()
+    if not cache:
+        return []
+    # query 文本: 优先 title + amazon 路径的叶子
+    q_parts = [product.title or ""]
+    if product.amazon_category_path:
+        q_parts.append(product.amazon_category_path)
+    if product.bullet_points:
+        q_parts.extend(product.bullet_points[:2])
+    query_text = "\n".join(p for p in q_parts if p)
+    if not query_text.strip():
+        return []
+
+    try:
+        query_vec = await embed_client.embed_one(query_text)
+    except Exception as e:  # noqa: BLE001
+        log.warning("query embedding 失败: %s", e)
+        return []
+
+    sims = embed_client.cosine_similarity(query_vec, cache["vectors"])
+    top_idx = np.argsort(-sims)[:top_k]
+
+    results: list[dict[str, Any]] = []
+    for i in top_idx:
+        meta = cache["pt_metadata"][i]
+        results.append({
+            "walmart_product_type": str(cache["pt_names"][i]),
+            "confidence": meta.get("confidence") or None,
+            "requires_certificate": bool(meta.get("requires_certificate")),
+            "zh_seller_forbidden": bool(meta.get("zh_seller_forbidden")),
+            "requirements": meta.get("requirements") or None,
+            "notes": None,
+            "amazon_category": str(cache["pt_context"][i]),
+            "match_type": "embedding",
+            "embedding_sim": float(sims[i]),
+        })
+    return results
 
 
 def _check_seed_excluded(product: ProductInfo, walmart_pt: str = "") -> str | None:
@@ -191,6 +264,30 @@ def _fetch_candidates(product: ProductInfo, limit: int = 10) -> list[dict[str, A
     return candidates[:limit]
 
 
+async def _fetch_candidates_hybrid(product: ProductInfo, *, embed_k: int = 20, kw_k: int = 10) -> list[dict[str, Any]]:
+    """Hybrid 候选召回: embedding 语义 top-k + 关键词反查 top-k, 合并去重。"""
+    embed_cands = await _fetch_embedding_candidates(product, top_k=embed_k)
+    kw_cands = _fetch_candidates(product, limit=kw_k)
+
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    # embedding 优先
+    for c in embed_cands:
+        key = c["walmart_product_type"]
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(c)
+    # 关键词补充
+    for c in kw_cands:
+        key = c["walmart_product_type"]
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(c)
+    return merged
+
+
 # =============================================================
 # LLM prompt
 # =============================================================
@@ -259,13 +356,16 @@ def _build_l1_user_prompt(product: ProductInfo, candidates: list[dict[str, Any]]
     if candidates:
         cand_lines = []
         for i, c in enumerate(candidates, 1):
+            sim_hint = ""
+            if c.get("match_type") == "embedding":
+                sim_hint = f" sim={c.get('embedding_sim', 0):.2f}"
             cand_lines.append(
                 f"  {i}. PT='{c['walmart_product_type']}' "
-                f"(conf={c.get('confidence') or '?'}, "
-                f"source_path='{c['amazon_category']}' [{c.get('match_type')}], "
+                f"[{c.get('match_type')}{sim_hint}] "
+                f"conf={c.get('confidence') or '?'}, "
                 f"need_cert={c.get('requires_certificate')}, "
-                f"zh_forbidden={c.get('zh_seller_forbidden')}, "
-                f"req='{(c.get('requirements') or '')[:60]}')"
+                f"zh_forbidden={c.get('zh_seller_forbidden')}"
+                + (f", req='{c['requirements'][:50]}'" if c.get("requirements") else "")
             )
         cand_txt = "\n".join(cand_lines)
     else:
@@ -305,8 +405,12 @@ Amazon 类目: {product.amazon_category_path or '(空)'}
 
 async def classify(product: ProductInfo, *, skip_llm: bool = False) -> L1Result:
     """L1 主入口 (必走 LLM, 除非 skip_llm=True 做快速 DB-only 测试)。"""
-    # 先拿候选
-    candidates = _fetch_candidates(product)
+    # 先拿候选: embedding 语义 top20 + 关键词 top10 合并
+    if skip_llm:
+        # DB-only 快速通道不走 embedding (避免 API 调用)
+        candidates = _fetch_candidates(product)
+    else:
+        candidates = await _fetch_candidates_hybrid(product)
 
     # seed yaml 叠加 (Amazon 路径/标题关键词硬禁)
     seed_reason = _check_seed_excluded(product)
