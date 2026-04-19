@@ -463,11 +463,72 @@ Amazon 类目: {product.amazon_category_path or '(空)'}
 # =============================================================
 
 
+def _try_direct_high_confidence(product: ProductInfo) -> L1Result | None:
+    """Layer 1 快速通道: 精确匹配 + 高置信度 + 唯一 → 直出 (跳过 LLM)。
+
+    返回 None 表示不满足条件, 需走完整 LLM 流程。
+    """
+    path = (product.amazon_category_path or "").strip()
+    if not path:
+        return None
+    with db_conn() as c:
+        with c.cursor() as cur:
+            # 只认 confidence='高', 且该 Amazon 路径只对应唯一 walmart_pt
+            cur.execute(
+                """
+                WITH hit AS (
+                    SELECT walmart_product_type, requires_certificate, zh_seller_forbidden, requirements,
+                           raw->>'walmart_category' AS walmart_category,
+                           raw->>'walmart_ptg' AS walmart_ptg
+                    FROM walmart_category_map
+                    WHERE amazon_category = %s AND confidence = '高'
+                )
+                SELECT *, (SELECT COUNT(DISTINCT walmart_product_type) FROM hit) AS cnt
+                FROM hit
+                LIMIT 1
+                """,
+                (path,),
+            )
+            row = cur.fetchone()
+            if not row or row.get("cnt", 0) != 1:
+                return None
+    return L1Result(
+        walmart_product_type=row["walmart_product_type"],
+        pt_confidence="高",
+        pt_source="map_direct_trusted",
+        requires_certificate=bool(row.get("requires_certificate")),
+        zh_seller_forbidden=bool(row.get("zh_seller_forbidden")),
+        requirements_text=row.get("requirements"),
+    )
+
+
 async def classify(product: ProductInfo, *, skip_llm: bool = False) -> L1Result:
-    """L1 主入口 (必走 LLM, 除非 skip_llm=True 做快速 DB-only 测试)。"""
-    # 先拿候选: embedding 语义 top20 + 关键词 top10 合并
+    """L1 主入口 (默认必走 LLM, 除非满足 Layer 1 高置信度快速通道或 skip_llm)。
+
+    流程:
+      1. Layer 1 快速通道: Amazon 路径精确命中 + 置信度='高' + 唯一 → 直出 (省 LLM 成本)
+      2. 其他情况: Embedding 语义 + 关键词反查 + 映射表候选 + LLM rerank (方案 C)
+    """
+    # Layer 1 高置信度快速通道 (50%+ 产品命中, 精度 >90%)
+    if not skip_llm:
+        fast = _try_direct_high_confidence(product)
+        if fast is not None:
+            # 仍需 seed yaml 兜底 (禁售品类即使映射表没标也要拦)
+            seed_reason = _check_seed_excluded(product, walmart_pt=fast.walmart_product_type)
+            if seed_reason and not fast.excluded_category_reason:
+                fast.excluded_category_reason = seed_reason
+                fast.hits.append(
+                    RuleHit(
+                        stage="L1",
+                        rule_code="excluded_category",
+                        penalty=-100,
+                        detail={"reason": seed_reason, "pt": fast.walmart_product_type, "from_seed_yaml": True},
+                    )
+                )
+            return fast
+
+    # Layer 2+3: 候选召回
     if skip_llm:
-        # DB-only 快速通道不走 embedding (避免 API 调用)
         candidates = _fetch_candidates(product)
     else:
         candidates = await _fetch_candidates_hybrid(product)

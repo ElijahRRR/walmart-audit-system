@@ -41,16 +41,50 @@ class ProductDetail:
 
     @classmethod
     def from_dmit(cls, raw: dict[str, Any]) -> "ProductDetail":
-        images = []
-        # DMIT 导出字段名 (见 amazon-scraper-v3/common/config.py: image_urls)
-        for u in raw.get("image_urls") or []:
+        images: list[dict[str, Any]] = []
+        img_raw = raw.get("image_urls") or []
+        # DMIT 返回的 image_urls 可能是 JSON string
+        if isinstance(img_raw, str):
+            import json as _json
+            try:
+                img_raw = _json.loads(img_raw)
+            except Exception:
+                img_raw = [u.strip() for u in img_raw.split(",") if u.strip().startswith("http")]
+        for u in img_raw or []:
             if isinstance(u, str):
                 images.append({"url": u, "is_main": len(images) == 0})
             elif isinstance(u, dict):
                 images.append({"url": u.get("url") or u.get("src"), "is_main": u.get("is_main", False)})
+
         bullets = raw.get("bullet_points") or raw.get("bullets") or []
         if isinstance(bullets, str):
-            bullets = [b.strip() for b in bullets.split("\n") if b.strip()]
+            # DMIT 返回的 bullet_points 常是用 \n 或 || 分隔的字符串
+            if "\n" in bullets:
+                bullets = [b.strip() for b in bullets.split("\n") if b.strip()]
+            elif "||" in bullets:
+                bullets = [b.strip() for b in bullets.split("||") if b.strip()]
+            else:
+                bullets = [bullets] if bullets.strip() else []
+
+        # category_tree 是 DMIT 里的 Amazon 分类路径字段 (实际字段名)
+        category_path = (
+            raw.get("category_tree")
+            or raw.get("category_path")
+            or raw.get("amazon_category_path")
+            or ""
+        )
+        # 如果是列表/JSON, 用 " > " 拼成单串
+        if isinstance(category_path, list):
+            category_path = " > ".join(str(x) for x in category_path if x)
+        elif isinstance(category_path, str) and category_path.startswith("["):
+            import json as _json
+            try:
+                arr = _json.loads(category_path)
+                if isinstance(arr, list):
+                    category_path = " > ".join(str(x) for x in arr if x)
+            except Exception:
+                pass
+
         return cls(
             asin=raw.get("asin") or raw.get("ASIN") or "",
             title=raw.get("title"),
@@ -59,7 +93,7 @@ class ProductDetail:
             bullet_points=list(bullets),
             long_description=raw.get("long_description") or raw.get("description"),
             image_urls=images,
-            amazon_category_path=raw.get("category_path") or raw.get("amazon_category_path"),
+            amazon_category_path=category_path,
             raw=raw,
         )
 
@@ -121,33 +155,29 @@ class DMITClient:
             return False
 
     async def fetch_asin_detail(self, asin: str) -> ProductDetail | None:
-        """按 ASIN 拉单个产品详情。
+        """按 ASIN 拉单个产品详情 (DMIT amazon-scraper-v3 的 GET /api/results/{asin})。
 
-        尝试两个可能的端点(以 DMIT server 实际提供的为准):
-          1. GET /api/products/{asin}
-          2. GET /api/asin?asin={asin}
-        都不存在则返回 None, 由调用方处理(一般 M1 smoke test 会发现)。
+        返回 {data: {asin, title, brand, bullet_points, long_description, image_urls,
+                     category_tree, ...}, changes: [...]}
+
+        未采集过返回 None (server 返回 404 或 data 为空)。
         """
-        candidates = [
-            ("GET", f"/api/products/{asin}", {}),
-            ("GET", "/api/asin", {"params": {"asin": asin}}),
-        ]
-        for method, path, kwargs in candidates:
-            try:
-                resp = await self._request(method, path, **kwargs)
-            except Exception as e:
-                log.debug("DMIT %s %s failed: %s", method, path, e)
-                continue
-            if resp.status_code == 200:
-                data = resp.json()
-                # 有些 API 把数据包在 data 字段里
-                if isinstance(data, dict) and "data" in data and isinstance(data["data"], dict):
-                    data = data["data"]
-                return ProductDetail.from_dmit(data)
-            if resp.status_code == 404:
-                continue
-            log.warning("DMIT %s %s returned %s: %s", method, path, resp.status_code, resp.text[:200])
-        return None
+        try:
+            resp = await self._request("GET", f"/api/results/{asin}")
+        except Exception as e:  # noqa: BLE001
+            log.warning("DMIT fetch %s failed: %s", asin, e)
+            return None
+        if resp.status_code == 404:
+            return None
+        if resp.status_code != 200:
+            log.warning("DMIT /api/results/%s returned %s: %s", asin, resp.status_code, resp.text[:200])
+            return None
+        body = resp.json()
+        # server 返回形如 {"data": {...}, "changes": [...]}
+        data = body.get("data") if isinstance(body, dict) else body
+        if not data:
+            return None
+        return ProductDetail.from_dmit(data)
 
     async def fetch_asin_details_batch(
         self, asins: list[str], concurrency: int = 20
