@@ -9,7 +9,7 @@
       "config / integrations / sync / pipelines / cli / tests / db 子目录存在",
       "README.md 和 .gitignore 存在"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": 2,
@@ -21,7 +21,7 @@
       ".env.example 存在且含 DATABASE_URL / DMIT_BASE_URL / DASHSCOPE_API_KEY / 运行参数",
       "config/settings.py 可被 import 且 get_settings() 返回 Settings 实例"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": 3,
@@ -34,7 +34,7 @@
       "psql -d walmart_audit -f db/schema.sql 无错误",
       "\\dt 能看到 blacklist_brands / walmart_category_map / products / audit_runs / audit_hits / violation_groundtruth / sync_runs 共 7 张表"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": 4,
