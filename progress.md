@@ -2,9 +2,9 @@
 
 ## Current Status
 - Total: 27 features
-- Passing: 5 / 27 (18.5%)
-- Completed milestones: M0, M1 (部分, F6 待 DASHSCOPE_API_KEY 验证)
-- Current: 等用户填 .env 后验 F6 LLM ping, 同步推进 M2 同步层
+- Passing: 7 / 27 (26%)
+- Completed: M0 全, M1 (F4/F5, F6 待 key), M2 (F8/F9, F7 后台跑)
+- Current: 推进 M4 L2 硬规则 (不依赖 LLM), 等 F7 后台和 .env 配置
 
 ## Session Log
 
@@ -33,4 +33,17 @@
   公司名称 | 品牌名 | Serial Number | 注册号 | 状态 | Nice编号 |
   Nice类目(中) | Nice类目(英) | 商品/服务描述 | 入库日期
 
-**下一步**: 进 M2 同步层 (F7/F8/F9)
+**M2 同步层 (大部完成)**
+- F7 黑名单品牌 ⏳ 后台跑中 (126130 行, 预计 15 分钟)
+- F8 类目映射 ✅ 6832 条 (3207 forbidden / 3625 allowed / 2954 need_cert)
+  - 修 bug: "中国卖家可做" 实际值是 "是/否" 不是 "可做/OK"
+- F9 合规回测样本 ✅ 4.18-4.19 两天 → 18603 条违规样本:
+  - forbidden_cat 17755 (Prohibited Product Policy)
+  - flagged_internal 761 (内部标记)
+  - offensive 82
+  - needs_cert 4 (CPSC Recall)
+
+**重要反转**: 原以为日表 95% 是运营错误, 实际 73% 是合规违规
+(因为 "Prohibited Product Policy" 就是沃尔玛真正的合规违规关键词)
+
+**下一步**: M4 L2 硬规则 (纯 DB 逻辑, 不依赖 LLM)

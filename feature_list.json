@@ -100,7 +100,7 @@
       "upsert 到 walmart_category_map 表",
       "SELECT COUNT(*) FROM walmart_category_map >= 1"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": 9,
@@ -114,7 +114,7 @@
       "落 violation_groundtruth 表, reason_category 自动打标",
       "SELECT COUNT(*) FROM violation_groundtruth >= 1"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": 10,
