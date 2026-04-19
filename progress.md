@@ -2,9 +2,10 @@
 
 ## Current Status
 - Total: 27 features
-- Passing: 7 / 27 (26%)
-- Completed: M0 全, M1 (F4/F5, F6 待 key), M2 (F8/F9, F7 后台跑)
-- Current: 推进 M4 L2 硬规则 (不依赖 LLM), 等 F7 后台和 .env 配置
+- Passing: 14 / 27 (52%)
+- Completed: M0 全, M1 (F4/F5), M2 (F7/F8/F9), M3 (F10/F12), M4 (F13-F17)
+- Blocked (等 .env DASHSCOPE_API_KEY): F6 LLM 真实 ping, F11 L1 LLM fallback, M5 全部, M6 全部
+- Tests: 9/9 passing (tests/test_l1_l2.py)
 
 ## Session Log
 
@@ -46,4 +47,34 @@
 **重要反转**: 原以为日表 95% 是运营错误, 实际 73% 是合规违规
 (因为 "Prohibited Product Policy" 就是沃尔玛真正的合规违规关键词)
 
-**下一步**: M4 L2 硬规则 (纯 DB 逻辑, 不依赖 LLM)
+**M2 同步层 ✅ 全部完成**
+- F7 黑名单品牌: 126130 行 → 18233 唯一品牌 (378s)
+- F8 类目映射: 6832 条 (3207 forbidden / 3625 allowed / 2954 need_cert)
+- F9 合规回测: 18603 条违规样本 (forbidden_cat 17755 / flagged_internal 761 / offensive 82 / needs_cert 4)
+
+**M3 L1 类目判定 ✅ 部分完成 (F10/F12)**
+- F10 映射表直出: 精确匹配 + LIKE 前缀匹配, 置信度优先
+- F12 seed yaml 禁售: 3C/服饰/汽配/带电产品, scope=walmart_pt/amazon_category/title_keyword
+- F11 LLM fallback: 代码 stub 留位, 待 DASHSCOPE_API_KEY 验证
+
+**M4 L2 硬规则 ✅ 全部完成**
+- R1 brand 黑名单: exact + word-boundary 包含匹配 (解决 Silhouette America 问题)
+- R2 title/desc 黑名单: word-boundary 正则, -30/次去重
+- R3 类目硬禁: 去重 L1 excluded_category
+- R4 需证书: 携带 requirements 字段
+- R5 USPTO LIVE 商标: JOIN trademarks + status_code_mapping, 大小写 4 变体查询
+
+**关键 bug fix**:
+- L1 hits 的 penalty 不再丢失, evaluate() 继承进 L2 score_final
+- brand 子串匹配 (R1) 覆盖 "Silhouette America" → blacklist "Silhouettes"
+
+**端到端 5 案例验证**:
+| ASIN | verdict | score | 命中规则 |
+|------|---------|-------|----------|
+| Nike Air Max | reject | -300 | 服饰禁 + brand黑 + title黑 + LIVE商标 |
+| LEGO Compatible | reject | -200 | 类目禁 + 需证 + LIVE商标 |
+| Power Bank | reject |  -80 | 带电禁 + LIVE商标 |
+| Silhouette America | reject | -30 | title黑 + LIVE商标 |
+| Bird Feeder (正常) | reject |  20 | LIVE商标 (通用词误报-待L3修正) |
+
+**下一步**: 等 .env DASHSCOPE_API_KEY → F6 ping / F11 L1 LLM / M5 L3 / M6 L4

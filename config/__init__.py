@@ -1,4 +1,4 @@
 """Project-wide configuration."""
-from .settings import Settings, get_settings
+from .settings import ROOT, Settings, get_settings
 
-__all__ = ["Settings", "get_settings"]
+__all__ = ["ROOT", "Settings", "get_settings"]

@@ -73,7 +73,8 @@
       "tenacity 重试 3 次, 指数退避 1s/2s/4s",
       "单测 qwen-plus 返回 hello world"
     ],
-    "passes": false
+    "passes": false,
+    "blocker": "\u5f85\u7528\u6237\u586b .env.DASHSCOPE_API_KEY \u540e\u9a8c\u771f\u5b9e ping"
   },
   {
     "id": 7,
@@ -86,7 +87,7 @@
       "upsert 到 blacklist_brands 表",
       "SELECT COUNT(*) FROM blacklist_brands >= 1"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": 8,
@@ -127,7 +128,7 @@
       "若 confidence=高 直接返回 walmart_product_type, 不调 LLM",
       "手工验证 3 个已知 Amazon 类目能映射正确"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": 11,
@@ -139,7 +140,8 @@
       "LLM 输出 JSON 且包含 walmart_product_type / confidence / source / requires_certificate / zh_seller_forbidden",
       "20 ASIN 样本准确率 ≥ 90%"
     ],
-    "passes": false
+    "passes": false,
+    "blocker": "\u7b49 F6 LLM \u5ba2\u6237\u7aef\u9a8c\u8bc1\u901a\u8fc7 \u2192 \u9700 .env.DASHSCOPE_API_KEY"
   },
   {
     "id": 12,
@@ -151,7 +153,7 @@
       "3C / 服饰 / 汽配 / 带电产品 被正确识别",
       "识别为禁售 → 写 audit_hits stage=L1 rule_code=excluded_category penalty=-100"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": 13,
@@ -163,7 +165,7 @@
       "products.brand ∈ blacklist_brands 触发 -100",
       "hit 写到 audit_hits rule_code=brand_blacklist"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": 14,
@@ -176,7 +178,7 @@
       "hit 写到 audit_hits rule_code=title_desc_blacklist, detail.matches[] 列全",
       "单测 B013PWA1OO (Silhouette America) 能触发, 扣分 ≥ 30"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": 15,
@@ -187,7 +189,7 @@
       "walmart_category_map.zh_seller_forbidden=TRUE 或 L1 标记 excluded_category 触发 -100",
       "hit 写到 audit_hits rule_code=cat_forbid_zh_seller"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": 16,
@@ -199,7 +201,7 @@
       "hit.detail 含 requirements 字段 (所需证书清单)",
       "rule_code=cat_requires_cert"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": 17,
@@ -212,7 +214,8 @@
       "每次命中 -20",
       "rule_code=trademark_live, detail.matched_marks[]"
     ],
-    "passes": false
+    "passes": true,
+    "note": "uspto.trademarks JOIN status_code_mapping live_dead='LIVE' \u5df2\u63a5\u901a; \u901a\u7528\u8bcd (Garden/Bird/Feeder) \u4e5f\u4f1a\u8bef\u547d\u4e2d, \u5f85 L3 LLM \u6821\u6b63"
   },
   {
     "id": 18,
