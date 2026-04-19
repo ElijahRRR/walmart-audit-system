@@ -264,8 +264,12 @@ def _fetch_candidates(product: ProductInfo, limit: int = 10) -> list[dict[str, A
     return candidates[:limit]
 
 
-async def _fetch_candidates_hybrid(product: ProductInfo, *, embed_k: int = 20, kw_k: int = 10) -> list[dict[str, Any]]:
-    """Hybrid 候选召回: embedding 语义 top-k + 关键词反查 top-k, 合并去重。"""
+async def _fetch_candidates_hybrid(product: ProductInfo, *, embed_k: int = 40, kw_k: int = 15) -> list[dict[str, Any]]:
+    """Hybrid 候选召回: embedding 语义 top-k + 关键词反查 top-k, 合并去重。
+
+    扩大 embed_k 到 40 (原 20) + kw_k 到 15 (原 10) 覆盖更广, 合计 ≤ 55 候选。
+    再用 title 显式关键词(如 "furnace"/"filter") 反查 walmart_product_type 做第三路补充。
+    """
     embed_cands = await _fetch_embedding_candidates(product, top_k=embed_k)
     kw_cands = _fetch_candidates(product, limit=kw_k)
 
@@ -285,6 +289,42 @@ async def _fetch_candidates_hybrid(product: ProductInfo, *, embed_k: int = 20, k
             continue
         seen.add(key)
         merged.append(c)
+
+    # 第三路: title 的关键名词 直接 ILIKE 反查 walmart_product_type (确保字面包含的词命中字典)
+    title_words = [w for w in (product.title or "").split()
+                   if 4 <= len(w.strip("., #-&/()")) <= 30]
+    clean_words = [w.strip("., #-&/()").lower() for w in title_words[:8]]
+    clean_words = [w for w in clean_words if w and w not in {"with", "from", "your", "this", "that",
+                                                              "have", "will", "been", "these", "their"}]
+    if clean_words:
+        patterns = [f"%{w}%" for w in clean_words]
+        with db_conn() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT walmart_product_type, confidence,
+                           requires_certificate, zh_seller_forbidden, requirements, notes
+                    FROM (
+                        SELECT DISTINCT ON (walmart_product_type)
+                               walmart_product_type, confidence,
+                               requires_certificate, zh_seller_forbidden, requirements, notes,
+                               CASE confidence WHEN '高' THEN 0 WHEN '中' THEN 1 WHEN '低' THEN 2 ELSE 3 END AS _rank
+                        FROM walmart_category_map
+                        WHERE walmart_product_type ILIKE ANY(%s)
+                        ORDER BY walmart_product_type, _rank
+                    ) t
+                    ORDER BY _rank
+                    LIMIT 10
+                    """,
+                    (patterns,),
+                )
+                for row in cur.fetchall():
+                    key = row["walmart_product_type"]
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    merged.append({**dict(row), "match_type": "title_literal", "amazon_category": "", "notes": None})
+
     return merged
 
 
@@ -296,21 +336,41 @@ async def _fetch_candidates_hybrid(product: ProductInfo, *, embed_k: int = 20, k
 L1_SYSTEM_PROMPT = """你是沃尔玛 Marketplace 类目判定专家。判定 Amazon 商品对应的沃尔玛 Product Type (PT)。
 输入来自中国搬运卖家, 无证书/认证, 每日数万产品。
 
-# 输出格式的强约束 (不遵守将被视为错误)
+# 核心原则 (优先级从高到低, 前者决定后者)
 
-- `walmart_product_type` **必须是沃尔玛标准 PT 名**, 格式如:
-  ✅ "Flagpole Brackets & Mounts"
-  ✅ "Candle Holders"
-  ✅ "Keychains"
-  ✅ "Laundry Baskets, Sorters & Hampers"
-  ✅ "Automotive Filter Wrenches"
-  ❌ "Sports & Outdoors > Outdoor Recreation > ..." (类目路径, 错!)
-  ❌ "Craft Supplies & Tools" (过于宽泛的大类)
-  ❌ "Craft_Cutting_Machine" (下划线命名不是沃尔玛格式)
+## (1) Amazon 类目路径是权威指引
+
+如果产品提供了 Amazon 类目路径(如 "Automotive > Replacement Parts > Fuel System > Fittings"),
+必须**坚守该路径的分类维度**。
+
+举例:
+  - Amazon 是 "Automotive > Fuel System > ..."  → 必须选 Automotive / Fuel 系列的 PT
+    (不要跨去 Gas Line Connectors 这种偏家用天然气的 PT)
+  - Amazon 是 "Sports & Outdoors > Outdoor > Bird..." → 优先选 Garden & Patio 系列
+  - Amazon 是 "Toys & Games > ..."                → 优先选 Toys 系列
+
+**即使标题里有跨维度的关键词, Amazon 路径的分类视角必须坚守。**
+标题"Fuel Line Quick Connector for Yamaha Outboard Motor" + Amazon 路径"Automotive > Fuel System"
+→ 选 Fuel Tank & Line Repairs / Fuel Injection Accessories & Parts 这种 Automotive Fuel 系列
+→ **不要**因为"Line Connector"字面像"Gas Line Connectors"就选家用燃气类
+
+## (2) 必须从候选列表中选 (不能自造 PT 名)
+
+**walmart_product_type 必须是下面候选列表中某一条的原文**, 禁止输出字典里不存在的 PT (否则上架沃尔玛会失败)。
+
+选择规则:
+- 候选中有明显契合的 → pt_source='map_verified', **原样复制候选的 walmart_product_type 字段**
+- 候选中没有完全契合但有可选的最接近 → pt_source='llm_direct', 仍然**从候选中挑最接近的原文**
+- 若 30 个候选里没一个合理 → walmart_product_type='unknown', pt_confidence='低', pt_source='llm_direct'
+  (这种产品会后续人工处理)
+
+## (3) PT 名格式强约束
+
+- ✅ "Flagpole Brackets & Mounts"、"Candle Holders"、"Automotive Filter Wrenches"
+- ❌ "Sports & Outdoors > Outdoor > ..." (类目路径格式不是 PT 名, 禁止)
+- ❌ "Craft Supplies & Tools" (过于宽泛的大类, 避免)
+- ❌ "Craft_Cutting_Machine" (下划线命名不是沃尔玛格式, 禁止)
 - 长度一般 2-6 个英文单词, 可含 "&" ","
-- **优先从候选列表中选** (直接抄写候选的 walmart_product_type 原文), 只有候选明显都不对时才自由给出
-- 若候选中有契合度高的 → pt_source='map_verified', walmart_product_type 必须**原样复制**候选的该字段值
-- 候选都不对 → pt_source='llm_direct', 你输出一个符合沃尔玛格式的 PT 名
 
 # 禁售品类 (严格定义, 不要扩展)
 
