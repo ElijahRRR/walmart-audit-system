@@ -1,0 +1,45 @@
+[project]
+name = "walmart-audit-preflight"
+version = "0.1.0"
+description = "沃尔玛商品预审系统 (L1 类目 / L2 硬规则 / L3 LLM 语义 / L4 LLM 视觉)"
+requires-python = ">=3.11"
+readme = "README.md"
+dependencies = [
+    "httpx>=0.27",
+    "asyncpg>=0.29",
+    "psycopg[binary]>=3.2",
+    "openai>=1.50",
+    "python-dotenv>=1.0",
+    "tenacity>=9.0",
+    "PyYAML>=6.0",
+    "pydantic>=2.8",
+    "typer>=0.12",
+    "rich>=13.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "black>=24.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["config", "integrations", "sync", "pipelines", "cli"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.black]
+line-length = 120
+target-version = ["py311"]

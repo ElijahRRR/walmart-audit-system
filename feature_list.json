@@ -1,0 +1,337 @@
+[
+  {
+    "id": 1,
+    "milestone": "M0",
+    "category": "infrastructure",
+    "description": "项目目录骨架建立",
+    "steps": [
+      "/Users/nextderboy/Projects/新审核系统 目录存在",
+      "config / integrations / sync / pipelines / cli / tests / db 子目录存在",
+      "README.md 和 .gitignore 存在"
+    ],
+    "passes": false
+  },
+  {
+    "id": 2,
+    "milestone": "M0",
+    "category": "infrastructure",
+    "description": "Python 项目配置",
+    "steps": [
+      "pyproject.toml 存在且包含 httpx/asyncpg/openai/tenacity/PyYAML/typer 依赖",
+      ".env.example 存在且含 DATABASE_URL / DMIT_BASE_URL / DASHSCOPE_API_KEY / 运行参数",
+      "config/settings.py 可被 import 且 get_settings() 返回 Settings 实例"
+    ],
+    "passes": false
+  },
+  {
+    "id": 3,
+    "milestone": "M0",
+    "category": "infrastructure",
+    "description": "DB schema + 建库 walmart_audit",
+    "steps": [
+      "db/schema.sql 存在",
+      "createdb walmart_audit 成功",
+      "psql -d walmart_audit -f db/schema.sql 无错误",
+      "\\dt 能看到 blacklist_brands / walmart_category_map / products / audit_runs / audit_hits / violation_groundtruth / sync_runs 共 7 张表"
+    ],
+    "passes": false
+  },
+  {
+    "id": 4,
+    "milestone": "M1",
+    "category": "integration",
+    "description": "DMIT 客户端封装",
+    "steps": [
+      "integrations/dmit_client.py 存在",
+      "提供 async fetch_asin_detail(asin) -> ProductDetail 函数",
+      "能对未响应/超时重试 3 次",
+      "手工跑单测可拉回 1 个 ASIN 的真实详情"
+    ],
+    "passes": false
+  },
+  {
+    "id": 5,
+    "milestone": "M1",
+    "category": "integration",
+    "description": "Lark 客户端封装",
+    "steps": [
+      "integrations/lark_client.py 存在",
+      "提供 list_sheets / read_range / find_cells 等 subprocess 包装",
+      "手工跑单测可读飞书 sheet YlA1szPAAhW7CCtmG5hcp6vkndd 的表头"
+    ],
+    "passes": false
+  },
+  {
+    "id": 6,
+    "milestone": "M1",
+    "category": "integration",
+    "description": "LLM 客户端封装 (qwen-plus + qwen-vl-plus)",
+    "steps": [
+      "integrations/llm_client.py 存在",
+      "提供 async chat(messages) 和 async vision(images, prompt)",
+      "asyncio.Semaphore(100) 控制并发",
+      "tenacity 重试 3 次, 指数退避 1s/2s/4s",
+      "单测 qwen-plus 返回 hello world"
+    ],
+    "passes": false
+  },
+  {
+    "id": 7,
+    "milestone": "M2",
+    "category": "sync",
+    "description": "同步黑名单品牌",
+    "steps": [
+      "sync/sync_blacklist_brands.py 存在",
+      "能从飞书 wiki UhZJw3EtsiFN9skbG0Ac24Dgn4b 的「黑名单品牌」子表拉全量",
+      "upsert 到 blacklist_brands 表",
+      "SELECT COUNT(*) FROM blacklist_brands >= 1"
+    ],
+    "passes": false
+  },
+  {
+    "id": 8,
+    "milestone": "M2",
+    "category": "sync",
+    "description": "同步类目映射",
+    "steps": [
+      "sync/sync_category_map.py 存在",
+      "能从飞书 wiki UKdZwr7JqiO6UckjSnPcwTCgnvd 拉类目映射",
+      "正确解析 confidence / requires_certificate / zh_seller_forbidden 三个字段",
+      "upsert 到 walmart_category_map 表",
+      "SELECT COUNT(*) FROM walmart_category_map >= 1"
+    ],
+    "passes": false
+  },
+  {
+    "id": 9,
+    "milestone": "M2",
+    "category": "sync",
+    "description": "同步合规违规回测样本",
+    "steps": [
+      "sync/sync_violation_daily.py 存在",
+      "能抓最新日表（如 2026.4.19问题商品）",
+      "关键词过滤出「合规相关」子集: flagged by internal team / trademark / IP / copyright / patent / counterfeit / offensive",
+      "落 violation_groundtruth 表, reason_category 自动打标",
+      "SELECT COUNT(*) FROM violation_groundtruth >= 1"
+    ],
+    "passes": false
+  },
+  {
+    "id": 10,
+    "milestone": "M3",
+    "category": "pipeline_l1",
+    "description": "L1 类目判定 - 映射表直出",
+    "steps": [
+      "pipelines/l1_category.py 存在",
+      "查 walmart_category_map 做精确/前缀匹配",
+      "若 confidence=高 直接返回 walmart_product_type, 不调 LLM",
+      "手工验证 3 个已知 Amazon 类目能映射正确"
+    ],
+    "passes": false
+  },
+  {
+    "id": 11,
+    "milestone": "M3",
+    "category": "pipeline_l1",
+    "description": "L1 类目判定 - LLM fallback",
+    "steps": [
+      "映射表 miss 或低置信度时调 qwen-plus",
+      "LLM 输出 JSON 且包含 walmart_product_type / confidence / source / requires_certificate / zh_seller_forbidden",
+      "20 ASIN 样本准确率 ≥ 90%"
+    ],
+    "passes": false
+  },
+  {
+    "id": 12,
+    "milestone": "M3",
+    "category": "pipeline_l1",
+    "description": "L1 禁售品类识别",
+    "steps": [
+      "db/seed/forbidden_categories_zh_seller.yaml 能被读取",
+      "3C / 服饰 / 汽配 / 带电产品 被正确识别",
+      "识别为禁售 → 写 audit_hits stage=L1 rule_code=excluded_category penalty=-100"
+    ],
+    "passes": false
+  },
+  {
+    "id": 13,
+    "milestone": "M4",
+    "category": "pipeline_l2",
+    "description": "L2 R1 品牌命中黑名单",
+    "steps": [
+      "pipelines/l2_rules.py 存在",
+      "products.brand ∈ blacklist_brands 触发 -100",
+      "hit 写到 audit_hits rule_code=brand_blacklist"
+    ],
+    "passes": false
+  },
+  {
+    "id": 14,
+    "milestone": "M4",
+    "category": "pipeline_l2",
+    "description": "L2 R2 标题/描述命中黑名单",
+    "steps": [
+      "word-boundary 正则匹配 title/description/bullet_points 中的黑名单品牌",
+      "每次命中 -30, 多次可累加",
+      "hit 写到 audit_hits rule_code=title_desc_blacklist, detail.matches[] 列全",
+      "单测 B013PWA1OO (Silhouette America) 能触发, 扣分 ≥ 30"
+    ],
+    "passes": false
+  },
+  {
+    "id": 15,
+    "milestone": "M4",
+    "category": "pipeline_l2",
+    "description": "L2 R3 类目硬禁",
+    "steps": [
+      "walmart_category_map.zh_seller_forbidden=TRUE 或 L1 标记 excluded_category 触发 -100",
+      "hit 写到 audit_hits rule_code=cat_forbid_zh_seller"
+    ],
+    "passes": false
+  },
+  {
+    "id": 16,
+    "milestone": "M4",
+    "category": "pipeline_l2",
+    "description": "L2 R4 需证书",
+    "steps": [
+      "walmart_category_map.requires_certificate=TRUE 触发 -100",
+      "hit.detail 含 requirements 字段 (所需证书清单)",
+      "rule_code=cat_requires_cert"
+    ],
+    "passes": false
+  },
+  {
+    "id": 17,
+    "milestone": "M4",
+    "category": "pipeline_l2",
+    "description": "L2 R5 命中他人 LIVE 商标",
+    "steps": [
+      "对接 uspto DB 的 LIVE 商标表",
+      "title/description 中的大写词/短语被正则提取做反查",
+      "每次命中 -20",
+      "rule_code=trademark_live, detail.matched_marks[]"
+    ],
+    "passes": false
+  },
+  {
+    "id": 18,
+    "milestone": "M5",
+    "category": "pipeline_l3",
+    "description": "L3 LLM 语义审核 - prompt + 解析",
+    "steps": [
+      "pipelines/l3_llm.py 存在",
+      "prompt 按 plan 6 个判定任务构造",
+      "JSON 输出: verdict/reason_category/reason_text/blacklist_brand_verdict/llm_confidence",
+      "异常 JSON 降级处理 (重试/记录 raw_response)"
+    ],
+    "passes": false
+  },
+  {
+    "id": 19,
+    "milestone": "M5",
+    "category": "pipeline_l3",
+    "description": "L3 并发 100 + 重试压测",
+    "steps": [
+      "asyncio.Semaphore(100) 生效",
+      "500 产品批跑, 429 错误率 <3%",
+      "平均耗时 ≤ 10 分钟"
+    ],
+    "passes": false
+  },
+  {
+    "id": 20,
+    "milestone": "M5",
+    "category": "pipeline_l3",
+    "description": "L3 回测已知合规违规案例",
+    "steps": [
+      "B0018A1QVI (bear spray) L3 输出 verdict=reject, reason_category 属于 weapons_melee/self_defense 语义",
+      "family/bear 这类通用词不被误判为品牌侵权"
+    ],
+    "passes": false
+  },
+  {
+    "id": 21,
+    "milestone": "M6",
+    "category": "pipeline_l4",
+    "description": "L4 视觉审核 - prompt + 输出解析",
+    "steps": [
+      "pipelines/l4_vision.py 存在",
+      "调 qwen-vl-plus, 检测 8 类 (logo/商标符号/卡通/运动队/汽车/冒犯/专利/non-blacklist logo)",
+      "输出 JSON: verdict/image_issues[]"
+    ],
+    "passes": false
+  },
+  {
+    "id": 22,
+    "milestone": "M6",
+    "category": "pipeline_l4",
+    "description": "L4 图片限流 + 并发 + 重试",
+    "steps": [
+      "每产品只跑 首图+4 = 5 张",
+      "Semaphore(100) + tenacity retry 3",
+      "500 产品*5 图批跑完成, 429 率 <5%"
+    ],
+    "passes": false
+  },
+  {
+    "id": 23,
+    "milestone": "M6",
+    "category": "pipeline_l4",
+    "description": "L4 回测已知大牌 logo 案例",
+    "steps": [
+      "选 2-3 个含 Nike/LEGO/迪士尼 图片的 ASIN 能被判 reject",
+      "非黑名单小品牌 logo 判 pass 但标记 detail.logo_non_blacklist=true"
+    ],
+    "passes": false
+  },
+  {
+    "id": 24,
+    "milestone": "M7",
+    "category": "orchestrator",
+    "description": "编排 L1→L4",
+    "steps": [
+      "pipelines/orchestrator.py 串联 L1→L4",
+      "L2 reject 不进 L3; L3 reject 不进 L4",
+      "每 stage 落 audit_hits, 最终 audit_runs.verdict/score_final/stage_stopped_at 完整"
+    ],
+    "passes": false
+  },
+  {
+    "id": 25,
+    "milestone": "M7",
+    "category": "cli",
+    "description": "CLI audit_asin_list",
+    "steps": [
+      "cli/audit_asin_list.py 存在, 支持 --input asins.csv --out result.csv",
+      "100 ASIN 端到端跑通",
+      "输出每行: asin, verdict, score_final, stage, reason"
+    ],
+    "passes": false
+  },
+  {
+    "id": 26,
+    "milestone": "M8",
+    "category": "backtest",
+    "description": "backtest_daily 评估脚本",
+    "steps": [
+      "cli/backtest_daily.py 存在, 支持 --date --limit",
+      "从 violation_groundtruth 抽样跑预审",
+      "输出 precision / recall / 泄漏率 / 分类混淆矩阵"
+    ],
+    "passes": false
+  },
+  {
+    "id": 27,
+    "milestone": "M8",
+    "category": "backtest",
+    "description": "M8 泄漏率 ≤ 5%",
+    "steps": [
+      "ground truth 子集 ≥ 100 条",
+      "泄漏率 ≤ 5%",
+      "precision ≥ 70%",
+      "输出 docs/backtest_report.md 含不匹配案例清单"
+    ],
+    "passes": false
+  }
+]

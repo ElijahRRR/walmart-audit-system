@@ -1,0 +1,63 @@
+# 中国卖家禁售 / 本系统主动排除的品类
+# 作为 L1 fallback: 若 walmart_category_map 没覆盖,用此文件硬挡
+# 每条匹配 walmart_product_type 或 amazon_category_path 的子串(大小写不敏感)
+
+version: 1
+updated: 2026-04-19
+
+excluded_categories:
+  # --- 3C 电子 ---
+  - match: "Consumer Electronics"
+    scope: amazon_category
+    reason: 3C 禁售
+  - match: "Laptops"
+    scope: walmart_pt
+    reason: 3C 禁售
+  - match: "Headphones"
+    scope: walmart_pt
+    reason: 3C 禁售
+  - match: "Smartwatches"
+    scope: walmart_pt
+    reason: 3C 禁售
+  - match: "Cell Phone"
+    scope: walmart_pt
+    reason: 3C 禁售
+  - match: "Tablets"
+    scope: walmart_pt
+    reason: 3C 禁售
+
+  # --- 服饰 ---
+  - match: "Clothing"
+    scope: amazon_category
+    reason: 服饰禁售
+  - match: "Apparel"
+    scope: walmart_pt
+    reason: 服饰禁售
+  - match: "Shoes"
+    scope: amazon_category
+    reason: 服饰禁售(鞋)
+
+  # --- 汽配 ---
+  - match: "Automotive Parts"
+    scope: walmart_pt
+    reason: 汽配禁售
+  - match: "Auto Parts"
+    scope: amazon_category
+    reason: 汽配禁售
+  - match: "Car Accessories"
+    scope: walmart_pt
+    reason: 汽配禁售
+
+  # --- 带电产品 ---
+  - match: "Battery"
+    scope: title_keyword
+    reason: 带电产品禁售
+  - match: "Rechargeable"
+    scope: title_keyword
+    reason: 带电产品禁售
+  - match: "Lithium"
+    scope: title_keyword
+    reason: 带电产品禁售
+  - match: "Power Bank"
+    scope: walmart_pt
+    reason: 带电产品禁售
