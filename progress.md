@@ -2,10 +2,11 @@
 
 ## Current Status
 - Total: 27 features
-- Passing: 14 / 27 (52%)
+- Passing: 15 / 27 (56%)
 - Completed: M0 全, M1 (F4/F5), M2 (F7/F8/F9), M3 (F10/F12), M4 (F13-F17)
-- Blocked (等 .env DASHSCOPE_API_KEY): F6 LLM 真实 ping, F11 L1 LLM fallback, M5 全部, M6 全部
-- Tests: 9/9 passing (tests/test_l1_l2.py)
+- M7 orchestrator + CLI 骨架完成 (L1+L2 端到端, L3/L4 占位)
+- Blocked (等 .env DASHSCOPE_API_KEY): F6 LLM 真实 ping, F11 L1 LLM fallback, M5/M6/M8 完整
+- Tests: 12 个 (11 passed, 1 skipped)
 
 ## Session Log
 
@@ -77,4 +78,17 @@
 | Silhouette America | reject | -30 | title黑 + LIVE商标 |
 | Bird Feeder (正常) | reject |  20 | LIVE商标 (通用词误报-待L3修正) |
 
-**下一步**: 等 .env DASHSCOPE_API_KEY → F6 ping / F11 L1 LLM / M5 L3 / M6 L4
+**M7 orchestrator + CLI 骨架 ✅ (F24/F25 待 L3/L4 接入后完整 pass)**
+- pipelines/orchestrator.py: audit_one / audit_batch / upsert_product / _persist_run
+  - L1 → L2 完整链路
+  - L3/L4 占位 (enable_llm=True 时 log.warning 但不中断)
+  - audit_runs + audit_hits DB 落表 verified
+- cli/audit_asin_list.py: CSV in → CSV out, 含 reason_summary
+- 5 ASIN 端到端: 1 pass / 4 reject, 落表 verified
+
+**端到端 DB 验证** (5 ASIN 跑完后):
+- audit_runs: 5 条 (C1-C5)
+- audit_hits: 10 条 (stage=L1/L2 正确分桶)
+- products: 5 条 (upsert_product 正常)
+
+**下一步**: 等 .env DASHSCOPE_API_KEY → F6 ping / F11 L1 LLM / M5 L3 / M6 L4 / M8 回测
