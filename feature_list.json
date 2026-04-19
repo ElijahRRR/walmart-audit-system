@@ -47,7 +47,7 @@
       "能对未响应/超时重试 3 次",
       "手工跑单测可拉回 1 个 ASIN 的真实详情"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": 5,
@@ -59,7 +59,7 @@
       "提供 list_sheets / read_range / find_cells 等 subprocess 包装",
       "手工跑单测可读飞书 sheet YlA1szPAAhW7CCtmG5hcp6vkndd 的表头"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": 6,
