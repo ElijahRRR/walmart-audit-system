@@ -17,8 +17,8 @@ from typing import Any
 
 from sync._common import db_conn, to_jsonb
 
-from . import l1_category, l2_rules
-from .models import AuditOutcome, L1Result, L2Result, ProductInfo, RuleHit
+from . import l1_category, l2_rules, phase0_brand
+from .models import AuditOutcome, L1Result, L2Result, Phase0Result, ProductInfo, RuleHit
 
 log = logging.getLogger(__name__)
 
@@ -132,12 +132,41 @@ async def audit_one(
 ) -> AuditOutcome:
     """对单个产品跑审核流水线。
 
+    新流程:
+      Phase0: 品牌精准黑名单 → 命中直接 reject
+        ↓
+      L1: 类目判定 (只输出 PT + walmart_category + zh_can_do)
+        ↓
+      L2: 硬规则打分 (R1-R5)
+        ↓
+      [L3/L4 占位]
+
     flags:
       - skip_l1_llm: True 时 L1 只查 DB 不调 LLM (测试/离线场景)
       - run_l3:      True 时跑 L3 LLM 语义 (F18-F20, 需 DASHSCOPE_API_KEY)
       - run_l4:      True 时跑 L4 视觉 (F21-F23, 未实现)
       - persist:     落 audit_runs / audit_hits / products 表
     """
+    # Phase 0 - 品牌精准黑名单前置过滤
+    phase0 = phase0_brand.check(product)
+    if phase0.blocked:
+        outcome = AuditOutcome(
+            asin=product.asin,
+            verdict="reject",
+            score_final=0,
+            stage_stopped_at="L0",
+            l1=L1Result(walmart_product_type="(phase0_blocked)", pt_confidence="低", pt_source="skipped"),
+            phase0=phase0,
+            l2=None,
+        )
+        if persist:
+            try:
+                upsert_product(product)
+                _persist_run(outcome)
+            except Exception as e:  # noqa: BLE001
+                log.error("persist failed for %s: %s", product.asin, e)
+        return outcome
+
     # L1 类目判定 (默认必走 LLM)
     l1 = await l1_category.classify(product, skip_llm=skip_l1_llm)
 
@@ -150,6 +179,7 @@ async def audit_one(
         score_final=l2.score_final,
         stage_stopped_at="L2" if l2.verdict == "reject" else None,
         l1=l1,
+        phase0=phase0,
         l2=l2,
     )
 

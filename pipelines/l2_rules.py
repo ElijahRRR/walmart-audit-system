@@ -1,19 +1,24 @@
-"""L2 硬规则打分引擎。
+"""L2 硬规则打分引擎 (v2 新架构)。
 
-起始 100 分, 累扣, score_final < 60 → reject (不进 L3)。
+起始 100 分, 累扣, score_final < 60 → reject。
 
-五条规则:
-  R1 品牌命中黑名单              brand_blacklist        -100
-  R2 标题/描述命中黑名单品牌       title_desc_blacklist   -30/次
-  R3 类目硬禁 (中国卖家禁售)      cat_forbid_zh_seller   -100
-  R4 类目需证书                  cat_requires_cert      -100
-  R5 命中他人 LIVE 商标           trademark_live         -20/次
+五条规则 (用户 2026-04 重新定义):
+  R1 中国卖家禁售            cat_forbid_zh_seller   -100   (仅映射表 zh_can_do 明确标"否"才触发)
+  R2 禁售大类               forbidden_mega_cat     -100   (服饰/电子/汽配/baby/食品/儿童/化妆品/医疗/宠物食品)
+  R3 类目需证书              cat_requires_cert      -10    (不论多少个, 触发一次就扣)
+  R4 标题/描述命中黑名单      title_desc_blacklist   -15    (不论多少个, 全部输出给 L3 LLM 判通用/品牌)
+  R5 标题/描述命中 USPTO LIVE trademark_live         -10    (不论多少个, 全部输出给 L3 LLM 判通用/品牌)
 
-实现细节:
-- R1/R2 读 blacklist_brands 表
-- R3/R4 在 L1Result 里已判定; 本层只负责扣分和写 hit
-- R5 优先查 uspto DB 的 LIVE 商标表 (trademark_live); 若 uspto DB 不可用则跳过
-  并在日志里标 WARN (F17 会完整实现, 当前作为占位)
+**注意**:
+  - 原 R1 (brand 完全等匹配黑名单) 已移出 L2, 由 Phase0 前置处理 (rule_code=phase0_brand_blacklist)
+  - L1 阶段的 excluded_category (-100) 也继承扣分
+
+每条规则都在 RuleHit.detail 里列完整命中信息, 作为 L3 LLM 语义审核的证据:
+  - R4 detail.matches = [{brand, matched_phrase}, ...]
+  - R5 detail.matched_marks = [mark_identification, ...]
+
+R4/R5 扣分是 "只要触发就扣固定值, 不论命中几个":
+  - 主要作用不是挡 reject (固定值不大), 而是标记让 L3 判真品牌/通用词
 """
 from __future__ import annotations
 
@@ -23,25 +28,24 @@ from functools import lru_cache
 from typing import Any
 
 import psycopg
+import psycopg.rows
 
 from config import get_settings
 from sync._common import db_conn
 
+from .forbidden_mega_categories import match_mega
 from .models import L1Result, L2Result, ProductInfo, RuleHit
 
 log = logging.getLogger(__name__)
 
 
 # =============================================================
-# 黑名单品牌 cache
+# 黑名单品牌 cache (R4 用 word-boundary 子串扫)
 # =============================================================
 
 
 @lru_cache(maxsize=1)
 def _load_blacklist_brands() -> set[str]:
-    """返回小写化的全部 blacklist_brands.brand 集合。
-
-    cache 的一次调用周期; 每次 process 可以手动清缓存。"""
     with db_conn() as c:
         with c.cursor() as cur:
             cur.execute("SELECT brand FROM blacklist_brands")
@@ -52,15 +56,13 @@ def refresh_blacklist_cache() -> None:
     _load_blacklist_brands.cache_clear()
 
 
-# word-boundary 匹配: 预编译每个品牌的正则
 @lru_cache(maxsize=1)
 def _compile_blacklist_patterns() -> list[tuple[str, re.Pattern]]:
     brands = _load_blacklist_brands()
     patterns: list[tuple[str, re.Pattern]] = []
     for b in brands:
         if not b or len(b) < 2:
-            continue  # 跳过单字符/空, 避免大规模误命中
-        # 用 \b 作为单词边界; 对含特殊字符的 brand 做转义
+            continue
         try:
             pat = re.compile(rf"\b{re.escape(b)}\b", re.IGNORECASE)
             patterns.append((b, pat))
@@ -71,57 +73,175 @@ def _compile_blacklist_patterns() -> list[tuple[str, re.Pattern]]:
 
 
 # =============================================================
-# Rule 实现
+# R1: 中国卖家真禁 (仅映射表 zh_can_do 明确标"否"才触发)
 # =============================================================
 
 
-def _rule_brand_blacklist(product: ProductInfo) -> list[RuleHit]:
-    """R1: products.brand **仅完全等**匹配黑名单 → -100。
+_ZH_HARD_BLOCK_KEYWORDS = ("否", "不可做", "进不去", "禁售")
 
-    过去的策略 "brand 字段 word-boundary 包含黑名单品牌" 被 TRO 黑名单里
-    的通用单词商标 (AIR/MIX/FUSION/GENIUS/AMAZON 等) 击穿 — 随便含这些
-    词的 brand 都会误报。
 
-    现在策略:
-    - 大小写不敏感, 空白归一化后 **完全等** 才触发
-    - 跨词/子串匹配交给 R2 (title/desc word-boundary, 已降权到 -5/次 上限 -15)
+def _rule_zh_seller_forbidden(l1: L1Result) -> list[RuleHit]:
+    """R1: 只有映射表里 zh_can_do 明确含 '否/不可做/进不去/禁售' 才触发。
 
-    业务上搬运模式 brand 最终会改 'Unbranded', R1 主要抓"明目张胆填大牌"的情况。
+    "需评估" "合规投入" 等模糊值 **不算真禁**, 它们由 L2 R3 (证书) + L3 LLM 评估细节。
+
+    策略: 对同一 PT 的所有映射条目查 zh_can_do, 若**全部**都是硬禁, 才认真禁 (最宽松)。
     """
-    brand_raw = (product.brand or "").strip()
-    if not brand_raw:
+    pt = (l1.walmart_product_type or "").strip()
+    if not pt or pt in {"unknown", "(unknown)"}:
         return []
-    brand = " ".join(brand_raw.lower().split())  # 压缩多空格
-    brands_set = _load_blacklist_brands()
-    if brand in brands_set:
-        return [
-            RuleHit(
-                stage="L2",
-                rule_code="brand_blacklist",
-                penalty=-100,
-                detail={"brand": product.brand, "matched_brand": brand, "match_type": "exact"},
+
+    # 已在 L1 阶段扣过 excluded_category → L2 不重复
+    if l1.excluded_category_reason:
+        return []
+
+    with db_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                SELECT raw->>'zh_can_do' AS zh_can_do,
+                       raw->>'walmart_category' AS walmart_category,
+                       amazon_category
+                FROM walmart_category_map
+                WHERE walmart_product_type = %s
+                """,
+                (pt,),
             )
-        ]
-    return []
+            rows = cur.fetchall()
+
+    if not rows:
+        return []
+
+    # 检查每条映射的 zh_can_do 是否含硬禁关键词
+    all_hard_forbidden = True
+    sample_reasons: list[dict[str, Any]] = []
+    for r in rows:
+        zh = (r.get("zh_can_do") or "").strip()
+        hit_kw = next((kw for kw in _ZH_HARD_BLOCK_KEYWORDS if kw in zh), None)
+        if hit_kw:
+            sample_reasons.append({
+                "zh_can_do": zh,
+                "matched_keyword": hit_kw,
+                "amazon_category": r.get("amazon_category"),
+            })
+        else:
+            all_hard_forbidden = False
+
+    if not all_hard_forbidden or not sample_reasons:
+        return []
+
+    return [
+        RuleHit(
+            stage="L2",
+            rule_code="cat_forbid_zh_seller",
+            penalty=-100,
+            detail={
+                "walmart_pt": pt,
+                "walmart_category": (rows[0].get("walmart_category") or l1.walmart_category),
+                "source": "walmart_category_map.raw.zh_can_do",
+                "mappings_count": len(rows),
+                "hits": sample_reasons[:5],  # 最多存 5 条示例, 避免膨胀
+            },
+        )
+    ]
 
 
-R2_PER_HIT_PENALTY = -5      # 每命中 1 次黑名单品牌 (降权; 原 -30)
-R2_TOTAL_CAP = -15           # R2 总扣分上限 (R2+R5 合计 ≤ -30, 不单独触发 reject)
+# =============================================================
+# R2: 禁售大类 (9 大) - 基于 PT / walmart_category 前缀
+# =============================================================
+
+
+def _rule_forbidden_mega_cat(l1: L1Result) -> list[RuleHit]:
+    pt = (l1.walmart_product_type or "").strip()
+    if not pt or pt in {"unknown", "(unknown)"}:
+        return []
+    if l1.excluded_category_reason:
+        return []  # L1 已死不重复扣
+    hit = match_mega(walmart_pt=pt, walmart_category=l1.walmart_category)
+    if not hit:
+        return []
+    return [
+        RuleHit(
+            stage="L2",
+            rule_code="forbidden_mega_cat",
+            penalty=-100,
+            detail={
+                "key": hit.key,
+                "reason": hit.reason,
+                "matched_by": hit.matched_by,
+                "matched_term": hit.matched_term,
+                "walmart_pt": hit.walmart_pt,
+                "walmart_category": hit.walmart_category,
+            },
+        )
+    ]
+
+
+# =============================================================
+# R3: 类目需证书 (沃尔玛官方 PT spec 驱动) - -10 (不论多少个)
+# =============================================================
+
+
+def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
+    """R3: 只要 walmart_pt_spec.has_real_cert=TRUE 就扣 -10 (不叠加)。
+
+    用户新规: 许多字段可以填否, 但上传后可能触发 Trust & Safety 抽查,
+    可能要求 48 小时内上传 COC/CPC/Test Report。高风险类目 (电加热/儿童玩具/锂电池)
+    更容易被抽查。所以这里用轻扣 -10 + 给出具体 cert 字段, 让下游人工参考。
+    """
+    pt = (l1.walmart_product_type or "").strip()
+    if not pt or pt in {"unknown", "(unknown)"}:
+        return []
+    if l1.excluded_category_reason:
+        return []
+
+    # 用 L1 已填的权威字段 (来自 walmart_pt_spec)
+    if not l1.requires_certificate:
+        return []
+
+    # requirements_text 是 " | " 拼接的 cert 字段清单
+    cert_list: list[str] = []
+    if l1.requirements_text:
+        cert_list = [s.strip() for s in str(l1.requirements_text).split("|") if s.strip()]
+
+    return [
+        RuleHit(
+            stage="L2",
+            rule_code="cat_requires_cert",
+            penalty=-10,
+            detail={
+                "walmart_pt": pt,
+                "required_cert_fields": cert_list,
+                "cert_count": len(cert_list),
+                "source": "walmart_pt_spec",
+                "note": "搬运模式无证书, 建议下游人工复核是否会被 Trust & Safety 抽查",
+            },
+        )
+    ]
+
+
+# =============================================================
+# R4: title/desc 命中黑名单品牌 → -15 (不论多少个)
+# =============================================================
+
+
+R4_PENALTY = -15
 
 
 def _rule_title_desc_blacklist(product: ProductInfo) -> list[RuleHit]:
-    """R2: title/bullet/description 子串 word-boundary 命中黑名单 → 每次 -5, 总扣 ≤ -30。
+    """R4: 标题/五点/描述 word-boundary 命中任一黑名单品牌名。
 
-    大幅降权: 黑名单里含大量通用英文词 (simple/America 等), 避免正常产品被 reject。
-    真实品牌侵权由 L3 LLM 语义判断。
+    新规: 只要触发一次就扣 -15 (不叠加), 但 **detail 里要给出所有命中词**,
+    交给 L3 LLM 判断是通用词还是真品牌词。
     """
     hay = product.searchable_text
     if not hay:
         return []
+    own_brand = (product.brand or "").strip().lower()
     matches: list[dict[str, Any]] = []
     seen: set[str] = set()
     for brand, pattern in _compile_blacklist_patterns():
-        if brand == (product.brand or "").strip().lower():
+        if brand == own_brand:
             continue
         if brand in seen:
             continue
@@ -131,70 +251,30 @@ def _rule_title_desc_blacklist(product: ProductInfo) -> list[RuleHit]:
             matches.append({"brand": brand, "matched_phrase": m.group()})
     if not matches:
         return []
-    penalty = max(R2_TOTAL_CAP, R2_PER_HIT_PENALTY * len(matches))
     return [
         RuleHit(
             stage="L2",
             rule_code="title_desc_blacklist",
-            penalty=penalty,
-            detail={"matches": matches, "count": len(matches), "penalty_capped": penalty == R2_TOTAL_CAP},
-        )
-    ]
-
-
-def _rule_cat_forbid(l1: L1Result) -> list[RuleHit]:
-    """R3: 类目中国卖家禁售或 seed yaml 硬禁 → -100 (去重 L1 的 excluded_category)。
-
-    注意: L1 里可能已经加了 excluded_category -100 (seed yaml 硬禁),
-    这里只处理 walmart_category_map.zh_seller_forbidden=TRUE 但 seed yaml 没覆盖的情况。
-    """
-    if l1.excluded_category_reason:
-        # L1 已扣分, L2 不重复
-        return []
-    if l1.zh_seller_forbidden:
-        return [
-            RuleHit(
-                stage="L2",
-                rule_code="cat_forbid_zh_seller",
-                penalty=-100,
-                detail={"walmart_pt": l1.walmart_product_type, "source": "category_map"},
-            )
-        ]
-    return []
-
-
-def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
-    """R4: 类目需证书 (搬运模式无法提供) → -100。"""
-    if not l1.requires_certificate:
-        return []
-    return [
-        RuleHit(
-            stage="L2",
-            rule_code="cat_requires_cert",
-            penalty=-100,
+            penalty=R4_PENALTY,
             detail={
-                "walmart_pt": l1.walmart_product_type,
-                "requirements": l1.requirements_text,
+                "matches": matches,
+                "count": len(matches),
+                "note": "L3 LLM 需判断每个词是真品牌还是通用词",
             },
         )
     ]
 
 
-# -------------------------------------------------------------
-# R5 USPTO LIVE 商标 (最 expensive, 需要 uspto DB)
-# -------------------------------------------------------------
+# =============================================================
+# R5: title/desc 命中 USPTO LIVE 商标 → -10 (不论多少个)
+# =============================================================
 
+
+R5_PENALTY = -10
 _WORD_TOKEN_RE = re.compile(r"\b([A-Z][A-Za-z0-9]{2,})\b")
 
 
 def _extract_candidate_tokens(text: str, top_k: int = 40) -> list[str]:
-    """从标题/描述中提取"疑似商标"的大写开头词。
-
-    规则:
-    - 长度 >= 3
-    - 首字母大写 (Nike, LEGO, Silhouette)
-    - 去重后取前 top_k 个
-    """
     seen: list[str] = []
     for m in _WORD_TOKEN_RE.finditer(text or ""):
         w = m.group(1)
@@ -207,24 +287,20 @@ def _extract_candidate_tokens(text: str, top_k: int = 40) -> list[str]:
 
 
 def _rule_trademark_live(product: ProductInfo, l1: L1Result) -> list[RuleHit]:
-    """R5: title/description 中大写开头的候选词反查 USPTO LIVE 商标, 每命中 -20。
+    """R5: 标题/描述中大写开头词反查 USPTO LIVE 商标。
 
-    数据源: uspto DB
-      - trademarks (mark_identification TEXT, status_code TEXT, ...)
-      - status_code_mapping (status_code, live_dead IN ('LIVE','DEAD'), ...)
-    LIVE 状态涵盖: Registered (700) / Registered & Renewed (800) / Post-Registration (804+) /
-                   TTAB Pending (760/774/790) 等共约 20 个 status_code
+    新规: 只要触发就扣 -10 (不叠加), detail 给出所有命中词供 L3 LLM 判断。
 
-    为利用 idx_trademarks_mark_btree 索引 (精确大小写), 我们对每个 token 展开
-    四种大小写形式 {原样, UPPER, lower, Capitalize} 一次 IN 查询。
-
-    若 uspto DB 不可达或表缺失, 跳过并 WARN (不影响其他规则)。
+    TODO(user):
+      用户要求"对应类目"限定 (USPTO 商标的 Nice Class 需对齐 Walmart PT)。
+      目前保留全量 LIVE 查询, 后续建 Walmart PT → Nice Class 映射后加入过滤。
+      先给 detail 里标 `class_filter=None` 占位。
     """
     tokens = _extract_candidate_tokens(product.searchable_text)
     if not tokens:
         return []
 
-    # 展开大小写形式
+    # 展开大小写形式以命中不同的索引
     variants: set[str] = set()
     for t in tokens:
         variants.update({t, t.upper(), t.lower(), t.capitalize()})
@@ -236,7 +312,6 @@ def _rule_trademark_live(product: ProductInfo, l1: L1Result) -> list[RuleHit]:
     try:
         with psycopg.connect(dsn, row_factory=psycopg.rows.dict_row, connect_timeout=3) as conn:
             with conn.cursor() as cur:
-                # 快速检测必要的表存在
                 cur.execute(
                     """
                     SELECT to_regclass('public.trademarks') AS tm,
@@ -256,7 +331,7 @@ def _rule_trademark_live(product: ProductInfo, l1: L1Result) -> list[RuleHit]:
                       ON scm.status_code = t.status_code AND scm.live_dead = 'LIVE'
                     WHERE t.mark_identification = ANY(%s)
                       AND length(t.mark_identification) <= 200
-                    LIMIT 50
+                    LIMIT 100
                     """,
                     (variants_list,),
                 )
@@ -271,29 +346,25 @@ def _rule_trademark_live(product: ProductInfo, l1: L1Result) -> list[RuleHit]:
     if not hits_rows:
         return []
     marks = [r.get("mark_identification") for r in hits_rows if r.get("mark_identification")]
-    # 去重 (不同大小写形式可能对应同一商标)
     marks_unique = sorted(set(marks), key=str.lower)
     if not marks_unique:
         return []
-    # 大幅降权: USPTO LIVE 商标含大量通用词 (Garden/Bird/Premium 等), 避免误杀
-    penalty = max(R5_TOTAL_CAP, R5_PER_HIT_PENALTY * len(marks_unique))
+
     return [
         RuleHit(
             stage="L2",
             rule_code="trademark_live",
-            penalty=penalty,
+            penalty=R5_PENALTY,
             detail={
                 "matched_marks": marks_unique,
                 "count": len(marks_unique),
                 "token_variants": len(variants_list),
-                "penalty_capped": penalty == R5_TOTAL_CAP,
+                "walmart_pt": l1.walmart_product_type,
+                "class_filter": None,  # TODO: Walmart PT → Nice Class 映射后填
+                "note": "L3 LLM 需判断每个商标是通用词还是真品牌词",
             },
         )
     ]
-
-
-R5_PER_HIT_PENALTY = -3      # 每命中 1 个 LIVE 商标 (降权; 原 -20)
-R5_TOTAL_CAP = -15           # R5 总扣分上限 (R2+R5 合计 ≤ -30, 不单独触发 reject)
 
 
 # =============================================================
@@ -304,12 +375,11 @@ R5_TOTAL_CAP = -15           # R5 总扣分上限 (R2+R5 合计 ≤ -30, 不单�
 def evaluate(product: ProductInfo, l1: L1Result) -> L2Result:
     """L2 打分。返回 L2Result (含 hits + score_final)。
 
-    score_final 累计:
+    顺序:
       1. 起始 100
       2. 继承 L1.hits 的 penalty (excluded_category 等)
-      3. 再跑 L2 五条规则, 各自 penalty 累计
-
-    L2Result.hits 只包含 L2 自己产生的 hits (L1 hits 由 orchestrator 统一写表)。
+      3. 跑 L2 五条规则
+      4. 下界保护
     """
     score = 100
     all_hits: list[RuleHit] = []
@@ -320,10 +390,10 @@ def evaluate(product: ProductInfo, l1: L1Result) -> L2Result:
 
     # 2. 跑 L2 规则
     rules = [
-        _rule_brand_blacklist(product),
-        _rule_title_desc_blacklist(product),
-        _rule_cat_forbid(l1),
+        _rule_zh_seller_forbidden(l1),
+        _rule_forbidden_mega_cat(l1),
         _rule_cat_requires_cert(l1),
+        _rule_title_desc_blacklist(product),
         _rule_trademark_live(product, l1),
     ]
     for hits in rules:

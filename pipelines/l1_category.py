@@ -372,6 +372,12 @@ L1_SYSTEM_PROMPT = """你是沃尔玛 Marketplace 类目判定专家。判定 Am
 - ❌ "Craft_Cutting_Machine" (下划线命名不是沃尔玛格式, 禁止)
 - 长度一般 2-6 个英文单词, 可含 "&" ","
 
+## (4) 职责边界 (重要!)
+
+**L1 只负责类目判定**, 不再判定 "需证书/中国卖家禁售", 这两件由下游 L2 打分引擎基于沃尔玛官方 PT spec 和映射表字段自动完成。
+
+**但**: 若产品属于 3C / 服饰 / 汽配 / 带电产品 (严格定义见下方禁售品类), 需要在 `excluded_category_reason` 直接标明, 由 L1 阶段提前拦截。
+
 # 禁售品类 (严格定义, 不要扩展)
 
 - **3C 电子**: 手机 / 电脑 / 平板 / 耳机 / 智能手表 / 电视 / 相机 / 游戏机
@@ -392,20 +398,12 @@ L1_SYSTEM_PROMPT = """你是沃尔玛 Marketplace 类目判定专家。判定 Am
 **宁可不标带电产品禁售, 也不要把 "Power Switch Replacement Part" 或 "Bluetooth 切割机" 误判成带电产品。**
 只有整机或主体是电池/电源的产品才算。
 
-# 需证书识别
-
-从类目映射表候选中复用 requires_certificate 和 requirements。
-候选未标但你强判需要 FDA/CPSC/EPA/CE/UL 等证书 → requires_certificate=true。
-
 # 严格 JSON 输出, 不要 markdown / 不要解释
 
 {
   "walmart_product_type": "...",
   "pt_confidence": "高" | "中" | "低",
   "pt_source": "map_verified" | "llm_direct" | "excluded",
-  "requires_certificate": true | false,
-  "requirements": "需要的证书 | 分隔; 不需要则空串",
-  "zh_seller_forbidden": true | false,
   "excluded_category_reason": "3C禁售" | "服饰禁售" | "汽配禁售" | "带电产品禁售" | null,
   "reasoning": "30 字内中文依据"
 }
@@ -425,10 +423,7 @@ def _build_l1_user_prompt(product: ProductInfo, candidates: list[dict[str, Any]]
             cand_lines.append(
                 f"  {i}. PT='{c['walmart_product_type']}' "
                 f"[{c.get('match_type')}{sim_hint}] "
-                f"conf={c.get('confidence') or '?'}, "
-                f"need_cert={c.get('requires_certificate')}, "
-                f"zh_forbidden={c.get('zh_seller_forbidden')}"
-                + (f", req='{c['requirements'][:50]}'" if c.get("requirements") else "")
+                f"conf={c.get('confidence') or '?'}"
             )
         cand_txt = "\n".join(cand_lines)
     else:
@@ -482,6 +477,7 @@ def _try_direct_high_confidence(product: ProductInfo) -> L1Result | None:
                 WITH hit AS (
                     SELECT walmart_product_type, requires_certificate, zh_seller_forbidden, requirements,
                            raw->>'walmart_category' AS walmart_category,
+                           raw->>'zh_can_do' AS zh_can_do,
                            raw->>'walmart_ptg' AS walmart_ptg
                     FROM walmart_category_map
                     WHERE amazon_category = %s AND confidence = '高'
@@ -499,6 +495,8 @@ def _try_direct_high_confidence(product: ProductInfo) -> L1Result | None:
         walmart_product_type=row["walmart_product_type"],
         pt_confidence="高",
         pt_source="map_direct_trusted",
+        walmart_category=row.get("walmart_category"),
+        zh_can_do=row.get("zh_can_do"),
         requires_certificate=bool(row.get("requires_certificate")),
         zh_seller_forbidden=bool(row.get("zh_seller_forbidden")),
         requirements_text=row.get("requirements"),
@@ -506,34 +504,31 @@ def _try_direct_high_confidence(product: ProductInfo) -> L1Result | None:
 
 
 def _apply_spec_override(l1: L1Result) -> L1Result:
-    """用沃尔玛官方 PT spec 权威覆盖 L1 的 requires_certificate + requirements_text。
+    """L1 结尾用 DB 权威源补 walmart_category + zh_can_do + requires_certificate。
 
-    官方 spec (/Users/nextderboy/Downloads/pt_templates/) 是唯一权威源:
-    - 飞书映射表 requires_certificate 只做参考 (45% 过严, 会误杀 Replacement Parts 等)
-    - 官方 spec 13.8% PT 有真 cert 必填 (NRTL/CPSIA/FDA/危险品)
+    新架构下 L1 只输出类目, 但为让 L2 规则避免重复查 DB, 这里预取几个字段:
+      - walmart_category (映射表顶级分类, 供 L2 R2 做前缀匹配)
+      - zh_can_do (映射表原字段, 供 L2 R1 判"否"真禁)
+      - requires_certificate (用官方 PT spec 权威覆盖)
 
-    覆盖规则:
-    - spec hit: 用 spec.has_real_cert 和 real_cert_fields 覆盖
-    - spec miss (飞书独有 PT): **保守放行** - 置 requires_certificate=False
-      (避免飞书映射表的过严标签误杀产品)
-    - unknown PT: 不覆盖
+    对 unknown PT: 不做任何覆盖。
     """
     pt = (l1.walmart_product_type or "").strip()
     if not pt or pt in {"unknown", "(unknown)"}:
         return l1
+
+    # 1. 官方 PT spec → requires_certificate + requirements_text (给向后兼容字段 + 供 R3 参考)
     with db_conn() as c:
         with c.cursor() as cur:
             cur.execute(
                 """
-                SELECT has_real_cert, real_cert_fields, required_fields, required_count
+                SELECT has_real_cert, real_cert_fields
                 FROM walmart_pt_spec WHERE walmart_product_type = %s
                 """,
                 (pt,),
             )
             r = cur.fetchone()
     if not r:
-        # PT 不在官方 spec (飞书独有 66 个, 多为 adult/利基类目)
-        # 保守放行: 置 no cert, 避免映射表过严标签误杀
         l1.requires_certificate = False
         l1.requirements_text = None
     else:
@@ -542,24 +537,27 @@ def _apply_spec_override(l1: L1Result) -> L1Result:
         l1.requires_certificate = has_cert
         l1.requirements_text = " | ".join(cert_fields) if has_cert else None
 
-    # zh_seller_forbidden 以映射表为准 (LLM 对业务判断不可信)
-    # 同一 PT 多条映射时, 取 **最宽松**的 (false 优先, 因为至少有一条路径允许)
-    with db_conn() as c:
-        with c.cursor() as cur:
-            cur.execute(
-                """
-                SELECT BOOL_AND(zh_seller_forbidden) AS all_forbidden,
-                       COUNT(*) AS n
-                FROM walmart_category_map
-                WHERE walmart_product_type = %s
-                """,
-                (pt,),
-            )
-            mrow = cur.fetchone()
-    if mrow and mrow.get("n", 0) > 0:
-        # 只有所有映射都标 forbidden 时才认 forbidden (最宽松策略)
-        l1.zh_seller_forbidden = bool(mrow.get("all_forbidden"))
-    # (miss 的 PT 保持 LLM 原判)
+    # 2. 映射表 → walmart_category (给 R2) + zh_can_do (给 R1)
+    # 取第一条映射 (多数 PT 只有 1-3 条映射, 顶级类目一致)
+    if not l1.walmart_category or not l1.zh_can_do:
+        with db_conn() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT raw->>'walmart_category' AS walmart_category,
+                           raw->>'zh_can_do' AS zh_can_do
+                    FROM walmart_category_map
+                    WHERE walmart_product_type = %s
+                    LIMIT 1
+                    """,
+                    (pt,),
+                )
+                mrow = cur.fetchone()
+        if mrow:
+            if not l1.walmart_category:
+                l1.walmart_category = mrow.get("walmart_category")
+            if not l1.zh_can_do:
+                l1.zh_can_do = mrow.get("zh_can_do")
 
     return l1
 
@@ -634,6 +632,8 @@ def _classify_db_only(
             walmart_product_type=top["walmart_product_type"],
             pt_confidence=top.get("confidence") or "低",
             pt_source="map_direct",  # 没 LLM 验证
+            walmart_category=top.get("walmart_category") or top.get("raw_walmart_category"),
+            zh_can_do=top.get("zh_can_do") or top.get("raw_zh_can_do"),
             requires_certificate=bool(top.get("requires_certificate")),
             zh_seller_forbidden=bool(top.get("zh_seller_forbidden")),
             requirements_text=top.get("requirements"),
@@ -663,7 +663,10 @@ def _classify_db_only(
 def _coerce_llm(
     product: ProductInfo, raw: dict[str, Any], seed_reason: str | None
 ) -> L1Result:
-    """LLM 输出 → L1Result。LLM 的判定优先, 但 seed yaml 仍作为最终兜底。"""
+    """LLM 输出 → L1Result。L1 瘦身后只读 pt/confidence/source/excluded_reason/reasoning。
+
+    requires_certificate 和 zh_seller_forbidden 由 _apply_spec_override 从 DB 权威源填。
+    """
     pt = str(raw.get("walmart_product_type") or "unknown").strip() or "unknown"
     conf = str(raw.get("pt_confidence") or "低").strip()
     if conf not in {"高", "中", "低"}:
@@ -672,9 +675,6 @@ def _coerce_llm(
     if source not in {"map_verified", "llm_direct", "excluded"}:
         source = "llm_direct"
 
-    need_cert = bool(raw.get("requires_certificate"))
-    req_text = str(raw.get("requirements") or "").strip() or None
-    zh_forbid = bool(raw.get("zh_seller_forbidden"))
     excluded_reason = raw.get("excluded_category_reason")
     if excluded_reason in (None, "null", "None", "", "none"):
         excluded_reason = None
@@ -687,9 +687,6 @@ def _coerce_llm(
         walmart_product_type=pt,
         pt_confidence=conf,
         pt_source=source,
-        requires_certificate=need_cert,
-        zh_seller_forbidden=zh_forbid,
-        requirements_text=req_text,
         excluded_category_reason=excluded_reason,
     )
 

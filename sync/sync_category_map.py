@@ -74,44 +74,31 @@ def _parse_cert(raw: str) -> tuple[bool, str]:
 
 
 def _parse_forbidden(access_state: str, zh_can_do: str) -> bool:
-    """判定 zh_seller_forbidden, 以"中国卖家可做"为主字段, 准入状态兜底。
+    """判定 zh_seller_forbidden - 严格 "否" 才算真禁 (新规, 2026-04 用户指定)。
 
-    用户意图: "中国卖家可做=是" 就是允许, 即使准入状态是"附条件允许".
-    因为"附条件允许"是沃尔玛官方要求的整体类目准入条件,
-    而"中国卖家可做"是飞书维护者评估后对 **搬运模式** 的判断结论.
+    关键变化 (相对旧版):
+      - "需评估" 不再算 forbidden (由 L2 R3 证书规则 + L3 LLM 评估细节判)
+      - 只有 zh_can_do 明确含"否/不可做/进不去/禁售" **或** 准入状态 = "禁售" 才真禁
 
     规则 (从强到弱):
-      1. 中国卖家可做 = '是/可做/OK'                → False (允许)
-      2. 中国卖家可做 含 '否/不可做/进不去/禁售'      → True (禁)
-      3. 中国卖家可做 含 '需评估/合规投入'            → True (搬运做不了)
-      4. 中国卖家可做 空 + 准入状态 = '禁售'         → True
-      5. 其他                                      → False (未明标, 不主动拦)
+      1. zh_can_do 含 '否/不可做/进不去/禁售'      → True (真禁)
+      2. zh_can_do 空 且 准入状态 = '禁售'         → True (兜底)
+      3. 其他 (含 '是/可做/需评估/合规投入')        → False (L2 R1 不拦, 下游 R3/L3 评估)
     """
     access = _normalize_text(access_state).strip()
     zh = _normalize_text(zh_can_do).strip()
-    zh_lower = zh.lower()
 
-    # 1. 明确可做
-    if zh_lower in _ZH_OK or zh == "是":
-        return False
-
-    # 2. 明确不可做 (含子串)
+    # 1. 明确不可做
     for kw in _ZH_BLOCK_KEYWORDS:
         if kw in zh:
             return True
 
-    # 3. 需合规投入 - 搬运做不了
-    for kw in _ZH_EVAL:
-        if kw in zh:
-            return True
-
-    # 4. zh 空 - 看准入状态兜底
+    # 2. zh 空 - 看准入状态兜底
     if not zh:
         if access in _ACCESS_HARD_BLOCK:
             return True
-        return False  # 未明标, 默认允许
 
-    # 5. zh 有值但都不认识: 保守放行, 不主动拦
+    # 3. 其他一律不算真禁
     return False
 
 

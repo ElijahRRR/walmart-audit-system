@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 
 Verdict = Literal["pass", "reject", "pending"]
-Stage = Literal["L1", "L2", "L3", "L4"]
+Stage = Literal["L0", "L1", "L2", "L3", "L4"]
 
 
 @dataclass
@@ -43,21 +43,46 @@ class RuleHit:
 
 
 @dataclass
+class Phase0Result:
+    """Phase 0 品牌精准黑名单前置过滤结果。
+
+    blocked=True 时整个流程直接终止, 不进 L1/L2。
+    """
+
+    blocked: bool = False
+    matched_brand: str | None = None
+    hits: list[RuleHit] = field(default_factory=list)
+
+
+@dataclass
 class L1Result:
-    """L1 类目判定输出。"""
+    """L1 类目判定输出 (已瘦身: 只负责判定 PT, 不再判 forbid/cert)。
+
+    新架构:
+      - L1 只输出 walmart_product_type + 置信度 + source
+      - walmart_category: 映射表里 raw->>'walmart_category' (给 L2 R2 做前缀匹配用)
+      - excluded_category_reason: L1 seed yaml 硬拦 (3C/服饰/汽配/带电 Amazon 路径/title 关键词命中)
+      - zh_can_do: 映射表里 raw->>'zh_can_do' 原值 (给 L2 R1 做"否"判定)
+
+    R1 (zh_seller真禁)、R3 (证书)、R4/R5 (关键词) 全部下沉到 L2 打分。
+    """
 
     walmart_product_type: str
     pt_confidence: str                     # 高/中/低
     pt_source: str                         # 'map_direct' / 'llm' / 'none'
+    walmart_category: str | None = None    # 映射表 raw->>'walmart_category' (给 R2)
+    zh_can_do: str | None = None           # 映射表 raw->>'zh_can_do' 原文 (给 R1)
+    excluded_category_reason: str | None = None   # seed yaml 硬禁 (L1 提前死, stage=L1)
+    hits: list[RuleHit] = field(default_factory=list)
+
+    # 向后兼容字段 (L2 旧代码/测试还会访问, 但不再作为权威判定源)
     requires_certificate: bool = False
     zh_seller_forbidden: bool = False
-    requirements_text: str | None = None   # 原文, 如 "FDA 宠物食品设施注册 | AAFCO 营养充分性声明"
-    excluded_category_reason: str | None = None   # 若命中 seed yaml 硬禁, 说明原因
-    hits: list[RuleHit] = field(default_factory=list)
+    requirements_text: str | None = None
 
     @property
     def is_forbidden(self) -> bool:
-        return bool(self.excluded_category_reason) or self.zh_seller_forbidden
+        return bool(self.excluded_category_reason)
 
 
 @dataclass
@@ -100,13 +125,17 @@ class AuditOutcome:
     score_final: int
     stage_stopped_at: Stage | None         # None 表示所有阶段都过了
     l1: L1Result
+    phase0: Phase0Result | None = None
     l2: L2Result | None = None
     l3: L3Result | None = None
     l4: L4Result | None = None
 
     @property
     def all_hits(self) -> list[RuleHit]:
-        bag: list[RuleHit] = list(self.l1.hits)
+        bag: list[RuleHit] = []
+        if self.phase0 is not None:
+            bag.extend(self.phase0.hits)
+        bag.extend(self.l1.hits)
         for r in (self.l2, self.l3, self.l4):
             if r is not None:
                 bag.extend(r.hits)
@@ -118,6 +147,7 @@ __all__ = [
     "Stage",
     "ProductInfo",
     "RuleHit",
+    "Phase0Result",
     "L1Result",
     "L2Result",
     "L3Result",
