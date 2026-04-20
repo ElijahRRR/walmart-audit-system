@@ -386,8 +386,11 @@ L1_SYSTEM_PROMPT = """你是沃尔玛 Marketplace 类目判定专家。判定 Am
     * 插电家电 (除非本身是 3C 禁售类)
     * LED 装饰灯、LED 蜡烛
     * 内置小纽扣电池的非电子装饰品
+    * **Replacement Part / 替换件 / 单卖零件** - 即使原主机是电器, 单卖的替换配件
+      (如 Power Switch Replacement Part / 电源开关替换件) 自身不带电不算带电产品
 
-**宁可不标带电产品禁售, 也不要把 Bluetooth 切割机误判成带电。**
+**宁可不标带电产品禁售, 也不要把 "Power Switch Replacement Part" 或 "Bluetooth 切割机" 误判成带电产品。**
+只有整机或主体是电池/电源的产品才算。
 
 # 需证书识别
 

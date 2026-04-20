@@ -76,18 +76,23 @@ def _compile_blacklist_patterns() -> list[tuple[str, re.Pattern]]:
 
 
 def _rule_brand_blacklist(product: ProductInfo) -> list[RuleHit]:
-    """R1: products.brand 命中黑名单 → -100。
+    """R1: products.brand **仅完全等**匹配黑名单 → -100。
 
-    匹配策略 (解决"Silhouette America" 不等于 "Silhouette" 的 bug):
-      1. 完全等 → 命中
-      2. 或 brand 字符串中以 word-boundary 方式出现黑名单品牌 → 命中
-         (例如 brand='Silhouette America' 命中 'Silhouette')
+    过去的策略 "brand 字段 word-boundary 包含黑名单品牌" 被 TRO 黑名单里
+    的通用单词商标 (AIR/MIX/FUSION/GENIUS/AMAZON 等) 击穿 — 随便含这些
+    词的 brand 都会误报。
+
+    现在策略:
+    - 大小写不敏感, 空白归一化后 **完全等** 才触发
+    - 跨词/子串匹配交给 R2 (title/desc word-boundary, 已降权到 -5/次 上限 -15)
+
+    业务上搬运模式 brand 最终会改 'Unbranded', R1 主要抓"明目张胆填大牌"的情况。
     """
-    brand = (product.brand or "").strip().lower()
-    if not brand:
+    brand_raw = (product.brand or "").strip()
+    if not brand_raw:
         return []
+    brand = " ".join(brand_raw.lower().split())  # 压缩多空格
     brands_set = _load_blacklist_brands()
-    # 策略 1: 完全等
     if brand in brands_set:
         return [
             RuleHit(
@@ -95,22 +100,6 @@ def _rule_brand_blacklist(product: ProductInfo) -> list[RuleHit]:
                 rule_code="brand_blacklist",
                 penalty=-100,
                 detail={"brand": product.brand, "matched_brand": brand, "match_type": "exact"},
-            )
-        ]
-    # 策略 2: brand 字段包含某个黑名单品牌 (word-boundary)
-    matched: list[str] = []
-    for b in brands_set:
-        if len(b) < 3:
-            continue  # 太短的词容易误命中 (如 "AO")
-        if re.search(rf"\b{re.escape(b)}\b", brand, re.IGNORECASE):
-            matched.append(b)
-    if matched:
-        return [
-            RuleHit(
-                stage="L2",
-                rule_code="brand_blacklist",
-                penalty=-100,
-                detail={"brand": product.brand, "matched_brands": matched, "match_type": "contains"},
             )
         ]
     return []
