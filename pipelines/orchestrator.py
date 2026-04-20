@@ -17,7 +17,7 @@ from typing import Any
 
 from sync._common import db_conn, to_jsonb
 
-from . import l1_category, l2_rules, phase0_brand
+from . import l1_category, l2_rules, phase0
 from .models import AuditOutcome, L1Result, L2Result, Phase0Result, ProductInfo, RuleHit
 
 log = logging.getLogger(__name__)
@@ -147,16 +147,16 @@ async def audit_one(
       - run_l4:      True 时跑 L4 视觉 (F21-F23, 未实现)
       - persist:     落 audit_runs / audit_hits / products 表
     """
-    # Phase 0 - 品牌精准黑名单前置过滤
-    phase0 = phase0_brand.check(product)
-    if phase0.blocked:
+    # Phase 0 - 精准前置过滤 (类目禁售 + 品牌黑名单)
+    phase0_result = phase0.check(product)
+    if phase0_result.blocked:
         outcome = AuditOutcome(
             asin=product.asin,
             verdict="reject",
             score_final=0,
             stage_stopped_at="L0",
             l1=L1Result(walmart_product_type="(phase0_blocked)", pt_confidence="低", pt_source="skipped"),
-            phase0=phase0,
+            phase0=phase0_result,
             l2=None,
         )
         if persist:
@@ -179,7 +179,7 @@ async def audit_one(
         score_final=l2.score_final,
         stage_stopped_at="L2" if l2.verdict == "reject" else None,
         l1=l1,
-        phase0=phase0,
+        phase0=phase0_result,
         l2=l2,
     )
 

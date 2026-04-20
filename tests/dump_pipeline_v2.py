@@ -20,7 +20,7 @@ import httpx
 
 from config import get_settings, ROOT
 from integrations.dmit_client import ProductDetail
-from pipelines import l1_category, l2_rules, phase0_brand
+from pipelines import l1_category, l2_rules, phase0
 from pipelines.models import ProductInfo
 
 log = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ async def run(sample: int) -> None:
             long_description=pd.long_description or "",
             country_of_origin=pd.country_of_origin or "",
         )
-        p0 = phase0_brand.check(p)
+        p0 = phase0.check(p)
         if p0.blocked:
             return {
                 "asin": p.asin,
@@ -65,6 +65,7 @@ async def run(sample: int) -> None:
                 "country_of_origin": p.country_of_origin,
                 "phase0_blocked": True,
                 "phase0_matched_brand": p0.matched_brand,
+                "phase0_matched_category": p0.matched_category,
                 "hits": [_serialize_hit(h) for h in p0.hits],
                 "verdict": "reject",
                 "score_final": 0,
@@ -121,7 +122,12 @@ async def run(sample: int) -> None:
         md_lines.append(f"**title**: {r['title']}")
         md_lines.append(f"**brand**: `{r['brand']}`  **amazon_cat**: `{r['amazon_category_path']}`")
         if r.get('phase0_blocked'):
-            md_lines.append(f"**Phase0 BLOCKED**: matched_brand=`{r.get('phase0_matched_brand')}`")
+            parts = []
+            if r.get('phase0_matched_category'):
+                parts.append(f"matched_category=`{r.get('phase0_matched_category')}`")
+            if r.get('phase0_matched_brand'):
+                parts.append(f"matched_brand=`{r.get('phase0_matched_brand')}`")
+            md_lines.append(f"**Phase0 BLOCKED**: {' '.join(parts)}")
         else:
             l1 = r["l1"]
             md_lines.append(
@@ -149,6 +155,8 @@ def _summarize_detail(h: dict) -> str:
     code = h["rule_code"]
     if code == "phase0_brand_blacklist":
         return f"brand={d.get('brand')} matched={d.get('matched_brand')}"
+    if code == "phase0_forbidden_category":
+        return f"top_cat={d.get('amazon_top_category')} reason={d.get('reason','')[:60]}"
     if code == "excluded_category":
         return f"reason={d.get('reason')} from_seed={d.get('from_seed_yaml')} pt={d.get('pt')}"
     if code == "cat_forbid_zh_seller":

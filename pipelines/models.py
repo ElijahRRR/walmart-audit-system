@@ -44,13 +44,14 @@ class RuleHit:
 
 @dataclass
 class Phase0Result:
-    """Phase 0 品牌精准黑名单前置过滤结果。
+    """Phase 0 精准前置过滤结果 (类目禁售 + 品牌黑名单)。
 
     blocked=True 时整个流程直接终止, 不进 L1/L2。
     """
 
     blocked: bool = False
-    matched_brand: str | None = None
+    matched_brand: str | None = None          # 品牌精准命中 (phase0_brand)
+    matched_category: str | None = None       # Amazon 顶级类目精准命中 (phase0_category)
     hits: list[RuleHit] = field(default_factory=list)
 
 
