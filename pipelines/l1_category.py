@@ -536,11 +536,31 @@ def _apply_spec_override(l1: L1Result) -> L1Result:
         # 保守放行: 置 no cert, 避免映射表过严标签误杀
         l1.requires_certificate = False
         l1.requirements_text = None
-        return l1
-    has_cert = bool(r.get("has_real_cert"))
-    cert_fields = r.get("real_cert_fields") or []
-    l1.requires_certificate = has_cert
-    l1.requirements_text = " | ".join(cert_fields) if has_cert else None
+    else:
+        has_cert = bool(r.get("has_real_cert"))
+        cert_fields = r.get("real_cert_fields") or []
+        l1.requires_certificate = has_cert
+        l1.requirements_text = " | ".join(cert_fields) if has_cert else None
+
+    # zh_seller_forbidden 以映射表为准 (LLM 对业务判断不可信)
+    # 同一 PT 多条映射时, 取 **最宽松**的 (false 优先, 因为至少有一条路径允许)
+    with db_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                SELECT BOOL_AND(zh_seller_forbidden) AS all_forbidden,
+                       COUNT(*) AS n
+                FROM walmart_category_map
+                WHERE walmart_product_type = %s
+                """,
+                (pt,),
+            )
+            mrow = cur.fetchone()
+    if mrow and mrow.get("n", 0) > 0:
+        # 只有所有映射都标 forbidden 时才认 forbidden (最宽松策略)
+        l1.zh_seller_forbidden = bool(mrow.get("all_forbidden"))
+    # (miss 的 PT 保持 LLM 原判)
+
     return l1
 
 

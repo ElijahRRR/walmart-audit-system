@@ -39,12 +39,13 @@ SHEET_ID = "0bdc8b"  # 类目映射表
 LAST_COL = "L"        # 12 有效列
 WIKI_TOKEN_FALLBACK = "UKdZwr7JqiO6UckjSnPcwTCgnvd"
 
-# 准入状态允许上架的值 (搬运模式)
-_ACCESS_OK = {"普通商品"}
-# 准入状态明确禁的值
-_ACCESS_BLOCK = {"禁售", "附条件允许", "需Walmart审批"}
-# "中国卖家可做" 列 OK 的值 (含"是")
-_ZH_OK = {"是", "可做", "OK"}
+# "中国卖家可做" 字段值 (优先级最高, 用户的最终评估)
+_ZH_OK = {"是", "可做", "ok"}        # 明确可做 → forbidden=False
+_ZH_EVAL = {"需评估", "合规投入"}    # 需合规投入 → 搬运做不了 forbidden=True
+_ZH_BLOCK_KEYWORDS = ("否", "不可做", "进不去", "禁售")  # 任一子串命中 → forbidden=True
+
+# 准入状态 (只在 "中国卖家可做" 空 或 无法判定 时兜底)
+_ACCESS_HARD_BLOCK = {"禁售"}
 
 
 def _resolve_obj_token() -> str:
@@ -73,25 +74,45 @@ def _parse_cert(raw: str) -> tuple[bool, str]:
 
 
 def _parse_forbidden(access_state: str, zh_can_do: str) -> bool:
-    """综合 F 列(准入状态) + G 列(中国卖家可做) 判定 zh_seller_forbidden。
+    """判定 zh_seller_forbidden, 以"中国卖家可做"为主字段, 准入状态兜底。
 
-    仅当 准入状态='普通商品' AND 中国卖家可做='是/可做/OK' 才 forbidden=False。
-    其余一律 True (保守 - 搬运模式无证书/审批)。
+    用户意图: "中国卖家可做=是" 就是允许, 即使准入状态是"附条件允许".
+    因为"附条件允许"是沃尔玛官方要求的整体类目准入条件,
+    而"中国卖家可做"是飞书维护者评估后对 **搬运模式** 的判断结论.
+
+    规则 (从强到弱):
+      1. 中国卖家可做 = '是/可做/OK'                → False (允许)
+      2. 中国卖家可做 含 '否/不可做/进不去/禁售'      → True (禁)
+      3. 中国卖家可做 含 '需评估/合规投入'            → True (搬运做不了)
+      4. 中国卖家可做 空 + 准入状态 = '禁售'         → True
+      5. 其他                                      → False (未明标, 不主动拦)
     """
     access = _normalize_text(access_state).strip()
     zh = _normalize_text(zh_can_do).strip()
+    zh_lower = zh.lower()
 
-    # 准入状态明确要卡的
-    if access in _ACCESS_BLOCK:
-        return True
-    # 准入状态是普通商品: 看 zh_can_do
-    if access in _ACCESS_OK:
-        return zh not in _ZH_OK  # 非"是" 则 forbidden
-    # 都空: 未标注, 不主动拦 (给 L1 LLM 判)
-    if not access and not zh:
+    # 1. 明确可做
+    if zh_lower in _ZH_OK or zh == "是":
         return False
-    # 一方有值另一方空: 保守 forbidden
-    return True
+
+    # 2. 明确不可做 (含子串)
+    for kw in _ZH_BLOCK_KEYWORDS:
+        if kw in zh:
+            return True
+
+    # 3. 需合规投入 - 搬运做不了
+    for kw in _ZH_EVAL:
+        if kw in zh:
+            return True
+
+    # 4. zh 空 - 看准入状态兜底
+    if not zh:
+        if access in _ACCESS_HARD_BLOCK:
+            return True
+        return False  # 未明标, 默认允许
+
+    # 5. zh 有值但都不认识: 保守放行, 不主动拦
+    return False
 
 
 def _row_to_record(row: list) -> dict | None:
