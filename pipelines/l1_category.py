@@ -378,6 +378,22 @@ L1_SYSTEM_PROMPT = """你是沃尔玛 Marketplace 类目判定专家。判定 Am
 
 **但**: 若产品属于 3C / 服饰 / 汽配 / 带电产品 (严格定义见下方禁售品类), 需要在 `excluded_category_reason` 直接标明, 由 L1 阶段提前拦截。
 
+## (5) 配件 vs 整机 / 被动 vs 主动 (关键微差别)
+
+**必须先判产品是"整机/整品"还是"配件/替换件"**, 这两类在 Walmart 字典里通常是两个不同的 PT:
+
+- title 含 "Replacement Part / Accessories / Cover / Case / Hood / Tires (for X) / Parts" 等 → 选**配件/替换件**类 PT, **不要**选整机
+  - 例: "Pool Cleaner Tires" → 选 "Pool Cleaner Replacement Parts" / "Pool Cleaner Tires" 等配件类, **不是** "Automatic Pool Cleaners"
+  - 例: "Dust Cover for Laptop Keyboard" → 选 "Keyboard Covers" / "Computer Accessories", **不是** "Electronics Port Dust Covers" (Port=端口≠Keyboard=键盘)
+  - 例: "Replacement Blade for Mower" → 选 "Lawn Mower Replacement Parts", **不是** "Lawn Mowers"
+
+- title 是 **Sensor / 传感器**, 选 Sensor 类 PT, **不要**选 Tester (测试仪) / Meter (测量仪) / Monitor (监视器)
+  - 例: "80A Current Sensor" → "Current Sensors", **不是** "Electric Power Testers"
+
+- Dust Cover / Hood / Protector: 保持"保护/覆盖"语义, 不要选测量仪器或端口接口相关 PT
+
+- Amazon 路径与产品实际用途冲突时, **以 title 实际语义为准** (当 Amazon 明显归类错误), 同时把 pt_source 标成 "llm_direct"
+
 # 禁售品类 (严格定义, 不要扩展)
 
 - **3C 电子**: 手机 / 电脑 / 平板 / 耳机 / 智能手表 / 电视 / 相机 / 游戏机
@@ -619,7 +635,7 @@ async def classify(product: ProductInfo, *, skip_llm: bool = False) -> L1Result:
         log.warning("L1 LLM 返回非法 JSON %s: %r - 回落 DB-only", product.asin, raw)
         return _apply_spec_override(_classify_db_only(product, candidates, seed_reason))
 
-    return _apply_spec_override(_coerce_llm(product, raw, seed_reason))
+    return _apply_spec_override(_coerce_llm(product, raw, seed_reason, candidates))
 
 
 def _classify_db_only(
@@ -660,10 +676,36 @@ def _classify_db_only(
     return l1
 
 
+def _is_pt_in_dictionary(pt: str) -> bool:
+    """PT 是否存在于 Walmart 官方字典 (walmart_pt_spec) 或映射表 (walmart_category_map)。
+
+    两张表任一命中即认为字典有效; 仅用于判字典外的 llm_direct PT 是否需回落。
+    """
+    p = (pt or "").strip()
+    if not p or p in {"unknown", "(unknown)"}:
+        return False
+    with db_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1 FROM walmart_pt_spec WHERE walmart_product_type = %s
+                UNION ALL
+                SELECT 1 FROM walmart_category_map WHERE walmart_product_type = %s
+                LIMIT 1
+                """,
+                (p, p),
+            )
+            return cur.fetchone() is not None
+
+
 def _coerce_llm(
-    product: ProductInfo, raw: dict[str, Any], seed_reason: str | None
+    product: ProductInfo, raw: dict[str, Any], seed_reason: str | None,
+    candidates: list[dict[str, Any]] | None = None,
 ) -> L1Result:
     """LLM 输出 → L1Result。L1 瘦身后只读 pt/confidence/source/excluded_reason/reasoning。
+
+    关键修正: 若 LLM 输出的 PT 不在 Walmart 字典 (字典外 llm_direct), 回落到候选首条,
+    避免字典外 PT 上架失败。
 
     requires_certificate 和 zh_seller_forbidden 由 _apply_spec_override 从 DB 权威源填。
     """
@@ -674,6 +716,22 @@ def _coerce_llm(
     source = str(raw.get("pt_source") or "llm_direct").strip()
     if source not in {"map_verified", "llm_direct", "excluded"}:
         source = "llm_direct"
+
+    # 字典外 PT 回落: LLM 造了不在字典的 PT, 取候选首条 (embedding 最近)
+    fallback_from: str | None = None
+    if pt != "unknown" and not _is_pt_in_dictionary(pt):
+        if candidates:
+            fallback_from = pt
+            top = candidates[0]
+            pt = str(top.get("walmart_product_type") or "unknown")
+            source = "map_fallback"    # 标记这是回落
+            conf = str(top.get("confidence") or "低")
+        else:
+            # 无候选兜底, 保留 unknown 语义
+            fallback_from = pt
+            pt = "unknown"
+            conf = "低"
+            source = "none"
 
     excluded_reason = raw.get("excluded_category_reason")
     if excluded_reason in (None, "null", "None", "", "none"):
@@ -701,6 +759,22 @@ def _coerce_llm(
                     "pt": pt,
                     "llm_reasoning": raw.get("reasoning"),
                     "from_seed_yaml": bool(seed_reason) and not raw.get("excluded_category_reason"),
+                    "fallback_from_dict_miss": fallback_from,
+                },
+            )
+        )
+    elif fallback_from:
+        # 字典外 fallback 也记录 (便于调试)
+        l1.hits.append(
+            RuleHit(
+                stage="L1",
+                rule_code="pt_dict_fallback",
+                penalty=0,
+                detail={
+                    "llm_output_pt": fallback_from,
+                    "fallback_pt": pt,
+                    "reason": "LLM 输出 PT 不在 Walmart 字典, 回落到候选首条",
+                    "source": source,
                 },
             )
         )
