@@ -505,12 +505,52 @@ def _try_direct_high_confidence(product: ProductInfo) -> L1Result | None:
     )
 
 
+def _apply_spec_override(l1: L1Result) -> L1Result:
+    """用沃尔玛官方 PT spec 权威覆盖 L1 的 requires_certificate + requirements_text。
+
+    官方 spec (/Users/nextderboy/Downloads/pt_templates/) 是唯一权威源:
+    - 飞书映射表 requires_certificate 只做参考 (45% 过严, 会误杀 Replacement Parts 等)
+    - 官方 spec 13.8% PT 有真 cert 必填 (NRTL/CPSIA/FDA/危险品)
+
+    覆盖规则:
+    - spec hit: 用 spec.has_real_cert 和 real_cert_fields 覆盖
+    - spec miss (飞书独有 PT): **保守放行** - 置 requires_certificate=False
+      (避免飞书映射表的过严标签误杀产品)
+    - unknown PT: 不覆盖
+    """
+    pt = (l1.walmart_product_type or "").strip()
+    if not pt or pt in {"unknown", "(unknown)"}:
+        return l1
+    with db_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                SELECT has_real_cert, real_cert_fields, required_fields, required_count
+                FROM walmart_pt_spec WHERE walmart_product_type = %s
+                """,
+                (pt,),
+            )
+            r = cur.fetchone()
+    if not r:
+        # PT 不在官方 spec (飞书独有 66 个, 多为 adult/利基类目)
+        # 保守放行: 置 no cert, 避免映射表过严标签误杀
+        l1.requires_certificate = False
+        l1.requirements_text = None
+        return l1
+    has_cert = bool(r.get("has_real_cert"))
+    cert_fields = r.get("real_cert_fields") or []
+    l1.requires_certificate = has_cert
+    l1.requirements_text = " | ".join(cert_fields) if has_cert else None
+    return l1
+
+
 async def classify(product: ProductInfo, *, skip_llm: bool = False) -> L1Result:
     """L1 主入口 (默认必走 LLM, 除非满足 Layer 1 高置信度快速通道或 skip_llm)。
 
     流程:
       1. Layer 1 快速通道: Amazon 路径精确命中 + 置信度='高' + 唯一 → 直出 (省 LLM 成本)
       2. 其他情况: Embedding 语义 + 关键词反查 + 映射表候选 + LLM rerank (方案 C)
+      3. 最后: 用沃尔玛官方 PT spec 覆盖 requires_certificate (比映射表精准)
     """
     # Layer 1 高置信度快速通道 (50%+ 产品命中, 精度 >90%)
     if not skip_llm:
@@ -528,7 +568,8 @@ async def classify(product: ProductInfo, *, skip_llm: bool = False) -> L1Result:
                         detail={"reason": seed_reason, "pt": fast.walmart_product_type, "from_seed_yaml": True},
                     )
                 )
-            return fast
+            # 官方 spec 覆盖 requires_certificate
+            return _apply_spec_override(fast)
 
     # Layer 2+3: 候选召回
     if skip_llm:
@@ -558,9 +599,9 @@ async def classify(product: ProductInfo, *, skip_llm: bool = False) -> L1Result:
 
     if not raw or "_raw" in raw:
         log.warning("L1 LLM 返回非法 JSON %s: %r - 回落 DB-only", product.asin, raw)
-        return _classify_db_only(product, candidates, seed_reason)
+        return _apply_spec_override(_classify_db_only(product, candidates, seed_reason))
 
-    return _coerce_llm(product, raw, seed_reason)
+    return _apply_spec_override(_coerce_llm(product, raw, seed_reason))
 
 
 def _classify_db_only(
