@@ -22,6 +22,9 @@ version: 1
 updated: 2026-04-21
 
 # 触发词 (word-boundary 匹配, 大小写不敏感)
+# 注: "for" 本身是通用词, 但严格模式下只有"for 后 60 字符内有 hard 品牌"才命中,
+#     "for Kids/Men/daily use" 等常见组合不会误伤 (窗口里没 hard 品牌).
+#     加入 for 后, 能抓到 "Filter for Dyson" / "Pack for IKEA" / "Cover for CAMELBAK" 这类 SEO 冒用.
 compat_triggers:
   # 英文常见
   - "compatible with"
@@ -36,6 +39,8 @@ compat_triggers:
   - "aftermarket for"
   - "aftermarket replacement"
   - "OEM for"
+  - "for"           # 兜底: 覆盖 "Filter for Dyson" / "Cover for IKEA" SEO 冒用
+                   # 安全依据: 严格窗口扫, "for" 后 60 字符有 hard 品牌才命中
   # 中文 (少数标题)
   - "适用于"
   - "兼容"
