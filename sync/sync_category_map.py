@@ -1,31 +1,30 @@
-"""F8 - 同步类目映射表 (飞书 类目映射表 > sheet 0bdc8b 6833 行)。
+"""同步飞书 "映射明细" sheet (2p5sL6) → walmart_category_map 表。
 
-实际表头 (前 12 列有效):
-  A Walmart Category
-  B Walmart PTG
-  C Walmart Product Type
-  D Amazon 路径
-  E Amazon 叶子
-  F 准入状态         实际值: 普通商品 / 附条件允许 / 需Walmart审批 / 禁售
-  G 中国卖家可做     实际值: 是 / 需评估 (要合规投入) / 否 (中国卖家进不去) / 否 (Walmart 禁售)
-  H 必需认证         自由文本, 多项用 | 分隔 (如 "FDA 宠物食品设施注册 | AAFCO 营养充分性声明")
-  I 特殊备注
-  J 映射依据         (LLM知识推理 / Walmart 官方 / 样本数据)
-  K ASIN样本数       (整数)
-  L 映射置信度       (高/中/低)
+Sheet 2 - 映射明细 (15771 行): Amazon 路径 → Walmart PT 多对多映射表 (每行一路径).
 
-**zh_seller_forbidden 判定逻辑** (搬运模式无证书, 保守):
-  - 普通商品 + zh_can_do='是'             → forbidden=False (唯一可做)
-  - 普通商品 + zh_can_do 其他值             → forbidden=True  (需评估 / 否)
-  - 附条件允许 / 需Walmart审批 / 禁售        → forbidden=True  (搬运搞不定)
-  - 都是空或未知                            → forbidden=False (未标注, 不主动拦)
+列定义:
+  A Walmart Category        (冗余, 可 JOIN pt_meta 拿, 仍保留供调试)
+  B Walmart PTG             (冗余)
+  C Walmart Product Type    FK → walmart_pt_meta
+  D Amazon 叶子             叶子节点名
+  E Amazon 路径             完整路径 (PK 一部分)
+  F browse_node_id          Amazon Browse Node ID
+  G 排名                    该 PT 下的排序
+  H 置信度                  高/中/低/无 ("无"通常对应 walmart_product_type='无对应Walmart PT')
+  I 匹配方式                a2w_agent / a2w_agent+recheck / 人工 等
+  J 备注
+  K 来源批次
 
-**requires_certificate**: H 列非空且不属于 {"-", "无", "N/A", "none"} → True, 原文存 requirements。
+特殊处理:
+  - walmart_product_type='无对应Walmart PT' 的条目: 标记 match_type+='_unmapped', 仍入库
+    (L1 遇到这些 Amazon 路径可直接判"无 Walmart 对应", 下游 Phase 0/L1 可 reject)
+  - 同一 (amazon_category, walmart_product_type) 去重, 保留排名最高的
+
+运行: python3 -m sync.sync_category_map
 """
 from __future__ import annotations
 
 import logging
-import re
 import time
 
 from config import get_settings
@@ -35,17 +34,11 @@ from ._common import SyncResult, batched, db_conn, finish_sync_run, start_sync_r
 
 log = logging.getLogger(__name__)
 
-SHEET_ID = "0bdc8b"  # 类目映射表
-LAST_COL = "L"        # 12 有效列
+SHEET_ID = "2p5sL6"
+LAST_COL = "K"
 WIKI_TOKEN_FALLBACK = "UKdZwr7JqiO6UckjSnPcwTCgnvd"
 
-# "中国卖家可做" 字段值 (优先级最高, 用户的最终评估)
-_ZH_OK = {"是", "可做", "ok"}        # 明确可做 → forbidden=False
-_ZH_EVAL = {"需评估", "合规投入"}    # 需合规投入 → 搬运做不了 forbidden=True
-_ZH_BLOCK_KEYWORDS = ("否", "不可做", "进不去", "禁售")  # 任一子串命中 → forbidden=True
-
-# 准入状态 (只在 "中国卖家可做" 空 或 无法判定 时兜底)
-_ACCESS_HARD_BLOCK = {"禁售"}
+UNMAPPED_PT = "无对应Walmart PT"
 
 
 def _resolve_obj_token() -> str:
@@ -60,86 +53,57 @@ def _normalize_text(v) -> str:
     if v is None:
         return ""
     if isinstance(v, list):
-        # 富文本 segments
         return "".join(seg.get("text", "") for seg in v if isinstance(seg, dict))
     return str(v).strip()
 
 
-def _parse_cert(raw: str) -> tuple[bool, str]:
-    """解析必需认证列。返回 (requires_certificate, 原文 requirements)。"""
-    text = _normalize_text(raw).strip()
-    if not text or text in {"-", "无", "N/A", "none", "None"}:
-        return False, ""
-    return True, text
-
-
-def _parse_forbidden(access_state: str, zh_can_do: str) -> bool:
-    """判定 zh_seller_forbidden - 严格 "否" 才算真禁 (新规, 2026-04 用户指定)。
-
-    关键变化 (相对旧版):
-      - "需评估" 不再算 forbidden (由 L2 R3 证书规则 + L3 LLM 评估细节判)
-      - 只有 zh_can_do 明确含"否/不可做/进不去/禁售" **或** 准入状态 = "禁售" 才真禁
-
-    规则 (从强到弱):
-      1. zh_can_do 含 '否/不可做/进不去/禁售'      → True (真禁)
-      2. zh_can_do 空 且 准入状态 = '禁售'         → True (兜底)
-      3. 其他 (含 '是/可做/需评估/合规投入')        → False (L2 R1 不拦, 下游 R3/L3 评估)
-    """
-    access = _normalize_text(access_state).strip()
-    zh = _normalize_text(zh_can_do).strip()
-
-    # 1. 明确不可做
-    for kw in _ZH_BLOCK_KEYWORDS:
-        if kw in zh:
-            return True
-
-    # 2. zh 空 - 看准入状态兜底
-    if not zh:
-        if access in _ACCESS_HARD_BLOCK:
-            return True
-
-    # 3. 其他一律不算真禁
-    return False
+def _parse_int(v) -> int | None:
+    t = _normalize_text(v)
+    if not t:
+        return None
+    try:
+        return int(float(t))
+    except ValueError:
+        return None
 
 
 def _row_to_record(row: list) -> dict | None:
     if not row:
         return None
-    padded = row + [None] * (12 - len(row))
-    (
-        walmart_cat, walmart_ptg, walmart_pt,
-        amazon_path, amazon_leaf,
-        access_state, zh_can_do, cert,
-        special_note, mapping_source, asin_count, confidence,
-    ) = padded[:12]
+    padded = row + [None] * (11 - len(row))
+    (wm_cat, ptg, pt, leaf, path, bnode, rank, conf, match, notes, src) = padded[:11]
 
-    walmart_pt = _normalize_text(walmart_pt)
-    amazon_path = _normalize_text(amazon_path)
-    if not walmart_pt or walmart_pt == "Walmart Product Type":
+    pt_n = _normalize_text(pt)
+    path_n = _normalize_text(path)
+    if not pt_n or not path_n:
         return None
-    if not amazon_path:
-        # 退一步, 用 amazon_leaf
-        amazon_path = _normalize_text(amazon_leaf) or "(unknown)"
+    if pt_n == "Walmart Product Type":  # 跳过表头
+        return None
 
-    requires_cert, cert_text = _parse_cert(cert)
-    zh_forbid = _parse_forbidden(access_state, zh_can_do)
+    # 标记"无对应" 条目
+    is_unmapped = pt_n == UNMAPPED_PT
 
     return {
-        "amazon_category": amazon_path,
-        "walmart_product_type": walmart_pt,
-        "confidence": _normalize_text(confidence) or None,
-        "requires_certificate": requires_cert,
-        "zh_seller_forbidden": zh_forbid,
-        "requirements": cert_text or None,
-        "notes": _normalize_text(special_note) or None,
+        "amazon_category": path_n,
+        "walmart_product_type": pt_n,
+        "amazon_leaf": _normalize_text(leaf) or None,
+        "browse_node_id": _normalize_text(bnode) or None,
+        "rank_in_pt": _parse_int(rank),
+        "confidence": _normalize_text(conf) or None,
+        "match_type": _normalize_text(match) or None,
+        "notes": _normalize_text(notes) or None,
+        "source_batch": _normalize_text(src) or None,
+        "is_unmapped": is_unmapped,
+        # 旧字段占位 (向后兼容, 不依赖)
+        "requires_certificate": False,
+        "zh_seller_forbidden": False,
+        "requirements": None,
         "raw": {
-            "walmart_category": _normalize_text(walmart_cat),
-            "walmart_ptg": _normalize_text(walmart_ptg),
-            "amazon_leaf": _normalize_text(amazon_leaf),
-            "access_state": _normalize_text(access_state),
-            "zh_can_do": _normalize_text(zh_can_do),
-            "mapping_source": _normalize_text(mapping_source),
-            "asin_count": asin_count,
+            "walmart_category_display": _normalize_text(wm_cat),
+            "walmart_ptg_display": _normalize_text(ptg),
+            "amazon_leaf": _normalize_text(leaf),
+            "browse_node_id": _normalize_text(bnode),
+            "is_unmapped": is_unmapped,
         },
     }
 
@@ -159,6 +123,11 @@ def _upsert_batch(records: list[dict]) -> int:
                     r["requirements"],
                     r["notes"],
                     to_jsonb(r["raw"]),
+                    r["amazon_leaf"],
+                    r["browse_node_id"],
+                    r["rank_in_pt"],
+                    r["match_type"],
+                    r["source_batch"],
                 )
                 for r in records
             ]
@@ -166,23 +135,27 @@ def _upsert_batch(records: list[dict]) -> int:
                 """
                 INSERT INTO walmart_category_map
                   (amazon_category, walmart_product_type, confidence,
-                   requires_certificate, zh_seller_forbidden, requirements, notes, raw)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+                   requires_certificate, zh_seller_forbidden, requirements, notes, raw,
+                   amazon_leaf, browse_node_id, rank_in_pt, match_type, source_batch)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s)
                 ON CONFLICT (amazon_category, walmart_product_type) DO UPDATE
-                  SET confidence            = EXCLUDED.confidence,
-                      requires_certificate  = EXCLUDED.requires_certificate,
-                      zh_seller_forbidden   = EXCLUDED.zh_seller_forbidden,
-                      requirements          = EXCLUDED.requirements,
-                      notes                 = EXCLUDED.notes,
-                      raw                   = EXCLUDED.raw,
-                      synced_at             = NOW()
+                  SET confidence     = EXCLUDED.confidence,
+                      notes          = EXCLUDED.notes,
+                      raw            = EXCLUDED.raw,
+                      amazon_leaf    = EXCLUDED.amazon_leaf,
+                      browse_node_id = EXCLUDED.browse_node_id,
+                      rank_in_pt     = EXCLUDED.rank_in_pt,
+                      match_type     = EXCLUDED.match_type,
+                      source_batch   = EXCLUDED.source_batch,
+                      synced_at      = NOW()
                 """,
                 values,
             )
             return len(values)
 
 
-def run() -> SyncResult:
+def run(*, wipe: bool = False) -> SyncResult:
+    """若 wipe=True 先清空旧数据 (推荐, 因为 Sheet 2 是权威源)。"""
     job = "category_map"
     sync_id = start_sync_run(job)
     t0 = time.time()
@@ -190,8 +163,8 @@ def run() -> SyncResult:
     total_out = 0
     try:
         obj_token = _resolve_obj_token()
-        log.info("spreadsheet obj_token=%s, reading sheet %s ...", obj_token[:12], SHEET_ID)
-        rows = lc.read_paginated(obj_token, SHEET_ID, last_col_letter=LAST_COL, page_size=200)
+        log.info("reading sheet %s ...", SHEET_ID)
+        rows = lc.read_paginated(obj_token, SHEET_ID, last_col_letter=LAST_COL, page_size=500)
         log.info("fetched %d rows", len(rows))
         total_in = len(rows)
 
@@ -207,15 +180,22 @@ def run() -> SyncResult:
             seen.add(key)
             records.append(rec)
 
-        log.info("unique category mappings: %d", len(records))
+        log.info("unique mappings: %d (含 %d 条 '无对应Walmart PT')",
+                 len(records), sum(1 for r in records if r["is_unmapped"]))
+
+        if wipe:
+            with db_conn() as c:
+                with c.cursor() as cur:
+                    cur.execute("TRUNCATE walmart_category_map")
+                    log.info("TRUNCATE walmart_category_map 完成")
 
         for chunk in batched(records, 500):
             total_out += _upsert_batch(chunk)
 
-        log.info("done in %.1fs, rows_in=%d, rows_out=%d", time.time() - t0, total_in, total_out)
+        log.info("done in %.1fs, in=%d out=%d", time.time() - t0, total_in, total_out)
         finish_sync_run(sync_id, status="ok", rows_in=total_in, rows_out=total_out)
         return SyncResult(job=job, rows_in=total_in, rows_out=total_out, status="ok")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         log.exception("sync failed")
         finish_sync_run(sync_id, status="error", rows_in=total_in, rows_out=total_out, error=str(e)[:500])
         return SyncResult(job=job, rows_in=total_in, rows_out=total_out, status="error", error=str(e))
@@ -223,11 +203,9 @@ def run() -> SyncResult:
 
 if __name__ == "__main__":
     import argparse
-
-    parser = argparse.ArgumentParser(description="Sync category map from Feishu")
-    parser.add_argument("--log-level", default="INFO")
-    args = parser.parse_args()
-    logging.basicConfig(level=args.log_level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-
-    res = run()
-    res.print_summary()
+    p = argparse.ArgumentParser()
+    p.add_argument("--log-level", default="INFO")
+    p.add_argument("--wipe", action="store_true", help="先清空表 (新数据覆盖式)")
+    args = p.parse_args()
+    logging.basicConfig(level=args.log_level, format="%(asctime)s [%(levelname)s] %(message)s")
+    run(wipe=args.wipe).print_summary()

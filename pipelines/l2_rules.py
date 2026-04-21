@@ -33,6 +33,8 @@ import psycopg.rows
 from config import get_settings
 from sync._common import db_conn
 
+from functools import lru_cache
+
 from ._stopwords import is_stopword
 from .forbidden_mega_categories import match_mega
 from .models import L1Result, L2Result, ProductInfo, RuleHit
@@ -94,16 +96,18 @@ _ZH_HARD_BLOCK_KEYWORDS = ("否", "不可做", "进不去", "禁售")
 
 
 def _rule_zh_seller_forbidden(l1: L1Result) -> list[RuleHit]:
-    """R1: 只有映射表里 zh_can_do 明确含 '否/不可做/进不去/禁售' 才触发。
+    """R1: 中国卖家真禁 — 查 walmart_pt_meta.zh_seller_forbidden 字段 (PT 级权威, O(1))。
 
-    "需评估" "合规投入" 等模糊值 **不算真禁**, 它们由 L2 R3 (证书) + L3 LLM 评估细节。
+    pt_meta 里的 zh_seller_forbidden 已由 sync 阶段基于 zh_can_do 精确派生:
+      - zh_can_do 含 '否/不可做/进不去/禁售' → True
+      - (zh_can_do 空 且 access_state='禁售') → True
+      - 其他 → False
 
-    策略: 对同一 PT 的所有映射条目查 zh_can_do, 若**全部**都是硬禁, 才认真禁 (最宽松)。
+    "需评估 (要合规投入)" 不算真禁 (交 L2 R3 证书规则评估细节).
     """
     pt = (l1.walmart_product_type or "").strip()
     if not pt or pt in {"unknown", "(unknown)"}:
         return []
-
     # 已在 L1 阶段扣过 excluded_category → L2 不重复
     if l1.excluded_category_reason:
         return []
@@ -112,35 +116,15 @@ def _rule_zh_seller_forbidden(l1: L1Result) -> list[RuleHit]:
         with c.cursor() as cur:
             cur.execute(
                 """
-                SELECT raw->>'zh_can_do' AS zh_can_do,
-                       raw->>'walmart_category' AS walmart_category,
-                       amazon_category
-                FROM walmart_category_map
-                WHERE walmart_product_type = %s
+                SELECT walmart_category, walmart_ptg, access_state,
+                       zh_can_do, zh_seller_forbidden
+                FROM walmart_pt_meta WHERE walmart_product_type = %s
                 """,
                 (pt,),
             )
-            rows = cur.fetchall()
+            row = cur.fetchone()
 
-    if not rows:
-        return []
-
-    # 检查每条映射的 zh_can_do 是否含硬禁关键词
-    all_hard_forbidden = True
-    sample_reasons: list[dict[str, Any]] = []
-    for r in rows:
-        zh = (r.get("zh_can_do") or "").strip()
-        hit_kw = next((kw for kw in _ZH_HARD_BLOCK_KEYWORDS if kw in zh), None)
-        if hit_kw:
-            sample_reasons.append({
-                "zh_can_do": zh,
-                "matched_keyword": hit_kw,
-                "amazon_category": r.get("amazon_category"),
-            })
-        else:
-            all_hard_forbidden = False
-
-    if not all_hard_forbidden or not sample_reasons:
+    if not row or not row.get("zh_seller_forbidden"):
         return []
 
     return [
@@ -150,26 +134,32 @@ def _rule_zh_seller_forbidden(l1: L1Result) -> list[RuleHit]:
             penalty=-100,
             detail={
                 "walmart_pt": pt,
-                "walmart_category": (rows[0].get("walmart_category") or l1.walmart_category),
-                "source": "walmart_category_map.raw.zh_can_do",
-                "mappings_count": len(rows),
-                "hits": sample_reasons[:5],  # 最多存 5 条示例, 避免膨胀
+                "walmart_category": row.get("walmart_category"),
+                "zh_can_do": row.get("zh_can_do"),
+                "access_state": row.get("access_state"),
+                "source": "walmart_pt_meta.zh_seller_forbidden",
             },
         )
     ]
 
 
 # =============================================================
-# R2: 禁售大类 (9 大) - 基于 PT / walmart_category 前缀
+# R2: 禁售大类 (seed yaml PT 名关键词匹配)
+#
+# 为什么不用 walmart_prohibited_policy 的粗粒度映射:
+#   walmart_category 层级太粗 (Garden & Patio 下既有园艺耙也有 Plants & Seeds 禁售),
+#   直接按 walmart_category 匹配政策会误杀. 政策只用作 L3 LLM 上下文.
 # =============================================================
 
 
 def _rule_forbidden_mega_cat(l1: L1Result) -> list[RuleHit]:
+    """R2: 禁售大类 — seed yaml PT 名关键词匹配 (细粒度)。"""
     pt = (l1.walmart_product_type or "").strip()
     if not pt or pt in {"unknown", "(unknown)"}:
         return []
     if l1.excluded_category_reason:
         return []  # L1 已死不重复扣
+
     hit = match_mega(walmart_pt=pt, walmart_category=l1.walmart_category)
     if not hit:
         return []

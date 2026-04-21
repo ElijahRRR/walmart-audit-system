@@ -478,7 +478,10 @@ Amazon 类目: {product.amazon_category_path or '(空)'}
 
 
 def _try_direct_high_confidence(product: ProductInfo) -> L1Result | None:
-    """Layer 1 快速通道: 精确匹配 + 高置信度 + 唯一 → 直出 (跳过 LLM)。
+    """Layer 1 快速通道: 精确匹配 + 高置信度 + 唯一有效 PT → 直出 (跳过 LLM)。
+
+    新架构: JOIN walmart_pt_meta 一次性拿 walmart_category / zh_can_do / zh_seller_forbidden。
+    排除 '无对应Walmart PT' 这种特殊条目 (走 _handle_unmapped 逻辑)。
 
     返回 None 表示不满足条件, 需走完整 LLM 流程。
     """
@@ -487,16 +490,21 @@ def _try_direct_high_confidence(product: ProductInfo) -> L1Result | None:
         return None
     with db_conn() as c:
         with c.cursor() as cur:
-            # 只认 confidence='高', 且该 Amazon 路径只对应唯一 walmart_pt
             cur.execute(
                 """
                 WITH hit AS (
-                    SELECT walmart_product_type, requires_certificate, zh_seller_forbidden, requirements,
-                           raw->>'walmart_category' AS walmart_category,
-                           raw->>'zh_can_do' AS zh_can_do,
-                           raw->>'walmart_ptg' AS walmart_ptg
-                    FROM walmart_category_map
-                    WHERE amazon_category = %s AND confidence = '高'
+                    SELECT m.walmart_product_type,
+                           meta.walmart_category,
+                           meta.walmart_ptg,
+                           meta.zh_can_do,
+                           meta.zh_seller_forbidden,
+                           meta.requirements,
+                           meta.access_state
+                    FROM walmart_category_map m
+                    LEFT JOIN walmart_pt_meta meta ON meta.walmart_product_type = m.walmart_product_type
+                    WHERE m.amazon_category = %s
+                      AND m.confidence = '高'
+                      AND m.walmart_product_type != '无对应Walmart PT'
                 )
                 SELECT *, (SELECT COUNT(DISTINCT walmart_product_type) FROM hit) AS cnt
                 FROM hit
@@ -513,19 +521,42 @@ def _try_direct_high_confidence(product: ProductInfo) -> L1Result | None:
         pt_source="map_direct_trusted",
         walmart_category=row.get("walmart_category"),
         zh_can_do=row.get("zh_can_do"),
-        requires_certificate=bool(row.get("requires_certificate")),
+        requires_certificate=False,  # 稍后 _apply_spec_override 从 walmart_pt_spec 覆盖
         zh_seller_forbidden=bool(row.get("zh_seller_forbidden")),
         requirements_text=row.get("requirements"),
     )
 
 
+def _check_unmapped_amazon_path(amazon_category_path: str) -> bool:
+    """检查该 Amazon 路径是否在映射表里标记为 '无对应Walmart PT'。
+
+    飞书里维护: 15745 条映射中有 675 条是明确无 Walmart PT 的. 这些 Amazon 路径即使走 LLM
+    也无法正确归类 (字典外), 应尽早 reject。
+    """
+    path = (amazon_category_path or "").strip()
+    if not path:
+        return False
+    with db_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1 FROM walmart_category_map
+                WHERE amazon_category = %s AND walmart_product_type = '无对应Walmart PT'
+                LIMIT 1
+                """,
+                (path,),
+            )
+            return cur.fetchone() is not None
+
+
 def _apply_spec_override(l1: L1Result) -> L1Result:
     """L1 结尾用 DB 权威源补 walmart_category + zh_can_do + requires_certificate。
 
-    新架构下 L1 只输出类目, 但为让 L2 规则避免重复查 DB, 这里预取几个字段:
-      - walmart_category (映射表顶级分类, 供 L2 R2 做前缀匹配)
-      - zh_can_do (映射表原字段, 供 L2 R1 判"否"真禁)
-      - requires_certificate (用官方 PT spec 权威覆盖)
+    新架构数据源分工:
+      - walmart_pt_meta (Sheet 1 沃尔玛类目): walmart_category / walmart_ptg / zh_can_do /
+        zh_seller_forbidden / access_state — **PT 级权威** (每 PT 只有一行)
+      - walmart_pt_spec (官方 pt_templates_full.json): has_real_cert / real_cert_fields —
+        **认证级权威** (Walmart 官方)
 
     对 unknown PT: 不做任何覆盖。
     """
@@ -533,7 +564,7 @@ def _apply_spec_override(l1: L1Result) -> L1Result:
     if not pt or pt in {"unknown", "(unknown)"}:
         return l1
 
-    # 1. 官方 PT spec → requires_certificate + requirements_text (给向后兼容字段 + 供 R3 参考)
+    # 1. 官方 PT spec → requires_certificate + requirements_text (硬认证)
     with db_conn() as c:
         with c.cursor() as cur:
             cur.execute(
@@ -553,27 +584,41 @@ def _apply_spec_override(l1: L1Result) -> L1Result:
         l1.requires_certificate = has_cert
         l1.requirements_text = " | ".join(cert_fields) if has_cert else None
 
-    # 2. 映射表 → walmart_category (给 R2) + zh_can_do (给 R1)
-    # 取第一条映射 (多数 PT 只有 1-3 条映射, 顶级类目一致)
-    if not l1.walmart_category or not l1.zh_can_do:
-        with db_conn() as c:
-            with c.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT raw->>'walmart_category' AS walmart_category,
-                           raw->>'zh_can_do' AS zh_can_do
-                    FROM walmart_category_map
-                    WHERE walmart_product_type = %s
+    # 2. pt_meta (Sheet 1 权威) → walmart_category + zh_can_do + zh_seller_forbidden
+    #    每 PT 唯一行, 权威且 O(1) 查询
+    with db_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                SELECT walmart_category, walmart_ptg, access_state,
+                       zh_can_do, zh_seller_forbidden
+                FROM walmart_pt_meta WHERE walmart_product_type = %s
+                """,
+                (pt,),
+            )
+            meta = cur.fetchone()
+    if meta:
+        l1.walmart_category = meta.get("walmart_category") or l1.walmart_category
+        l1.zh_can_do = meta.get("zh_can_do") or l1.zh_can_do
+        l1.zh_seller_forbidden = bool(meta.get("zh_seller_forbidden"))
+    else:
+        # pt_meta 里没 (145 条 mismatch), 降级到 category_map raw 兜底
+        if not l1.walmart_category or not l1.zh_can_do:
+            with db_conn() as c:
+                with c.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT raw->>'walmart_category_display' AS walmart_category,
+                               raw->>'is_unmapped' AS is_unmapped
+                        FROM walmart_category_map
+                        WHERE walmart_product_type = %s
                     LIMIT 1
                     """,
                     (pt,),
                 )
                 mrow = cur.fetchone()
-        if mrow:
-            if not l1.walmart_category:
+            if mrow and not l1.walmart_category:
                 l1.walmart_category = mrow.get("walmart_category")
-            if not l1.zh_can_do:
-                l1.zh_can_do = mrow.get("zh_can_do")
 
     return l1
 
@@ -586,6 +631,27 @@ async def classify(product: ProductInfo, *, skip_llm: bool = False) -> L1Result:
       2. 其他情况: Embedding 语义 + 关键词反查 + 映射表候选 + LLM rerank (方案 C)
       3. 最后: 用沃尔玛官方 PT spec 覆盖 requires_certificate (比映射表精准)
     """
+    # Layer 0: 映射表明确标记"无对应 Walmart PT" 的 Amazon 路径 — 直接返回 excluded
+    if _check_unmapped_amazon_path(product.amazon_category_path):
+        l1 = L1Result(
+            walmart_product_type="unknown",
+            pt_confidence="低",
+            pt_source="none",
+            excluded_category_reason="无对应 Walmart PT (映射表明确标记)",
+        )
+        l1.hits.append(
+            RuleHit(
+                stage="L1",
+                rule_code="unmapped_amazon_path",
+                penalty=-100,
+                detail={
+                    "reason": "Amazon 路径在映射表被标记为 '无对应Walmart PT', 上架 Walmart 会失败",
+                    "amazon_path": product.amazon_category_path,
+                },
+            )
+        )
+        return l1
+
     # Layer 1 高置信度快速通道 (50%+ 产品命中, 精度 >90%)
     if not skip_llm:
         fast = _try_direct_high_confidence(product)
