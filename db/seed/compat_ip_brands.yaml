@@ -41,14 +41,14 @@ compat_triggers:
   - "兼容"
   - "替换装"
 
-# 硬拦品牌 (数据验证 100% E 知产)
-# 新增要求: 满足
-#   (1) 已在 blacklist_brands 表
-#   (2) walmart_error_records 里 "触发词 + 品牌" 组合 E 占比 ≥ 90%
-#   (3) 样本 ≥ 5 条
-hard_brands:
-  - "Dyson"    # 27/27 = 100% E (9 天数据)
-  - "IKEA"     # 5/5 = 100% E (9 天数据)
+# 硬拦品牌 - 手工补充列表 (补 blacklist_brand_ip_stats 之外的)
+# 主要来源 = blacklist_brand_ip_stats WHERE severity='hard' (自动筛)
+# 这个 yaml 列表是辅助, 用于:
+#   - 数据未覆盖的品牌 (如 IKEA 当前不在 blacklist_brands 表)
+#   - 员工根据业务直觉认定的强 IP 品牌
+# 两份列表取并集使用
+additional_hard_brands:
+  - "IKEA"     # 5/5 = 100% E (但不在 blacklist_brands, 手工补)
 
 # 豁免词 (即使命中触发词+品牌, 这些场景放行)
 # 例: "compatible with most 7/16 inch" → 没具体品牌, 是规格描述, 不应拦

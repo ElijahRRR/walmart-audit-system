@@ -109,6 +109,35 @@ CREATE INDEX IF NOT EXISTS idx_gt_category ON violation_groundtruth(reason_categ
 CREATE INDEX IF NOT EXISTS idx_gt_source ON violation_groundtruth(source_sheet);
 
 -- ============================================================
+-- 黑名单品牌 IP 侵权 precision 统计 (Phase0 compat 规则用)
+--
+-- 对每个 blacklist_brand, 扫 walmart_error_records.title 算命中率:
+--   precision_pct = e_hits / total_hits * 100   (命中里真 IP 侵权占比)
+-- severity 按 precision 分层:
+--   'hard'   : precision >= 70% AND total >= 10  → Phase0 compat 硬拦
+--   'medium' : precision >= 30% AND total >= 5   → L2 R4 软扣
+--   'soft'   : 其他 (通用词/低样本)              → 保留 L2 R4 -15 + L3
+--
+-- 员工可手工 override (override_severity). 脚本定时重算不会覆盖 override.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS blacklist_brand_ip_stats (
+    brand             TEXT PRIMARY KEY,        -- 对应 blacklist_brands.brand
+    total_hits        INT DEFAULT 0,           -- title 命中总次数
+    e_hits            INT DEFAULT 0,           -- 其中 error_code='E' 次数
+    precision_pct     NUMERIC(5,2),            -- e_hits / total_hits * 100
+    severity          TEXT,                    -- auto: hard / medium / soft
+    override_severity TEXT,                    -- 人工覆盖 (优先级高)
+    override_note     TEXT,
+    override_by       TEXT,
+    last_analyzed_at  TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_bbs_severity
+    ON blacklist_brand_ip_stats(COALESCE(override_severity, severity));
+CREATE INDEX IF NOT EXISTS idx_bbs_precision
+    ON blacklist_brand_ip_stats(precision_pct DESC);
+
+-- ============================================================
 -- 沃尔玛错误商品日报 (9+ 天全量原始记录, 供 groundtruth + 诊断用)
 -- 数据源: 飞书"错误商品记录" spreadsheet (YlA1szPAAhW7CCtmG5hcp6vkndd)
 -- 只拉日报 sheet (XXX问题商品), 跳过聚合/监管删除 sheet
