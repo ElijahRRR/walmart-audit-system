@@ -17,8 +17,8 @@ from typing import Any
 
 from sync._common import db_conn, to_jsonb
 
-from . import l1_category, l2_rules, phase0
-from .models import AuditOutcome, L1Result, L2Result, Phase0Result, ProductInfo, RuleHit
+from . import l1_category, l2_rules, l3_llm, phase0
+from .models import AuditOutcome, L1Result, L2Result, L3Result, Phase0Result, ProductInfo, RuleHit
 
 log = logging.getLogger(__name__)
 
@@ -183,10 +183,14 @@ async def audit_one(
         l2=l2,
     )
 
-    # L3 (占位)
+    # L3 LLM 语义审核 (仅 L2 pass 才跑)
     if l2.verdict == "pass" and run_l3:
-        # TODO(F18-F20): 调 pipelines.l3_llm.judge(product, l1, l2)
-        log.warning("run_l3=True 但 L3 暂缓接入 (用户要求先搞定 L1/L2)")
+        l3 = await l3_llm.judge(product, l1, l2)
+        outcome.l3 = l3
+        if l3.verdict == "reject":
+            # L3 不扣分, 直接改终裁
+            outcome.verdict = "reject"
+            outcome.stage_stopped_at = "L3"
 
     # L4 (占位)
     if outcome.verdict == "pass" and run_l4:

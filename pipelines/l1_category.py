@@ -612,13 +612,13 @@ def _apply_spec_override(l1: L1Result) -> L1Result:
                                raw->>'is_unmapped' AS is_unmapped
                         FROM walmart_category_map
                         WHERE walmart_product_type = %s
-                    LIMIT 1
-                    """,
-                    (pt,),
-                )
-                mrow = cur.fetchone()
-            if mrow and not l1.walmart_category:
-                l1.walmart_category = mrow.get("walmart_category")
+                        LIMIT 1
+                        """,
+                        (pt,),
+                    )
+                    mrow = cur.fetchone()
+                    if mrow and not l1.walmart_category:
+                        l1.walmart_category = mrow.get("walmart_category")
 
     return l1
 
