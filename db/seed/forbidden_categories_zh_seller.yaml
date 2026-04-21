@@ -55,15 +55,11 @@ excluded_categories:
     reason: 汽配禁售
 
   # --- 带电产品 (title 关键词) ---
-  - match: "Battery"
-    scope: title_keyword
-    reason: 带电产品禁售
-  - match: "Rechargeable"
-    scope: title_keyword
-    reason: 带电产品禁售
-  - match: "Lithium"
-    scope: title_keyword
-    reason: 带电产品禁售
+  # 用户决定放松硬禁 (2026-04-21): 带电判定交给 L3 LLM 语义, 这里只保留最确定的整机电池类
+  # 原来的 Battery / Rechargeable / Lithium 会硬拦 "No Battery 配件" / "LED 装饰灯" 等误判
+  # - match: "Battery"           scope: title_keyword  (放松, 交 L3)
+  # - match: "Rechargeable"      scope: title_keyword  (放松, 交 L3)
+  # - match: "Lithium"           scope: title_keyword  (放松, 交 L3)
   - match: "Power Bank"
     scope: walmart_pt
     reason: 带电产品禁售

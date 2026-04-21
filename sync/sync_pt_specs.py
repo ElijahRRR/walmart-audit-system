@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 
 SPEC_PATH = Path("/Users/nextderboy/Downloads/pt_templates/pt_templates_full.json")
 
-# 搬运模式 真实做不了 的必填 cert 字段
+# 搬运模式 真实做不了 的必填 cert 字段 (L2 R3 硬扣 -100 reject)
 REAL_CERT_FIELDS = {
     # UL/ETL 电气 NRTL 认证
     "has_nrtl_listing_certification",
@@ -57,6 +57,34 @@ REAL_CERT_FIELDS = {
     "contains_battery",
 }
 
+# 软合规字段 - 需填写警告/披露信息但搬运模式通常可解决 (L2 R3 软扣 -10, pass 提醒)
+# 排除 isProp65WarningRequired (6942 PT 全 required, 区分度 = 0)
+SOFT_CERT_FIELDS = {
+    # 儿童/小件窒息风险警告 (2263 PT required, 32% 区分度好)
+    "smallPartsWarnings",
+    # 州级化学披露 (566 PT required)
+    "state_chemical_disclosure",
+    # 成分披露 (食品/化妆品/保健类)
+    "ingredients",
+    "activeIngredients",
+    "ingredientListImage",
+    "hasIngredientList",
+    "inactiveIngredients",
+    "ingredient_properties",
+    # 法律标签披露 (纺织品等)
+    "law_label_disclosure",
+    # 食物过敏原声明
+    "foodAllergenStatements",
+    "allergens_not_contained",
+    # 化学品分级 (化学/工业)
+    "chemical_grade",
+    "chemical_purity_percentage",
+    "chemical_standard_type",
+    # 儿童产品通用
+    "children_age_range_description",
+    "minimum_age_recommended",
+}
+
 
 def _extract_pt_row(pt_name: str, spec: dict) -> dict:
     """从一个 PT 的 spec 提取要落库的行。"""
@@ -64,6 +92,10 @@ def _extract_pt_row(pt_name: str, spec: dict) -> dict:
     real_cert_fields = [
         f.get("field") for f in fields
         if f.get("field") in REAL_CERT_FIELDS and f.get("required")
+    ]
+    soft_cert_fields = [
+        f.get("field") for f in fields
+        if f.get("field") in SOFT_CERT_FIELDS and f.get("required")
     ]
     # 压缩 fields 存储 (去掉 detail 的冗余描述, 只保留 field/required/type/desc 前 150字/enum)
     compact_fields = []
@@ -82,6 +114,8 @@ def _extract_pt_row(pt_name: str, spec: dict) -> dict:
         "required_fields": spec.get("required_fields") or [],
         "real_cert_fields": real_cert_fields,
         "has_real_cert": bool(real_cert_fields),
+        "soft_cert_fields": soft_cert_fields,
+        "has_soft_cert": bool(soft_cert_fields),
         "fields": compact_fields,
     }
 
@@ -91,6 +125,9 @@ def _upsert_batch(rows: list[dict]) -> int:
         return 0
     with db_conn() as c:
         with c.cursor() as cur:
+            # 确保软合规字段列存在 (幂等)
+            cur.execute("ALTER TABLE walmart_pt_spec ADD COLUMN IF NOT EXISTS soft_cert_fields JSONB")
+            cur.execute("ALTER TABLE walmart_pt_spec ADD COLUMN IF NOT EXISTS has_soft_cert BOOLEAN DEFAULT FALSE")
             values = [
                 (
                     r["walmart_product_type"],
@@ -99,6 +136,8 @@ def _upsert_batch(rows: list[dict]) -> int:
                     to_jsonb(r["required_fields"]),
                     to_jsonb(r["real_cert_fields"]),
                     r["has_real_cert"],
+                    to_jsonb(r["soft_cert_fields"]),
+                    r["has_soft_cert"],
                     to_jsonb(r["fields"]),
                 )
                 for r in rows
@@ -107,14 +146,17 @@ def _upsert_batch(rows: list[dict]) -> int:
                 """
                 INSERT INTO walmart_pt_spec(
                     walmart_product_type, total_fields, required_count,
-                    required_fields, real_cert_fields, has_real_cert, fields
-                ) VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s, %s::jsonb)
+                    required_fields, real_cert_fields, has_real_cert,
+                    soft_cert_fields, has_soft_cert, fields
+                ) VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s, %s::jsonb, %s, %s::jsonb)
                 ON CONFLICT (walmart_product_type) DO UPDATE
                   SET total_fields = EXCLUDED.total_fields,
                       required_count = EXCLUDED.required_count,
                       required_fields = EXCLUDED.required_fields,
                       real_cert_fields = EXCLUDED.real_cert_fields,
                       has_real_cert = EXCLUDED.has_real_cert,
+                      soft_cert_fields = EXCLUDED.soft_cert_fields,
+                      has_soft_cert = EXCLUDED.has_soft_cert,
                       fields = EXCLUDED.fields,
                       synced_at = NOW()
                 """,

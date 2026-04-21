@@ -212,11 +212,12 @@ HARD_CERT_FIELDS = frozenset({
 def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
     """R3: 按沃尔玛官方 PT spec 判证书要求, 硬/软分层。
 
-    硬性 (HARD_CERT_FIELDS): NRTL/CPSIA/FDA/OTC/危险品等 → -100, reject
-      这些需要实验室发证/官方注册号, 搬运模式客观做不了
-    软性 (其他): → -10, 仅警告 (Trust & Safety 抽查风险)
+    数据源: walmart_pt_spec.has_real_cert / has_soft_cert
 
-    实际当前 spec 里 958 条 has_real_cert=TRUE 全是 NRTL (硬性), 会被 -100。
+    硬性 (has_real_cert=TRUE): NRTL/CPSIA/FDA/OTC/危险品/电池等 → -100, reject
+      需要实验室发证/官方注册号, 搬运模式客观做不了 (958 PT, 13.8%)
+    软性 (has_soft_cert=TRUE 且非硬): smallParts/state_chemical/ingredients 等 → -10, 警告
+      需要填写披露信息但搬运模式能做 (2788 纯软 PT, 40.2%)
     """
     pt = (l1.walmart_product_type or "").strip()
     if not pt or pt in {"unknown", "(unknown)"}:
@@ -224,16 +225,27 @@ def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
     if l1.excluded_category_reason:
         return []
 
-    if not l1.requires_certificate:
+    with db_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                SELECT has_real_cert, real_cert_fields, has_soft_cert, soft_cert_fields
+                FROM walmart_pt_spec WHERE walmart_product_type = %s
+                """,
+                (pt,),
+            )
+            r = cur.fetchone()
+
+    if not r:
         return []
 
-    cert_list: list[str] = []
-    if l1.requirements_text:
-        cert_list = [s.strip() for s in str(l1.requirements_text).split("|") if s.strip()]
+    has_hard = bool(r.get("has_real_cert"))
+    has_soft = bool(r.get("has_soft_cert"))
+    real_fields = r.get("real_cert_fields") or []
+    soft_fields = r.get("soft_cert_fields") or []
 
-    # 判定硬/软
-    hard_hits = [f for f in cert_list if f in HARD_CERT_FIELDS]
-    if hard_hits:
+    # 硬性优先
+    if has_hard:
         return [
             RuleHit(
                 stage="L2",
@@ -241,28 +253,30 @@ def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
                 penalty=-100,
                 detail={
                     "walmart_pt": pt,
-                    "hard_cert_fields": hard_hits,
-                    "all_cert_fields": cert_list,
-                    "source": "walmart_pt_spec",
+                    "hard_cert_fields": real_fields,
+                    "soft_cert_fields": soft_fields,
+                    "source": "walmart_pt_spec.has_real_cert",
                     "note": "硬性认证 (NRTL/CPSIA/FDA/OTC/危险品等), 搬运模式客观做不了",
                 },
             )
         ]
 
-    # 软性 (当前 spec 不触发, 预留)
-    return [
-        RuleHit(
-            stage="L2",
-            rule_code="cat_requires_cert_soft",
-            penalty=-10,
-            detail={
-                "walmart_pt": pt,
-                "soft_cert_fields": cert_list,
-                "source": "walmart_pt_spec",
-                "note": "软性合规 (可能 Trust & Safety 抽查, 需下游人工复核)",
-            },
-        )
-    ]
+    if has_soft:
+        return [
+            RuleHit(
+                stage="L2",
+                rule_code="cat_requires_cert_soft",
+                penalty=-10,
+                detail={
+                    "walmart_pt": pt,
+                    "soft_cert_fields": soft_fields,
+                    "source": "walmart_pt_spec.has_soft_cert",
+                    "note": "软合规 (Prop65/小件警告/成分披露等), 需填写披露信息",
+                },
+            )
+        ]
+
+    return []
 
 
 # =============================================================
