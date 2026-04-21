@@ -10,6 +10,7 @@ qwen-plus 文本判定, 主要补 L2 硬规则抓不到的 2 类问题:
   - R4/R5 命中词默认是通用词 — 除非文本里有 ®/™/Official/Licensed/Authorized 等授权信号, 或是知名品牌
 
 并发 + 重试由 llm_client 处理 (Semaphore(100) + tenacity 3 次)。
+**LLM 调用启用输入哈希缓存** (llm_cache 表): 相同 product + L1/L2 state 重跑直接拿旧结果。
 
 public api:
   async judge(product, l1, l2) -> L3Result
@@ -19,9 +20,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from functools import lru_cache
 from typing import Any
 
+import yaml
+
+from config import ROOT
 from integrations import llm_client
+from sync._common import db_conn
 
 from . import l3_policy_router
 from .models import L1Result, L2Result, L3Result, ProductInfo, RuleHit
@@ -30,11 +36,100 @@ log = logging.getLogger(__name__)
 
 
 # =============================================================
-# Prompt
+# yaml-driven 词表 (db/seed/l3_keywords.yaml)
+# =============================================================
+
+_KEYWORDS_YAML = ROOT / "db" / "seed" / "l3_keywords.yaml"
+
+
+@lru_cache(maxsize=1)
+def _load_keywords() -> dict[str, Any]:
+    """加载 l3_keywords.yaml, 含 sticker_sensitive_themes + replica_weapons 两大块。"""
+    if not _KEYWORDS_YAML.exists():
+        log.warning("l3_keywords.yaml 不存在, 用空词表 (prompt B.1/B.2 会退化)")
+        return {"sticker_sensitive_themes": {}, "replica_weapons": {}}
+    with _KEYWORDS_YAML.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    log.info("loaded l3_keywords.yaml v=%s (sticker: %d groups, weapon: %d subkeys)",
+             data.get("version"),
+             len(data.get("sticker_sensitive_themes") or {}),
+             len(data.get("replica_weapons") or {}))
+    return data
+
+
+def refresh_keywords_cache() -> None:
+    _load_keywords.cache_clear()
+
+
+def _fmt_list(items: list[str], max_items: int = 12) -> str:
+    """把词列表格式化成 / 分隔的字符串, 最多 max_items 个。"""
+    if not items:
+        return "(无)"
+    return " / ".join(items[:max_items])
+
+
+def _fmt_sticker_themes() -> str:
+    kw = _load_keywords().get("sticker_sensitive_themes") or {}
+    lines = []
+    mapping = [
+        ("adult_content",        "成人内容"),
+        ("intolerance_symbols",  "不容忍象征"),
+        ("political_mockery",    "政治讽刺 (需与 funny/parody/mock 组合)"),
+        ("crude_humor_modifiers","恶搞冒犯 (需与 funny/pranks 组合)"),
+        ("hateful",              "明显歧视"),
+    ]
+    for key, zh in mapping:
+        items = kw.get(key) or []
+        if items:
+            lines.append(f"- {zh}: {_fmt_list(items, 12)}")
+    return "\n".join(lines) if lines else "(无)"
+
+
+def _fmt_weapons_block() -> str:
+    """仿真武器 prompt 区块 (从 yaml 构造)。"""
+    w = _load_keywords().get("replica_weapons") or {}
+    weapon_terms = w.get("weapon_terms") or []
+    realistic_terms = w.get("realistic_terms") or []
+    standalone = w.get("standalone_block") or []
+    exempt = w.get("exempt") or {}
+
+    def _fmt_exempt(category_key: str, label: str) -> str:
+        items = exempt.get(category_key) or []
+        return f"  - {label}: {_fmt_list(items, 15)}" if items else ""
+
+    exempt_lines = [
+        _fmt_exempt("functional_kitchen",    "厨房/烘焙"),
+        _fmt_exempt("functional_jewelry",    "珠宝/饰品 (需 jewelry/necklace 上下文)"),
+        _fmt_exempt("functional_decoration", "摆件/装饰"),
+        _fmt_exempt("brand",                 "品牌豁免"),
+        _fmt_exempt("toy_liquid",            "水/泡泡玩具"),
+        _fmt_exempt("compliance_markers",    "合规标识"),
+        _fmt_exempt("other",                 "其他"),
+    ]
+    revocation = exempt.get("revocation_patterns") or []
+
+    return f"""**触发条件** (武器词 + 仿真词共现, 或 standalone 单独命中):
+- 武器类词: {_fmt_list(weapon_terms, 20)}
+- 仿真类词: {_fmt_list(realistic_terms, 15)}
+- standalone (单独命中即拒): {_fmt_list(standalone, 12)}
+
+**豁免** (最高优先级, 任一命中直接 pass):
+{chr(10).join(e for e in exempt_lines if e)}
+
+**豁免例外** (命中豁免词但描述仍强调这些, 仍 reject):
+  - {_fmt_list(revocation, 8)}
+"""
+
+
+# =============================================================
+# Prompt (System 保持稳定, 动态词表插到指定位置)
 # =============================================================
 
 
-SYSTEM_PROMPT = """你是沃尔玛 Marketplace 合规审核 AI (站在沃尔玛官方立场)。
+def _build_system_prompt() -> str:
+    sticker_block = _fmt_sticker_themes()
+    weapons_block = _fmt_weapons_block()
+    return f"""你是沃尔玛 Marketplace 合规审核 AI (站在沃尔玛官方立场)。
 卖家是中国搬运模式、无任何证书/认证、每日数万产品。
 你只输出严格 JSON, 不要任何解释文字或 markdown 前后缀。
 
@@ -62,47 +157,15 @@ SYSTEM_PROMPT = """你是沃尔玛 Marketplace 合规审核 AI (站在沃尔玛�
 - 嘲笑基于受保护特征 (种族/性别/性取向/宗教/残疾/体型/年龄)
 
 ### B.1 贴纸/海报/补丁/徽章/旗帜/T恤/装饰画/卡套/杯贴 类产品的特殊警戒 (重要)
-这类产品的"违规"藏在具体图案/文字里, 文本往往只是暗示。**只要文本同时出现以下任一组合, 倾向 reject (offensive)**:
-- 明确含 "adult" / "Adult content" / "Adult stickers" / "sexual" — 成人内容
-- 含 "Confederate" / "Nazi" / "Swastika" / "SS" — 不容忍象征
-- 含 "Trump" / "Biden" / "MAGA" / "political candidate" / 政治候选人姓名 + "funny/parody/mock" — 政治讽刺
-- 含 "pranks" / "funny" + "inappropriate" / "offensive" / "crude humor" — 恶搞冒犯
-- 含 "hateful" / "racist" / "discrimination" — 明显歧视
-- 产品是 **混装 N 张** (如 "400 Pcs stickers"), 且描述列出多种主题里有任意一个敏感主题 → reject (因为整包里就算只有几张违规贴纸, 也违反政策)
+这类产品的"违规"藏在具体图案/文字里, 文本往往只是暗示。**只要文本出现以下任一敏感主题词 (或组合), 倾向 reject (offensive)**:
+{sticker_block}
+- 产品是 **混装 N 张** (如 "400 Pcs stickers"), 描述列出多种主题里含任一敏感主题 → reject (因为整包里就算只有几张违规贴纸, 也违反政策)
 
 ### B.2 仿真武器 / 仿真枪 / 军警装备玩具 (重要, 沃尔玛 Military & Law Enforcement 政策 + 15 U.S.C. § 5001)
-**判定规则**:
-- 产品文本同时出现 **"武器类词"** + **"仿真类词"** → reject (offensive, 仿真武器)
-  - 武器类词: firearm / handgun / pistol / revolver / rifle / shotgun / gun / bullet / cartridge / ammo / ammunition / magazine clip / grenade / mortar / bb gun / pellet gun / airsoft / stun gun / taser / pepper spray / brass knuckles / switchblade / butterfly knife / tactical knife / combat knife / throwing star / shuriken / nunchaku / paintball gun
-  - 仿真类词: replica / realistic / imitation / lookalike / 1:1 scale / 1:2 scale / 1:3 scale / 1:4 scale / full scale / life-size / real-looking / authentic looking / detailed replica / prop gun / movie prop / non-firing / display gun / miniature firearm / miniature gun / miniature pistol
-- **以下关键词单独出现也判 reject** (强违规标识, 无需组合):
-  - "replica firearm" / "replica gun" / "replica pistol" / "replica revolver" / "replica rifle" / "replica shotgun"
-  - "imitation firearm" / "prop firearm" / "non-firing replica"
-  - "gun-shaped keychain" / "mini gun keychain" / "miniature firearm"
-
-**豁免** (即使命中上述词也放行, 判 pass) — **必须优先检查**, 只要命中任一豁免立刻判 pass:
-- **功能型豁免** (产品功能不是武器) — 这是 **最高优先级豁免**, 命中 **直接 pass**,
-  无论文本里是否同时含 "replica/realistic/miniature/1:3 scale" 都不生效:
-  - 厨房/烘焙: "cookie cutter" / "bake mold" / "baking mold" / "cake pan" /
-    "ice cube tray" / "jello mold" / "chocolate mold" / "silicone mold" / "cake topper"
-  - 珠宝/饰品: "pendant" / "necklace pendant" / "charm" / "bracelet charm" / "earring" /
-    "brooch" / "pin" / "lapel pin" / "ring" (只要在 "jewelry" / "necklace" / "bracelet" 上下文)
-  - 摆件/装饰: "ornament" / "decoration" / "figurine" / "statue" / "sculpture" /
-    "wall decor" / "paperweight" / "desk decor" / "mini figure" / "collectible figurine"
-  - 原则: 产品描述明确其用途是"装饰/饰品/厨房/玩具造型摆件", **不会被误认作真武器使用**, 豁免
-  - ⚠️ 例外: 即使命中上述豁免词, 若描述仍强调 "realistic detailing for firearm enthusiasts" /
-    "military fans collectible replica" 等明确瞄准"武器收藏/仿真爱好者", 仍 reject
-- **品牌豁免**: NERF / Hasbro 或产品描述含 "foam dart" / "foam blaster" / "foam bullet"
-- **水/泡泡玩具豁免**: "water gun" / "water pistol" / "squirt gun" / "water blaster" /
-  "bubble gun" / "soap gun"
-- **合规标识豁免**: 明确带 "bright orange tip" / "orange muzzle" / "transparent body" /
-  "clear plastic body"
-- **激光对战玩具豁免**: "infrared laser tag" / "laser tag toy"
-- **只卖配件豁免**: "gun holster only" / "holster without gun"
-
+{weapons_block}
 **判定流程** (严格按顺序):
 1. 先扫豁免词, 任一命中 → **立即判 pass**, 不再考虑仿真武器逻辑
-2. 否则扫武器词 + 仿真词共现, 或 standalone_block 词 → reject
+2. 否则扫 standalone 单独命中, 或武器词 + 仿真词共现 → reject
 
 **reason_category 用 "offensive"**, reason_text 明确写"仿真武器 (Military & Law Enforcement)"。
 
@@ -112,32 +175,64 @@ SYSTEM_PROMPT = """你是沃尔玛 Marketplace 合规审核 AI (站在沃尔玛�
 
 # 输出规范 (严格 JSON)
 
-{
+{{
   "verdict": "pass" | "reject",
   "reason_category": "ip_infringement" | "offensive" | "needs_cert" | "forbidden_cat" | "brand_misuse" | "none",
   "reason_text": "<=50字中文简短原因 (verdict=pass 时可留空)",
-  "signals": {
+  "signals": {{
     "has_trademark_symbol": true|false,
     "has_authorization_claim": true|false,
     "offensive_signals": ["<具体信号>",...]
-  },
+  }},
   "blacklist_brand_verdict": [
-    {"brand": "<命中词>", "is_real_brand": true|false, "evidence": "<简短判断理由>"}
+    {{"brand": "<命中词>", "is_real_brand": true|false, "evidence": "<简短判断理由>"}}
   ],
   "llm_confidence": "high" | "medium" | "low"
-}
+}}
 
 **重要约束**:
 - 除非证据明确, 默认 verdict=pass
 - reason_category 若 verdict=pass 必须填 "none"
-- blacklist_brand_verdict 对 L2 R4 命中词每个都要评估 (最多评估前 8 个)
+- blacklist_brand_verdict 对 L2 R4 命中词每个都要评估 (最多评估前 10 个)
 - L2 R5 的 USPTO 商标也可以一并评估
 - 不凭空添加未命中的品牌
 """
 
 
+# 在进程启动时预渲染一次 (避免每条请求都重建字符串)
+SYSTEM_PROMPT = _build_system_prompt()
+
+
+# =============================================================
+# walmart_pt_meta.notes 读取 (飞书人工标注, 如 "⚠️T&S抽查48h内")
+# =============================================================
+
+
+@lru_cache(maxsize=4096)
+def _get_pt_notes(pt: str) -> str | None:
+    """查询 walmart_pt_meta.notes, 给 L3 prompt 提供飞书人工标注信号。"""
+    if not pt:
+        return None
+    try:
+        with db_conn() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "SELECT notes FROM walmart_pt_meta WHERE walmart_product_type = %s",
+                    (pt,),
+                )
+                row = cur.fetchone()
+                if row and row.get("notes"):
+                    return str(row["notes"]).strip() or None
+    except Exception as e:  # noqa: BLE001
+        log.debug("_get_pt_notes(%s) 失败: %s", pt, e)
+    return None
+
+
 def _summarize_l2_hits(l2: L2Result) -> tuple[str, list[str]]:
-    """把 L2 命中信息组成摘要供 prompt, 同时返回 R4 命中词 list 用于 brand_verdict 引导。"""
+    """把 L2 命中信息组成摘要供 prompt, 同时返回 R4/R5 命中词 list 用于 brand_verdict 引导。
+
+    R4/R5 命中词统一取前 10 个 (系统 prompt 也要求 LLM 评估前 10 个)。
+    """
     lines: list[str] = []
     r4_brands: list[str] = []
     for h in l2.hits:
@@ -148,22 +243,28 @@ def _summarize_l2_hits(l2: L2Result) -> tuple[str, list[str]]:
             names = [m.get("brand", "") for m in matches if m.get("brand")]
             r4_brands.extend(names)
             pairs = [f"{m.get('brand')}(原文:{m.get('matched_phrase')})" for m in matches]
-            lines.append(f"* 标题/描述命中黑名单(R4, 共{h.detail.get('count', len(matches))}个): {', '.join(pairs)}")
+            lines.append(f"* 标题/描述命中黑名单(R4, 共{h.detail.get('count', len(matches))}个, 前10): {', '.join(pairs)}")
         elif h.rule_code == "forbidden_mega_cat":
             lines.append(f"* 禁售大类(R2): {h.detail}")
         elif h.rule_code == "cat_forbid_zh_seller":
             lines.append(f"* 中国卖家真禁(R1): {h.detail}")
         elif h.rule_code.startswith("cat_requires_cert"):
-            lines.append(f"* 类目需证书({h.rule_code}): {h.detail.get('requirements') or h.detail.get('soft_cert_fields') or h.detail.get('note')}")
+            lines.append(
+                f"* 类目需证书({h.rule_code}): "
+                f"{h.detail.get('requirements') or h.detail.get('soft_cert_fields') or h.detail.get('note')}"
+            )
         elif h.rule_code == "trademark_live":
-            marks = h.detail.get("matched_marks", [])[:8]
-            lines.append(f"* USPTO LIVE 商标(R5): {', '.join(marks)}")
+            marks = h.detail.get("matched_marks", [])[:10]
+            lines.append(f"* USPTO LIVE 商标(R5, 前10): {', '.join(marks)}")
             r4_brands.extend(m.lower() for m in marks if m)
-    return ("\n".join(lines) if lines else "(L2 无命中)"), list(dict.fromkeys(r4_brands))[:8]
+    return (
+        ("\n".join(lines) if lines else "(L2 无命中)"),
+        list(dict.fromkeys(r4_brands))[:10],
+    )
 
 
 def _build_user_prompt(product: ProductInfo, l1: L1Result, l2: L2Result) -> str:
-    bullets_txt = "\n".join(f"  - {b}" for b in product.bullet_points[:3]) or "  (无)"
+    bullets_txt = "\n".join(f"  - {b}" for b in product.bullet_points[:5]) or "  (无)"
     desc = (product.long_description or "").strip()
     if len(desc) > 800:
         desc = desc[:800] + "...(已截断)"
@@ -184,6 +285,14 @@ def _build_user_prompt(product: ProductInfo, l1: L1Result, l2: L2Result) -> str:
         else "  (无 R4/R5 命中, 跳过品牌真伪判定)"
     )
 
+    # walmart_pt_meta.notes — 飞书人工标注 (如 "⚠️T&S抽查48h内")
+    pt_notes = _get_pt_notes(l1.walmart_product_type or "")
+    notes_line = (
+        f"\n飞书人工标注 (pt_meta.notes): {pt_notes[:200]}"
+        if pt_notes
+        else ""
+    )
+
     return f"""# 产品信息
 
 ASIN: {product.asin}
@@ -192,7 +301,7 @@ ASIN: {product.asin}
 原产国: {product.country_of_origin or '(空)'}
 Amazon 类目: {product.amazon_category_path or '(空)'}
 沃尔玛 PT: {l1.walmart_product_type or '(空)'} (置信 {l1.pt_confidence}, 源 {l1.pt_source})
-沃尔玛 Category: {l1.walmart_category or '(空)'}
+沃尔玛 Category: {l1.walmart_category or '(空)'}{notes_line}
 
 五点描述:
 {bullets_txt}
@@ -204,7 +313,7 @@ Amazon 类目: {product.amazon_category_path or '(空)'}
 
 {l2_txt}
 
-# 待评估的品牌/商标词 (来自 L2 R4+R5, 判断是真品牌还是通用词)
+# 待评估的品牌/商标词 (来自 L2 R4+R5, 前 10 个, 判断是真品牌还是通用词)
 
 {brand_list}
 
@@ -220,7 +329,8 @@ Amazon 类目: {product.amazon_category_path or '(空)'}
 2. **冒犯性**: 对照上面的政策, 判断是否明确违反
    - Couples/Intimacy/Sensual 等性暗示关键词 + 相关画面暗示 → offensive
    - 贴纸/海报/T恤/配件 上可能印的种族/政治符号 → offensive
-3. **默认 pass** — 只有清晰证据才 reject
+3. **飞书人工标注**: 若 pt_meta.notes 含 "⚠️T&S抽查/高风险" 等警示, 判断时倾向更严格
+4. **默认 pass** — 只有清晰证据才 reject
 
 严格按 system prompt 中的 JSON 格式输出。
 """
@@ -302,6 +412,7 @@ async def judge(product: ProductInfo, l1: L1Result, l2: L2Result) -> L3Result:
     约定:
       - L3 只对 L2 pass 的产品调用 (orchestrator 保证, 这里不再检查)
       - LLM 超时/重试全失败时, 保守策略 = **pass** (不新增拒绝, 避免 L3 噪音拖低 precision)
+      - 启用 llm_cache, 相同输入哈希命中直接返回 (每条审核 token 开销摊到 1/N)
     """
     user_prompt = _build_user_prompt(product, l1, l2)
     try:
@@ -310,8 +421,9 @@ async def judge(product: ProductInfo, l1: L1Result, l2: L2Result) -> L3Result:
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
-            max_tokens=800,
+            max_tokens=1500,
             temperature=0.1,
+            cache=True,
         )
     except Exception as e:  # noqa: BLE001
         log.error("L3 LLM call failed for %s: %s", product.asin, e)
@@ -350,9 +462,9 @@ async def judge_batch(
     *,
     concurrency: int | None = None,
 ) -> list[L3Result]:
-    """批量判定 (llm_client 内部 Semaphore(100) 已控并发)。"""
+    """批量判定 (llm_client 内部 Semaphore(100) 已控并发, 缓存层级命中自动短路)。"""
     tasks = [judge(p, l1, l2) for (p, l1, l2) in triples]
     return await asyncio.gather(*tasks, return_exceptions=False)
 
 
-__all__ = ["judge", "judge_batch", "SYSTEM_PROMPT"]
+__all__ = ["judge", "judge_batch", "SYSTEM_PROMPT", "refresh_keywords_cache"]

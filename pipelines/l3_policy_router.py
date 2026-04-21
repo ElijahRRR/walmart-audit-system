@@ -192,8 +192,42 @@ def refresh_cache() -> None:
     _load_policy.cache_clear()
 
 
+def _summarize_prohibited(text: str, max_chars: int = 120) -> str:
+    """对 prohibited_items 文本做二次摘要: 保留前 2-3 条 bullet, 总长 <= max_chars。
+
+    原文用 "• " 分隔成 bullet 列表, 截取前面若干条直到字数不超限。
+    """
+    if not text:
+        return ""
+    # 清理换行, 拆 bullet
+    cleaned = text.replace("\r\n", "\n").replace("\r", "\n")
+    bullets = [b.strip() for b in cleaned.split("•") if b.strip()]
+    if not bullets:
+        return text[:max_chars]
+    out: list[str] = []
+    total = 0
+    for b in bullets:
+        # 单 bullet 截断到 80 字 (LLM 抓关键点即可)
+        one = b.split("\n")[0].strip()[:80]
+        if total + len(one) + 2 > max_chars:
+            # 装不下就停
+            if not out:
+                out.append(one[: max_chars - 2])
+            break
+        out.append(one)
+        total += len(one) + 2
+    return " / ".join(out)
+
+
 def format_for_prompt(policies: list[dict[str, Any]]) -> str:
-    """把挑选的政策格式化成 prompt 片段 (精简, 每条约 200-400 字)。"""
+    """把挑选的政策格式化成 prompt 片段 (每条压到 <= 160 字, 总 prompt 占比可控)。
+
+    改进后每条政策 ≤ 160 字:
+      - header: 30 字内
+      - overall_status: 保留
+      - 禁售项摘要 (前 2-3 条 bullet): 120 字内
+      - 有条件允许: 舍弃 (让 LLM 专注"什么违规", 不纠结边缘情况)
+    """
     if not policies:
         return "(无额外禁售政策需参考)"
     lines: list[str] = []
@@ -201,14 +235,12 @@ def format_for_prompt(policies: list[dict[str, Any]]) -> str:
         header = f"## {p['category_en']} ({p['category_zh']}) — 风险:{p.get('zh_seller_risk') or '未标'}"
         lines.append(header)
         if p.get("overall_status"):
-            lines.append(f"总体状态: {p['overall_status']}")
+            lines.append(f"状态: {p['overall_status'][:50]}")
         prohibited = (p.get("prohibited_items") or "").strip()
         if prohibited:
-            # 截断到 500 字, 太长稀释信号
-            lines.append(f"禁售项:\n{prohibited[:500]}")
-        cond = (p.get("conditional_items") or "").strip()
-        if cond:
-            lines.append(f"有条件允许:\n{cond[:250]}")
+            summary = _summarize_prohibited(prohibited, max_chars=120)
+            if summary:
+                lines.append(f"禁: {summary}")
         lines.append("")
     return "\n".join(lines)
 

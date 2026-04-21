@@ -109,6 +109,23 @@ CREATE INDEX IF NOT EXISTS idx_gt_category ON violation_groundtruth(reason_categ
 CREATE INDEX IF NOT EXISTS idx_gt_source ON violation_groundtruth(source_sheet);
 
 -- ============================================================
+-- LLM 请求缓存 (按输入哈希复用, 节省 qwen-plus token)
+-- 不缓存 product 内容, 而是缓存 (system_prompt + user_prompt + model) 哈希
+-- 产品内容变了 hash 自然变, 不会拿到旧结果
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS llm_cache (
+    input_hash   TEXT PRIMARY KEY,       -- sha256(system+user+model) 前 32 位
+    model        TEXT NOT NULL,
+    request      JSONB NOT NULL,          -- {messages:[...], max_tokens, temperature}
+    response     JSONB NOT NULL,          -- LLM 解析后的 JSON 输出
+    hit_count    INT DEFAULT 0,
+    created_at   TIMESTAMPTZ DEFAULT NOW(),
+    last_hit_at  TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_llm_cache_created ON llm_cache(created_at);
+
+-- ============================================================
 -- 可选: 同步作业的运行日志
 -- ============================================================
 

@@ -22,6 +22,8 @@ from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt,
 
 from config import get_settings
 
+from . import llm_cache
+
 log = logging.getLogger(__name__)
 
 # 全局 semaphore + 懒初始化 async client
@@ -90,10 +92,24 @@ async def chat_json(
     model: str | None = None,
     temperature: float = 0.1,
     max_tokens: int = 1024,
+    cache: bool = False,
 ) -> dict[str, Any]:
-    """调文本 LLM, 强制 JSON 输出。messages 格式同 OpenAI chat completions。"""
+    """调文本 LLM, 强制 JSON 输出。messages 格式同 OpenAI chat completions。
+
+    cache=True 时查 llm_cache 表, 命中直接返回 (不计 hit_count, 不调 LLM)。
+    缓存键 = sha256(model + messages + temperature + max_tokens) 前 32 位。
+    """
     s = get_settings()
     m = model or s.llm_text_model
+
+    # -------- cache 命中短路 --------
+    cache_key: str | None = None
+    if cache:
+        cache_key = llm_cache._input_hash(m, messages, temperature=temperature, max_tokens=max_tokens)
+        cached = await llm_cache.cache_get(cache_key)
+        if cached is not None:
+            return cached
+
     sem = _sem()
 
     async for attempt in AsyncRetrying(
@@ -125,7 +141,16 @@ async def chat_json(
                     else:
                         raise
             text = (resp.choices[0].message.content or "").strip()
-            return _json_from_text(text)
+            result = _json_from_text(text)
+            # -------- cache 写入 (仅缓存有效 JSON 输出) --------
+            if cache_key and result and "_raw" not in result:
+                await llm_cache.cache_put(
+                    cache_key,
+                    m,
+                    {"messages": messages, "temperature": temperature, "max_tokens": max_tokens},
+                    result,
+                )
+            return result
     raise RuntimeError("unreachable")  # pragma: no cover
 
 
