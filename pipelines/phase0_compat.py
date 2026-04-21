@@ -113,8 +113,17 @@ def refresh_cache() -> None:
     _load_hard_brands.cache_clear()
 
 
+# 匹配窗口: trigger 命中后, 往后扫 N 个字符找 brand (~5-8 个词)
+_TRIGGER_WINDOW_CHARS = 60
+
+
 def check(product: ProductInfo) -> Phase0Result:
-    """扫 title+bullets+description, 任一触发词 + 任一 hard brand 共现 → blocked."""
+    """扫 title+bullets+description, "trigger 紧跟 brand" 模式 → blocked.
+
+    语义: "compatible with X" 里的 X 必须是 hard brand, 才算真冒用.
+      ✓ "Compatible with Dyson V6"      — X='Dyson' 在 hard
+      ✗ "Office Chair Compatible with most" — X='most' 不在 hard (CHAIR 位置在 trigger 之前, 不算)
+    """
     text = product.searchable_text
     if not text:
         return Phase0Result(blocked=False)
@@ -132,21 +141,23 @@ def check(product: ProductInfo) -> Phase0Result:
         if ep.search(text):
             return Phase0Result(blocked=False)
 
-    # 必须同时命中触发词 AND 硬品牌
-    matched_triggers: list[str] = []
+    # 核心: 对每个 trigger 命中位置, 在它后面窗口里扫 brand
+    # (brand 必须紧跟 trigger 才算真冒用, 不是 title 任意位置共现)
+    matched_pairs: list[dict[str, str]] = []
     for pat in triggers:
-        m = pat.search(text)
-        if m:
-            matched_triggers.append(m.group(0))
-    if not matched_triggers:
-        return Phase0Result(blocked=False)
+        for tm in pat.finditer(text):
+            start = tm.end()
+            window = text[start : start + _TRIGGER_WINDOW_CHARS]
+            # 窗口里第一个 brand 命中
+            bm = brand_pattern.search(window)
+            if bm:
+                matched_pairs.append({
+                    "trigger": tm.group(0),
+                    "brand":   bm.group(1),
+                    "context": text[max(0, start-10) : start + len(window)].strip()[:120],
+                })
 
-    matched_brands: list[str] = []
-    for m in brand_pattern.finditer(text):
-        matched_brands.append(m.group(1))
-    # 去重 保顺序
-    matched_brands = list(dict.fromkeys(matched_brands))
-    if not matched_brands:
+    if not matched_pairs:
         return Phase0Result(blocked=False)
 
     hit = RuleHit(
@@ -154,10 +165,10 @@ def check(product: ProductInfo) -> Phase0Result:
         rule_code="phase0_compat_ip_brand",
         penalty=-100,
         detail={
-            "matched_triggers": matched_triggers[:5],
-            "matched_brands":   matched_brands[:10],
-            "source":           "blacklist_brand_ip_stats (severity=hard)",
-            "note":             "title/desc 含 compat 触发词 + 数据验证 precision≥70% 的真品牌 → 明确 IP 侵权",
+            "matched_pairs":    matched_pairs[:5],  # 最多 5 对
+            "window_chars":     _TRIGGER_WINDOW_CHARS,
+            "source":           "blacklist_brand_ip_stats (severity=hard) + yaml.additional_hard_brands",
+            "note":             "title/desc 含 'trigger 紧跟 (<=60 字符) hard_brand' 模式 → 明确 IP 冒用",
         },
     )
     return Phase0Result(blocked=True, hits=[hit])
