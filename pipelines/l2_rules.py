@@ -211,14 +211,20 @@ HARD_CERT_FIELDS = frozenset({
 
 
 def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
-    """R3: 按沃尔玛官方 PT spec 判证书要求, 硬/软分层。
+    """R3: 证书要求判定 - 3 层数据源叠加。
 
-    数据源: walmart_pt_spec.has_real_cert / has_soft_cert
+    数据源优先级 (从高到低):
+      1. walmart_pt_meta.requirements (飞书业务维护, 3069 PT, 含 NSF/FDA/EPA/UL 等具体认证)
+      2. walmart_pt_spec.has_real_cert (官方 spec, 958 PT NRTL)
+      3. walmart_pt_spec.has_soft_cert (官方 spec 软合规, 3103 PT Prop65/小件)
 
-    硬性 (has_real_cert=TRUE): NRTL/CPSIA/FDA/OTC/危险品/电池等 → -100, reject
-      需要实验室发证/官方注册号, 搬运模式客观做不了 (958 PT, 13.8%)
-    软性 (has_soft_cert=TRUE 且非硬): smallParts/state_chemical/ingredients 等 → -10, 警告
-      需要填写披露信息但搬运模式能做 (2788 纯软 PT, 40.2%)
+    硬合规关键词 (meta.requirements 含任一 → -100):
+      UL / ETL / CSA / NRTL / FCC / FDA / EPA / CPSIA / CPC / GCC / AAFCO / NSF / ATF / DEA / MoCRA
+      → 需要实验室证书/官方注册号, 搬运模式客观做不了
+
+    软合规关键词 (meta.requirements 含任一 → -10):
+      SDS / MSDS / ASTM / ANSI / ISO / RoHS / Prop 65 / 警告 / 标签 / 测试报告
+      → 供应商提供资料或填写披露即可
     """
     pt = (l1.walmart_product_type or "").strip()
     if not pt or pt in {"unknown", "(unknown)"}:
@@ -226,47 +232,67 @@ def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
     if l1.excluded_category_reason:
         return []
 
+    # ---- 1. 查 walmart_pt_meta.requirements (飞书业务维护) ----
     with db_conn() as c:
         with c.cursor() as cur:
             cur.execute(
-                """
-                SELECT has_real_cert, real_cert_fields, has_soft_cert, soft_cert_fields
-                FROM walmart_pt_spec WHERE walmart_product_type = %s
-                """,
+                """SELECT requirements, notes FROM walmart_pt_meta
+                   WHERE walmart_product_type = %s""",
                 (pt,),
             )
-            r = cur.fetchone()
+            meta = cur.fetchone()
 
-    if not r:
-        return []
+    meta_req = (meta.get("requirements") if meta else "") or ""
+    meta_notes = (meta.get("notes") if meta else "") or ""
 
-    has_hard = bool(r.get("has_real_cert"))
-    has_soft = bool(r.get("has_soft_cert"))
-    real_fields = r.get("real_cert_fields") or []
-    soft_fields = r.get("soft_cert_fields") or []
+    # 扫描关键词 (忽略大小写)
+    req_low = meta_req.lower()
+    hard_matches = []
+    soft_matches = []
+    HARD_KWS = [
+        ("UL 认证", "ul"), ("ETL Listed", "etl"), ("CSA", "csa"),
+        ("NRTL", "nrtl"), ("FCC", "fcc"),
+        ("FDA 食品设施", "fda 食品"), ("FDA 药品", "fda 药品"),
+        ("FDA 510(k)", "510(k)"), ("MoCRA 化妆品", "mocra"),
+        ("FDA", "fda"),
+        ("EPA FIFRA", "fifra"), ("EPA 注册", "epa"),
+        ("CPSIA / CPC", "cpsia"), ("CPC 证书", "cpc"),
+        ("GCC 证书", "gcc"),
+        ("AAFCO 宠物食品", "aafco"),
+        ("NSF/ANSI 61", "nsf"),
+        ("ATF 管控", "atf"), ("DEA 管控", "dea"),
+    ]
+    SOFT_KWS = [
+        ("SDS/MSDS", "sds"), ("ASTM", "astm"), ("ANSI", "ansi"),
+        ("ISO", "iso"), ("RoHS", "rohs"), ("Prop 65", "prop 65"), ("Prop65", "prop65"),
+        ("警告标签", "警告"), ("标签", "标签"), ("测试报告", "测试报告"),
+    ]
+    for label, kw in HARD_KWS:
+        if kw in req_low:
+            hard_matches.append(label)
+    for label, kw in SOFT_KWS:
+        if kw in req_low and not any(kw in hm.lower() for hm in hard_matches):
+            soft_matches.append(label)
 
-    # 硬性 required: 区分整机 vs 小件
-    if has_hard:
-        # 整机/小件分类
-        part_type = classify_nrtl_pt(pt)
-        if part_type == "small_part":
-            # 电气小件 (Switch/Fuse/Wire/Replacement Parts 等) → 降级 -10 软警告
-            return [
-                RuleHit(
-                    stage="L2",
-                    rule_code="cat_requires_cert_small_part",
-                    penalty=-10,
-                    detail={
-                        "walmart_pt": pt,
-                        "hard_cert_fields": real_fields,
-                        "soft_cert_fields": soft_fields,
-                        "classified_as": "small_part",
-                        "source": "walmart_pt_spec + nrtl_classifier",
-                        "note": "电气小件/配件 (Switch/Fuse/Wire/Replacement 等), 部分可填 No 上架, 需下游人工审核",
-                    },
-                )
-            ]
-        # 整机 → 保持 -100 reject
+    # ---- 2. 查 walmart_pt_spec ----
+    with db_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """SELECT has_real_cert, real_cert_fields, has_soft_cert, soft_cert_fields
+                   FROM walmart_pt_spec WHERE walmart_product_type = %s""",
+                (pt,),
+            )
+            spec = cur.fetchone()
+
+    spec_has_hard = bool(spec and spec.get("has_real_cert"))
+    spec_has_soft = bool(spec and spec.get("has_soft_cert"))
+    spec_real = (spec and spec.get("real_cert_fields")) or []
+    spec_soft = (spec and spec.get("soft_cert_fields")) or []
+
+    # ---- 3. 综合判定 (硬优先) ----
+
+    # A. meta 硬性认证命中 → -100
+    if hard_matches:
         return [
             RuleHit(
                 stage="L2",
@@ -274,16 +300,52 @@ def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
                 penalty=-100,
                 detail={
                     "walmart_pt": pt,
-                    "hard_cert_fields": real_fields,
-                    "soft_cert_fields": soft_fields,
-                    "classified_as": part_type,  # whole_unit
-                    "source": "walmart_pt_spec.has_real_cert + nrtl_classifier",
-                    "note": "整机电器 (Ceiling Fans/Heaters/Lamps 等), 必须 NRTL 认证, 搬运做不了",
+                    "meta_requirements": meta_req,
+                    "matched_hard_kws": hard_matches,
+                    "matched_soft_kws": soft_matches,
+                    "ts_notes": meta_notes or None,
+                    "spec_real_cert_fields": spec_real,
+                    "source": "walmart_pt_meta.requirements",
+                    "note": "飞书维护的合规要求 (含实验室证书/官方注册号), 搬运模式做不了",
                 },
             )
         ]
 
-    if has_soft:
+    # B. walmart_pt_spec 硬 cert (NRTL 电气): 分整机/小件
+    if spec_has_hard:
+        part_type = classify_nrtl_pt(pt)
+        if part_type == "small_part":
+            return [
+                RuleHit(
+                    stage="L2",
+                    rule_code="cat_requires_cert_small_part",
+                    penalty=-10,
+                    detail={
+                        "walmart_pt": pt,
+                        "hard_cert_fields": spec_real,
+                        "classified_as": "small_part",
+                        "source": "walmart_pt_spec + nrtl_classifier",
+                        "note": "电气小件/配件, 部分可填 No 上架, 需下游人工审核",
+                    },
+                )
+            ]
+        return [
+            RuleHit(
+                stage="L2",
+                rule_code="cat_requires_cert_hard",
+                penalty=-100,
+                detail={
+                    "walmart_pt": pt,
+                    "hard_cert_fields": spec_real,
+                    "classified_as": part_type,
+                    "source": "walmart_pt_spec.has_real_cert + nrtl_classifier",
+                    "note": "整机电器, 必须 NRTL 认证, 搬运做不了",
+                },
+            )
+        ]
+
+    # C. meta 仅软合规命中 → -10
+    if soft_matches:
         return [
             RuleHit(
                 stage="L2",
@@ -291,7 +353,24 @@ def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
                 penalty=-10,
                 detail={
                     "walmart_pt": pt,
-                    "soft_cert_fields": soft_fields,
+                    "meta_requirements": meta_req,
+                    "matched_soft_kws": soft_matches,
+                    "source": "walmart_pt_meta.requirements (软合规)",
+                    "note": "软合规 (SDS/ASTM/ISO/RoHS/Prop65/警告标签/测试报告), 可提供资料或填披露",
+                },
+            )
+        ]
+
+    # D. walmart_pt_spec 软合规 (smallParts/state_chemical/ingredients) → -10
+    if spec_has_soft:
+        return [
+            RuleHit(
+                stage="L2",
+                rule_code="cat_requires_cert_soft",
+                penalty=-10,
+                detail={
+                    "walmart_pt": pt,
+                    "soft_cert_fields": spec_soft,
                     "source": "walmart_pt_spec.has_soft_cert",
                     "note": "软合规 (Prop65/小件警告/成分披露等), 需填写披露信息",
                 },
