@@ -117,20 +117,28 @@ async def audit_one(sample: dict, dmit_item: dict | None, run_l3: bool) -> dict 
     }
 
 
-async def run(run_l3: bool) -> None:
+async def run(run_l3: bool, refresh_dmit: bool) -> None:
     samples = json.loads(GT_FILE.read_text(encoding="utf-8"))
-    present = [s for s in samples if s.get("dmit_present")]
-    log.warning("groundtruth 总计 %d, DMIT 有详情 %d", len(samples), len(present))
+    log.warning("groundtruth 总计 %d", len(samples))
 
-    if not present:
-        log.error("DMIT 无任何产品详情, 等采集完成再跑")
+    # 拉详情 (默认 refresh=True: 重新检查 DMIT, 捕获新完成的采集)
+    if refresh_dmit:
+        asins = list({s["asin"] for s in samples})
+        log.warning("刷新 DMIT 覆盖: 尝试拉 %d 个 ASIN...", len(asins))
+    else:
+        present = [s for s in samples if s.get("dmit_present")]
+        asins = list({s["asin"] for s in present})
+
+    if not asins:
+        log.error("无待拉 ASIN")
         return
 
-    # 拉详情
-    asins = list({s["asin"] for s in present})
     base = get_settings().dmit_base_url.rstrip("/")
     dmit_map = await _fetch_dmit(asins, base)
     log.warning("DMIT 拉到 %d / %d", len(dmit_map), len(asins))
+
+    present = [s for s in samples if s["asin"] in dmit_map]
+    log.warning("实际可跑 eval 样本: %d", len(present))
 
     # 跑审核 (并发 10, 避免 L1/L3 LLM 打爆)
     sem = asyncio.Semaphore(10)
@@ -195,8 +203,9 @@ async def run(run_l3: bool) -> None:
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--run-l3", action="store_true")
+    p.add_argument("--no-refresh-dmit", action="store_true", help="用 json 里记的 dmit_present (不重新检查)")
     p.add_argument("--log-level", default="WARNING")
     args = p.parse_args()
     logging.basicConfig(level=args.log_level, format="%(asctime)s [%(levelname)s] %(message)s")
 
-    asyncio.run(run(run_l3=args.run_l3))
+    asyncio.run(run(run_l3=args.run_l3, refresh_dmit=not args.no_refresh_dmit))
