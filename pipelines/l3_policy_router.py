@@ -137,6 +137,17 @@ def _load_policy(category_en: str) -> dict[str, Any] | None:
             }
 
 
+@lru_cache(maxsize=1)
+def all_policy_categories() -> list[str]:
+    """所有 37 条 walmart_prohibited_policy.category_en 列表 (做 L3 reason_category 候选)。"""
+    with db_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT category_en FROM walmart_prohibited_policy ORDER BY category_en"
+            )
+            return [r["category_en"] for r in cur.fetchall() if r.get("category_en")]
+
+
 def pick(
     walmart_category: str | None = None,
     walmart_pt: str | None = None,
@@ -245,4 +256,4 @@ def format_for_prompt(policies: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-__all__ = ["pick", "format_for_prompt", "refresh_cache"]
+__all__ = ["pick", "format_for_prompt", "refresh_cache", "all_policy_categories"]

@@ -122,14 +122,107 @@ def _fmt_weapons_block() -> str:
 
 
 # =============================================================
-# Prompt (System 保持稳定, 动态词表插到指定位置)
+# Prompt (按 walmart_category 分叉 — B.1/B.2 按需载入)
 # =============================================================
 
+# walmart_category (小写) → {sticker: bool, weapons: bool}
+# sticker  = 是否需要 B.1 贴纸/海报/补丁/徽章/旗帜/T恤/装饰画 特殊警戒
+# weapons  = 是否需要 B.2 仿真武器/仿真枪/军警装备玩具
+_CATEGORY_BLOCKS: dict[str, dict[str, bool]] = {
+    # 会印图案/文字的 (贴纸/徽章/T恤/海报/杯贴 全在这些类目里)
+    "arts & crafts":       {"sticker": True,  "weapons": False},
+    "occasion & seasonal": {"sticker": True,  "weapons": False},
+    "textiles & apparel":  {"sticker": True,  "weapons": False},
+    "fashion":             {"sticker": True,  "weapons": False},
+    "office":              {"sticker": True,  "weapons": False},
+    # 可能有仿真武器的 (Sporting/Safety/Toys 最常见, Vehicles 有汽配武器道具)
+    "sporting goods":      {"sticker": False, "weapons": True},
+    "sports & outdoors":   {"sticker": False, "weapons": True},
+    "safety & emergency":  {"sticker": False, "weapons": True},
+    "everything else":     {"sticker": True,  "weapons": True},  # 未知兜底
+    "vehicles":            {"sticker": False, "weapons": True},
+    "automotive":          {"sticker": False, "weapons": True},
+    # Toys 两类都需要 (印图案玩具 + 玩具枪)
+    "toys":                {"sticker": True,  "weapons": True},
+    # 其他类目: 只需基础 offensive 总论, 跳过两大专项
+    "home":                {"sticker": False, "weapons": False},
+    "home improvement":    {"sticker": False, "weapons": False},
+    "home goods":          {"sticker": False, "weapons": False},
+    "household":           {"sticker": False, "weapons": False},
+    "furniture":           {"sticker": False, "weapons": False},
+    "garden & patio":      {"sticker": False, "weapons": False},
+    "food & beverage":     {"sticker": False, "weapons": False},
+    "dietary supplements": {"sticker": False, "weapons": False},
+    "health & personal care": {"sticker": False, "weapons": False},
+    "beauty":              {"sticker": False, "weapons": False},
+    "animals":             {"sticker": False, "weapons": False},
+    "baby":                {"sticker": False, "weapons": False},
+    "electronics":         {"sticker": False, "weapons": False},
+    "musical instruments": {"sticker": False, "weapons": False},
+    "business & industrial": {"sticker": False, "weapons": False},
+    "photography":         {"sticker": False, "weapons": False},
+    "media":               {"sticker": False, "weapons": False},
+    "jewelry/precious metals": {"sticker": False, "weapons": False},
+    "jewelry":             {"sticker": False, "weapons": False},
+}
 
-def _build_system_prompt() -> str:
-    sticker_block = _fmt_sticker_themes()
-    weapons_block = _fmt_weapons_block()
-    return f"""你是沃尔玛 Marketplace 合规审核 AI (站在沃尔玛官方立场)。
+
+_STICKER_PT_KEYWORDS = (
+    "sticker", "decal", "patch", "emblem", "badge", "flag", "banner",
+    "poster", "t-shirt", "tshirt", "tee shirt", "mug", "cup", "coaster",
+    "button", "pinback", "bumper", "magnet", "greeting card", "wallpaper",
+    "costume", "apparel",
+)
+_WEAPONS_PT_KEYWORDS = (
+    "weapon", "gun", "rifle", "pistol", "revolver", "firearm", "ammo",
+    "bullet", "cartridge", "grenade", "tactical", "body armor", "military",
+    "knife", "blade", "crossbow", "bow", "arrow", "airsoft", "bb gun",
+    "pellet", "paintball", "taser", "stun", "pepper spray", "brass knuckle",
+    "shuriken", "nunchaku",
+)
+
+
+def _blocks_for(
+    walmart_category: str | None,
+    walmart_pt: str | None = None,
+    product_text_hint: str | None = None,
+) -> tuple[bool, bool]:
+    """返回 (include_sticker_block, include_weapons_block)。
+
+    三层判定 (后面覆盖前面, 取并集):
+      1. Category 级配置: _CATEGORY_BLOCKS
+      2. PT 关键词 override: PT 名含贴纸/武器相关词 → 强制开对应 block
+      3. Product 文本 hint (title+bullets 前 200 字): 扫关键词再补开
+         (例如 PT 叫 Hard Hat Accessories, 但标题含 "Stickers", 也要开 B.1)
+    未知类目默认两块都带 (保守)。
+    """
+    cat = (walmart_category or "").strip().lower()
+    pt = (walmart_pt or "").strip().lower()
+    hint = (product_text_hint or "").strip().lower()[:500]
+
+    pt_sticker = any(kw in pt for kw in _STICKER_PT_KEYWORDS) if pt else False
+    pt_weapons = any(kw in pt for kw in _WEAPONS_PT_KEYWORDS) if pt else False
+
+    hint_sticker = any(kw in hint for kw in _STICKER_PT_KEYWORDS) if hint else False
+    hint_weapons = any(kw in hint for kw in _WEAPONS_PT_KEYWORDS) if hint else False
+
+    cfg = _CATEGORY_BLOCKS.get(cat)
+    if cfg is None:
+        return (True, True)   # 未知类目保守兜底
+    return (
+        cfg.get("sticker", False) or pt_sticker or hint_sticker,
+        cfg.get("weapons", False) or pt_weapons or hint_weapons,
+    )
+
+
+@lru_cache(maxsize=8)
+def _build_system_prompt(include_sticker: bool, include_weapons: bool) -> str:
+    """按 block 开关动态组装 system prompt。
+
+    常用组合只 4 种 (TT/TF/FT/FF), 用 lru_cache 复用。
+    """
+    parts: list[str] = [
+        """你是沃尔玛 Marketplace 合规审核 AI (站在沃尔玛官方立场)。
 卖家是中国搬运模式、无任何证书/认证、每日数万产品。
 你只输出严格 JSON, 不要任何解释文字或 markdown 前后缀。
 
@@ -155,52 +248,77 @@ def _build_system_prompt() -> str:
 - 贬低/嘲讽政治候选人
 - 嘲讽/赞美悲剧、灾难、虐待动物
 - 嘲笑基于受保护特征 (种族/性别/性取向/宗教/残疾/体型/年龄)
+"""
+    ]
 
+    if include_sticker:
+        parts.append(f"""
 ### B.1 贴纸/海报/补丁/徽章/旗帜/T恤/装饰画/卡套/杯贴 类产品的特殊警戒 (重要)
 这类产品的"违规"藏在具体图案/文字里, 文本往往只是暗示。**只要文本出现以下任一敏感主题词 (或组合), 倾向 reject (offensive)**:
-{sticker_block}
+{_fmt_sticker_themes()}
 - 产品是 **混装 N 张** (如 "400 Pcs stickers"), 描述列出多种主题里含任一敏感主题 → reject (因为整包里就算只有几张违规贴纸, 也违反政策)
+""")
 
+    if include_weapons:
+        parts.append(f"""
 ### B.2 仿真武器 / 仿真枪 / 军警装备玩具 (重要, 沃尔玛 Military & Law Enforcement 政策 + 15 U.S.C. § 5001)
-{weapons_block}
+{_fmt_weapons_block()}
 **判定流程** (严格按顺序):
 1. 先扫豁免词, 任一命中 → **立即判 pass**, 不再考虑仿真武器逻辑
 2. 否则扫 standalone 单独命中, 或武器词 + 仿真词共现 → reject
 
-**reason_category 用 "offensive"**, reason_text 明确写"仿真武器 (Military & Law Enforcement)"。
+**reason_category 用 "Offensive Content"**, reason_text 明确写"仿真武器 (Military & Law Enforcement)"。
+""")
 
+    parts.append("""
 ## C. 其他 (次要覆盖)
-- IP 侵权: 标题/描述含明确盗版信号 ("bootleg"/"replica of <Brand>"/"copy of <Brand>")
-- 品牌字段伪装: brand 字段 vs 标题/描述品牌信息矛盾
+- IP 侵权: 标题/描述含明确盗版信号 ("bootleg"/"replica of <Brand>"/"copy of <Brand>") → reason_category 用 "Intellectual Property"
+- 品牌字段伪装: brand 字段 vs 标题/描述品牌信息矛盾 → reason_category 用 "brand_misuse"
 
 # 输出规范 (严格 JSON)
 
-{{
+{
   "verdict": "pass" | "reject",
-  "reason_category": "ip_infringement" | "offensive" | "needs_cert" | "forbidden_cat" | "brand_misuse" | "none",
+  "reason_category": "<从用户 prompt 的候选列表中选一个, verdict=pass 时必须是 none>",
   "reason_text": "<=50字中文简短原因 (verdict=pass 时可留空)",
-  "signals": {{
+  "signals": {
     "has_trademark_symbol": true|false,
     "has_authorization_claim": true|false,
     "offensive_signals": ["<具体信号>",...]
-  }},
+  },
   "blacklist_brand_verdict": [
-    {{"brand": "<命中词>", "is_real_brand": true|false, "evidence": "<简短判断理由>"}}
+    {"brand": "<命中词>", "is_real_brand": true|false, "evidence": "<简短判断理由>"}
   ],
   "llm_confidence": "high" | "medium" | "low"
-}}
+}
 
 **重要约束**:
 - 除非证据明确, 默认 verdict=pass
-- reason_category 若 verdict=pass 必须填 "none"
+- reason_category 必须是用户 prompt 里 "候选 reason_category" 列表中的一项
+  (通常是沃尔玛官方 37 条 Prohibited Product Policy 的 category_en, 或 brand_misuse / none)
+- verdict=pass 时 reason_category 必须填 "none"
 - blacklist_brand_verdict 对 L2 R4 命中词每个都要评估 (最多评估前 10 个)
 - L2 R5 的 USPTO 商标也可以一并评估
 - 不凭空添加未命中的品牌
-"""
+""")
+    return "".join(parts)
 
 
-# 在进程启动时预渲染一次 (避免每条请求都重建字符串)
-SYSTEM_PROMPT = _build_system_prompt()
+def get_system_prompt(
+    walmart_category: str | None,
+    walmart_pt: str | None = None,
+    product_text_hint: str | None = None,
+) -> str:
+    """按 walmart_category + walmart_pt + 产品文本 hint 返回相应 system prompt。
+
+    `_build_system_prompt` 有 lru_cache, 最终只 4 种组合 (TT/TF/FT/FF)。
+    """
+    sticker, weapons = _blocks_for(walmart_category, walmart_pt, product_text_hint)
+    return _build_system_prompt(sticker, weapons)
+
+
+# 向后兼容: 默认 prompt (两 block 都带, 用于测试/调试)
+SYSTEM_PROMPT = _build_system_prompt(True, True)
 
 
 # =============================================================
@@ -263,20 +381,16 @@ def _summarize_l2_hits(l2: L2Result) -> tuple[str, list[str]]:
     )
 
 
-def _build_user_prompt(product: ProductInfo, l1: L1Result, l2: L2Result) -> str:
+def _build_user_prompt(
+    product: ProductInfo, l1: L1Result, l2: L2Result,
+    policies: list[dict[str, Any]],
+) -> str:
     bullets_txt = "\n".join(f"  - {b}" for b in product.bullet_points[:5]) or "  (无)"
     desc = (product.long_description or "").strip()
     if len(desc) > 800:
         desc = desc[:800] + "...(已截断)"
 
     l2_txt, r4_brands = _summarize_l2_hits(l2)
-
-    # 路由 prohibited_policy (按 walmart_category + PT 关键词)
-    policies = l3_policy_router.pick(
-        walmart_category=l1.walmart_category,
-        walmart_pt=l1.walmart_product_type,
-        max_policies=5,
-    )
     policy_txt = l3_policy_router.format_for_prompt(policies)
 
     brand_list = (
@@ -292,6 +406,11 @@ def _build_user_prompt(product: ProductInfo, l1: L1Result, l2: L2Result) -> str:
         if pt_notes
         else ""
     )
+
+    # reason_category 候选 = 路由到的政策 category_en + brand_misuse + none
+    routed_cats = [p["category_en"] for p in policies if p.get("category_en")]
+    reason_cat_candidates = routed_cats + ["brand_misuse", "none"]
+    cat_candidates_txt = "\n".join(f"  - {c}" for c in reason_cat_candidates)
 
     return f"""# 产品信息
 
@@ -317,9 +436,13 @@ Amazon 类目: {product.amazon_category_path or '(空)'}
 
 {brand_list}
 
-# 沃尔玛相关禁售政策 (重点参考 Offensive Content 和 Intellectual Property)
+# 沃尔玛相关禁售政策 (重点参考, 命中任一 → reason_category 填对应 category_en)
 
 {policy_txt}
+
+# 候选 reason_category (verdict 字段为 reject 时必须从此列表选一)
+
+{cat_candidates_txt}
 
 # 任务提醒
 
@@ -327,10 +450,12 @@ Amazon 类目: {product.amazon_category_path or '(空)'}
    - 通用英文词 (top/summer/must/chair/fire/escape/weather/mountain/deluxe/modern/classic/pro...) → false
    - 除非产品文本有 ®/™/Official/Licensed/Authentic/OEM for 等授权声明 → 才判 true
 2. **冒犯性**: 对照上面的政策, 判断是否明确违反
-   - Couples/Intimacy/Sensual 等性暗示关键词 + 相关画面暗示 → offensive
-   - 贴纸/海报/T恤/配件 上可能印的种族/政治符号 → offensive
-3. **飞书人工标注**: 若 pt_meta.notes 含 "⚠️T&S抽查/高风险" 等警示, 判断时倾向更严格
-4. **默认 pass** — 只有清晰证据才 reject
+   - Couples/Intimacy/Sensual 等性暗示关键词 + 相关画面暗示 → reason_category="Offensive Content"
+   - 贴纸/海报/T恤/配件 上可能印的种族/政治符号 → reason_category="Offensive Content"
+3. **类目合规**: 命中某条政策 (如 PFAS Chemicals / Baby Products / Hazardous Items) → reason_category 用政策的 category_en 原文
+4. **品牌伪装**: brand='Unbranded' 但描述暗示某大牌 → reason_category="brand_misuse"
+5. **飞书人工标注**: 若 pt_meta.notes 含 "⚠️T&S抽查/高风险" 等警示, 判断时倾向更严格
+6. **默认 pass** — 只有清晰证据才 reject, verdict=pass 时 reason_category="none"
 
 严格按 system prompt 中的 JSON 格式输出。
 """
@@ -341,26 +466,67 @@ Amazon 类目: {product.amazon_category_path or '(空)'}
 # =============================================================
 
 
-_VALID_CATEGORIES = {
-    "ip_infringement", "offensive", "needs_cert", "forbidden_cat", "brand_misuse", "none",
-}
 _VALID_VERDICTS = {"pass", "reject"}
 
 
-def _coerce_result(raw: dict[str, Any]) -> L3Result:
-    """把 LLM JSON 输出规范化成 L3Result。"""
+def _valid_reason_categories(routed_policies: list[dict[str, Any]] | None = None) -> set[str]:
+    """返回此 L3 会话可接受的 reason_category 白名单 (小写)。
+
+    路由政策的 category_en + brand_misuse + none。
+    未传 policies 时退化为 37 条全集 (兼容调用方未知 category)。
+    """
+    if routed_policies:
+        cats = {p["category_en"].lower() for p in routed_policies if p.get("category_en")}
+    else:
+        cats = {c.lower() for c in l3_policy_router.all_policy_categories()}
+    cats.update({"brand_misuse", "none"})
+    return cats
+
+
+def _slug_category(cat: str) -> str:
+    """把 'Home Goods' / 'Offensive Content' 这种 category_en 转成 rule_code 可用的 slug。"""
+    import re as _re
+    s = _re.sub(r"[^a-z0-9]+", "_", (cat or "").lower()).strip("_")
+    return s or "unknown"
+
+
+def _coerce_result(
+    raw: dict[str, Any],
+    *,
+    valid_categories: set[str] | None = None,
+) -> L3Result:
+    """把 LLM JSON 输出规范化成 L3Result。
+
+    valid_categories: 此次 L3 会话的 reason_category 白名单 (含所有政策 category_en + brand_misuse + none)
+                      未传则用 37 条全集。
+    """
     verdict = str(raw.get("verdict") or "").strip().lower()
     if verdict not in _VALID_VERDICTS:
         log.warning("L3 verdict 非法: %r -> 默认 pass (保守)", verdict)
         verdict = "pass"
 
-    category = str(raw.get("reason_category") or "").strip().lower()
-    if category not in _VALID_CATEGORIES:
-        category = "none" if verdict == "pass" else "ip_infringement"
+    category_raw = str(raw.get("reason_category") or "").strip()
+    category_lower = category_raw.lower()
+    allowed = valid_categories or _valid_reason_categories()
+
+    if category_lower not in allowed:
+        # LLM 没按候选输出 - 尝试兼容旧标签
+        legacy_map = {
+            "ip_infringement": "intellectual property",
+            "offensive":       "offensive content",
+            "forbidden_cat":   "none",   # forbidden_cat 无对应 Walmart 政策, 降级
+            "needs_cert":      "none",   # 证书由 L2 R3 处理
+        }
+        mapped = legacy_map.get(category_lower)
+        if mapped and mapped in allowed:
+            category_lower = mapped
+        else:
+            log.warning("L3 reason_category %r 不在候选列表, 降级 (verdict=%s)", category_raw, verdict)
+            category_lower = "none" if verdict == "pass" else "intellectual property"
 
     # pass 时强制 category=none (prompt 约束)
     if verdict == "pass":
-        category = "none"
+        category_lower = "none"
 
     reason_text = str(raw.get("reason_text") or "").strip()[:500] or None
 
@@ -379,14 +545,14 @@ def _coerce_result(raw: dict[str, Any]) -> L3Result:
     # 构造 hit
     hits: list[RuleHit] = []
     if verdict == "reject":
-        rule_code = f"llm_{category}" if category != "none" else "llm_reject"
+        rule_code = f"llm_{_slug_category(category_lower)}" if category_lower != "none" else "llm_reject"
         hits.append(
             RuleHit(
                 stage="L3",
                 rule_code=rule_code,
                 penalty=0,  # L3 不扣分, 直接决定 verdict
                 detail={
-                    "reason_category": category,
+                    "reason_category": category_lower,
                     "reason_text": reason_text,
                     "llm_confidence": confidence,
                     "signals": signals,
@@ -397,7 +563,7 @@ def _coerce_result(raw: dict[str, Any]) -> L3Result:
 
     return L3Result(
         verdict=verdict,
-        reason_category=category,
+        reason_category=category_lower,
         reason_text=reason_text,
         blacklist_brand_verdict=brand_verdict,
         llm_confidence=confidence,
@@ -413,12 +579,23 @@ async def judge(product: ProductInfo, l1: L1Result, l2: L2Result) -> L3Result:
       - L3 只对 L2 pass 的产品调用 (orchestrator 保证, 这里不再检查)
       - LLM 超时/重试全失败时, 保守策略 = **pass** (不新增拒绝, 避免 L3 噪音拖低 precision)
       - 启用 llm_cache, 相同输入哈希命中直接返回 (每条审核 token 开销摊到 1/N)
+      - system prompt 按 walmart_category 分叉 (B.1 贴纸/B.2 武器 模块按需载入)
     """
-    user_prompt = _build_user_prompt(product, l1, l2)
+    # 按 walmart_category 路由相关政策 (一次, 给 user prompt + reason_category 白名单共用)
+    routed_policies = l3_policy_router.pick(
+        walmart_category=l1.walmart_category,
+        walmart_pt=l1.walmart_product_type,
+        max_policies=5,
+    )
+    # system prompt 按 category + PT + title hint 分叉
+    text_hint = (product.title or "") + " " + " ".join(product.bullet_points[:2])
+    system_prompt = get_system_prompt(l1.walmart_category, l1.walmart_product_type, text_hint)
+    user_prompt = _build_user_prompt(product, l1, l2, routed_policies)
+
     try:
         raw = await llm_client.chat_json(
             [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             max_tokens=1500,
@@ -454,7 +631,7 @@ async def judge(product: ProductInfo, l1: L1Result, l2: L2Result) -> L3Result:
             raw=raw,
             hits=[RuleHit(stage="L3", rule_code="llm_bad_json", penalty=0, detail={"raw": str(raw)[:300]})],
         )
-    return _coerce_result(raw)
+    return _coerce_result(raw, valid_categories=_valid_reason_categories(routed_policies))
 
 
 async def judge_batch(
@@ -467,4 +644,10 @@ async def judge_batch(
     return await asyncio.gather(*tasks, return_exceptions=False)
 
 
-__all__ = ["judge", "judge_batch", "SYSTEM_PROMPT", "refresh_keywords_cache"]
+__all__ = [
+    "judge",
+    "judge_batch",
+    "SYSTEM_PROMPT",
+    "get_system_prompt",
+    "refresh_keywords_cache",
+]
