@@ -61,6 +61,15 @@ SYSTEM_PROMPT = """你是沃尔玛 Marketplace 合规审核 AI (站在沃尔玛�
 - 嘲讽/赞美悲剧、灾难、虐待动物
 - 嘲笑基于受保护特征 (种族/性别/性取向/宗教/残疾/体型/年龄)
 
+### B.1 贴纸/海报/补丁/徽章/旗帜/T恤/装饰画/卡套/杯贴 类产品的特殊警戒 (重要)
+这类产品的"违规"藏在具体图案/文字里, 文本往往只是暗示。**只要文本同时出现以下任一组合, 倾向 reject (offensive)**:
+- 明确含 "adult" / "Adult content" / "Adult stickers" / "sexual" — 成人内容
+- 含 "Confederate" / "Nazi" / "Swastika" / "SS" — 不容忍象征
+- 含 "Trump" / "Biden" / "MAGA" / "political candidate" / 政治候选人姓名 + "funny/parody/mock" — 政治讽刺
+- 含 "pranks" / "funny" + "inappropriate" / "offensive" / "crude humor" — 恶搞冒犯
+- 含 "hateful" / "racist" / "discrimination" — 明显歧视
+- 产品是 **混装 N 张** (如 "400 Pcs stickers"), 且描述列出多种主题里有任意一个敏感主题 → reject (因为整包里就算只有几张违规贴纸, 也违反政策)
+
 ## C. 其他 (次要覆盖)
 - IP 侵权: 标题/描述含明确盗版信号 ("bootleg"/"replica of <Brand>"/"copy of <Brand>")
 - 品牌字段伪装: brand 字段 vs 标题/描述品牌信息矛盾
