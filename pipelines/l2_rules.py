@@ -39,6 +39,7 @@ from ._stopwords import is_stopword
 from .forbidden_mega_categories import match_mega
 from .models import L1Result, L2Result, ProductInfo, RuleHit
 from .nice_class_mapper import classes_for
+from .nrtl_classifier import classify_nrtl_pt
 
 log = logging.getLogger(__name__)
 
@@ -244,8 +245,28 @@ def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
     real_fields = r.get("real_cert_fields") or []
     soft_fields = r.get("soft_cert_fields") or []
 
-    # 硬性优先
+    # 硬性 required: 区分整机 vs 小件
     if has_hard:
+        # 整机/小件分类
+        part_type = classify_nrtl_pt(pt)
+        if part_type == "small_part":
+            # 电气小件 (Switch/Fuse/Wire/Replacement Parts 等) → 降级 -10 软警告
+            return [
+                RuleHit(
+                    stage="L2",
+                    rule_code="cat_requires_cert_small_part",
+                    penalty=-10,
+                    detail={
+                        "walmart_pt": pt,
+                        "hard_cert_fields": real_fields,
+                        "soft_cert_fields": soft_fields,
+                        "classified_as": "small_part",
+                        "source": "walmart_pt_spec + nrtl_classifier",
+                        "note": "电气小件/配件 (Switch/Fuse/Wire/Replacement 等), 部分可填 No 上架, 需下游人工审核",
+                    },
+                )
+            ]
+        # 整机 → 保持 -100 reject
         return [
             RuleHit(
                 stage="L2",
@@ -255,8 +276,9 @@ def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
                     "walmart_pt": pt,
                     "hard_cert_fields": real_fields,
                     "soft_cert_fields": soft_fields,
-                    "source": "walmart_pt_spec.has_real_cert",
-                    "note": "硬性认证 (NRTL/CPSIA/FDA/OTC/危险品等), 搬运模式客观做不了",
+                    "classified_as": part_type,  # whole_unit
+                    "source": "walmart_pt_spec.has_real_cert + nrtl_classifier",
+                    "note": "整机电器 (Ceiling Fans/Heaters/Lamps 等), 必须 NRTL 认证, 搬运做不了",
                 },
             )
         ]
