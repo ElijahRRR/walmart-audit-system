@@ -41,6 +41,9 @@ from .models import L1Result, L2Result, ProductInfo, RuleHit
 from .nice_class_mapper import classes_for
 from .nrtl_classifier import classify_nrtl_pt
 
+import yaml
+from config import ROOT
+
 log = logging.getLogger(__name__)
 
 
@@ -565,13 +568,119 @@ def _rule_trademark_live(product: ProductInfo, l1: L1Result) -> list[RuleHit]:
 # =============================================================
 
 
+# =============================================================
+# R6: "compatible with + 硬品牌白名单" 硬拦
+# =============================================================
+
+_COMPAT_YAML = ROOT / "db" / "seed" / "compat_ip_brands.yaml"
+
+
+@lru_cache(maxsize=1)
+def _load_compat_config() -> dict[str, Any]:
+    """加载 compat_ip_brands.yaml (触发词 + 硬拦品牌白名单)。"""
+    if not _COMPAT_YAML.exists():
+        log.warning("compat_ip_brands.yaml 不存在, R6 跳过")
+        return {"compat_triggers": [], "hard_brands": [], "exempt": []}
+    with _COMPAT_YAML.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    log.info("R6 config: %d triggers, %d hard_brands",
+             len(data.get("compat_triggers") or []),
+             len(data.get("hard_brands") or []))
+    return data
+
+
+def refresh_compat_cache() -> None:
+    _load_compat_config.cache_clear()
+
+
+@lru_cache(maxsize=1)
+def _compile_compat_patterns() -> tuple[list[tuple[str, re.Pattern]], list[tuple[str, re.Pattern]], list[re.Pattern]]:
+    """编译 trigger / hard_brand / exempt 的 regex。"""
+    cfg = _load_compat_config()
+    triggers = []
+    for t in (cfg.get("compat_triggers") or []):
+        if t and t.strip():
+            # 空白字符用 \s+ 匹配 (标题里可能多空格), word-boundary + 大小写不敏感
+            pat_str = re.escape(t.strip()).replace(r"\ ", r"\s+")
+            triggers.append((t, re.compile(rf"\b{pat_str}\b", re.IGNORECASE)))
+    brands = []
+    for b in (cfg.get("hard_brands") or []):
+        if b and b.strip():
+            brands.append((b, re.compile(rf"\b{re.escape(b.strip())}\b", re.IGNORECASE)))
+    exempts = []
+    for e in (cfg.get("exempt") or []):
+        if e and e.strip():
+            pat_str = re.escape(e.strip()).replace(r"\ ", r"\s+")
+            exempts.append(re.compile(rf"\b{pat_str}\b", re.IGNORECASE))
+    return triggers, brands, exempts
+
+
+def _rule_compat_ip_brand(product: ProductInfo) -> list[RuleHit]:
+    """R6: 标题/描述同时含 compat_trigger + hard_brand → -100 (IP 侵权铁证)。
+
+    数据验证 (9 天 walmart_error_records):
+      compatible with Dyson → 27/27 = 100% E 知产
+      compatible with IKEA  → 5/5 = 100% E 知产
+    """
+    text = product.searchable_text
+    if not text:
+        return []
+
+    triggers, brands, exempts = _compile_compat_patterns()
+    if not triggers or not brands:
+        return []
+
+    # 豁免优先 (如 "universal" / "most brands")
+    for ep in exempts:
+        if ep.search(text):
+            return []
+
+    # 找 trigger 命中
+    trigger_matches: list[tuple[str, re.Match]] = []
+    for name, pat in triggers:
+        m = pat.search(text)
+        if m:
+            trigger_matches.append((name, m))
+    if not trigger_matches:
+        return []
+
+    # 找 brand 命中
+    brand_matches: list[tuple[str, re.Match]] = []
+    for name, pat in brands:
+        m = pat.search(text)
+        if m:
+            brand_matches.append((name, m))
+    if not brand_matches:
+        return []
+
+    # 任一 trigger + 任一 brand 共现 → 硬拦
+    return [
+        RuleHit(
+            stage="L2",
+            rule_code="compat_ip_brand",
+            penalty=-100,
+            detail={
+                "matched_triggers": [t for t, _ in trigger_matches],
+                "matched_brands":   [b for b, _ in brand_matches],
+                "note": "title/desc 含 'compatible with/replacement for/...' + 硬白名单品牌 → 明确 IP 侵权",
+                "basis": "walmart_error_records 验证 precision 100%",
+            },
+        )
+    ]
+
+
+# =============================================================
+# public entry
+# =============================================================
+
+
 def evaluate(product: ProductInfo, l1: L1Result) -> L2Result:
     """L2 打分。返回 L2Result (含 hits + score_final)。
 
     顺序:
       1. 起始 100
       2. 继承 L1.hits 的 penalty (excluded_category 等)
-      3. 跑 L2 五条规则
+      3. 跑 L2 六条规则 (R1-R5 + R6)
       4. 下界保护
     """
     score = 100
@@ -588,6 +697,7 @@ def evaluate(product: ProductInfo, l1: L1Result) -> L2Result:
         _rule_cat_requires_cert(l1),
         _rule_title_desc_blacklist(product),
         _rule_trademark_live(product, l1),
+        _rule_compat_ip_brand(product),           # R6 新增: compat + 硬品牌 = -100
     ]
     for hits in rules:
         for h in hits:
@@ -601,4 +711,4 @@ def evaluate(product: ProductInfo, l1: L1Result) -> L2Result:
     return L2Result(score_final=score, hits=all_hits)
 
 
-__all__ = ["evaluate", "refresh_blacklist_cache"]
+__all__ = ["evaluate", "refresh_blacklist_cache", "refresh_compat_cache"]

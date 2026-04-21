@@ -1,0 +1,59 @@
+# L2 R6 "适用于 + 品牌" 硬拦规则配置
+#
+# 逻辑: title 或 description 同时满足
+#   (a) 含任一 compat_triggers 触发词
+#   (b) 含任一 hard_brands 品牌 (与触发词任意位置共现)
+# → -100 拒
+#
+# 为什么只用小白名单 hard_brands, 不用 18k blacklist_brands?
+# 数据验证 (9 天 walmart_error_records 97k 条):
+#   compatible + Dyson  → 27/27 = 100% E 知产
+#   compatible + IKEA   → 5/5   = 100% E 知产
+#   compatible + Shark  → 0/39  = 0%  (Walmart 允许第三方配件)
+#   compatible + iRobot → 0/20  = 0%
+#   compatible + Nest   → 0/12  = 0%
+#   compatible + Honeywell → 0/23
+#   compatible + Nespresso → 0/8
+#
+# 所以只收 "已验证 precision ≥ 90% + 样本 ≥ 5" 的品牌.
+# 未达标的品牌继续走 R4 软标记 (-15) + L3 LLM 语境判.
+
+version: 1
+updated: 2026-04-21
+
+# 触发词 (word-boundary 匹配, 大小写不敏感)
+compat_triggers:
+  # 英文常见
+  - "compatible with"
+  - "compatible for"
+  - "replacement for"
+  - "replacement parts for"
+  - "replacement kit for"
+  - "made to fit"
+  - "made for"
+  - "for use with"
+  - "fits most"
+  - "aftermarket for"
+  - "aftermarket replacement"
+  - "OEM for"
+  # 中文 (少数标题)
+  - "适用于"
+  - "兼容"
+  - "替换装"
+
+# 硬拦品牌 (数据验证 100% E 知产)
+# 新增要求: 满足
+#   (1) 已在 blacklist_brands 表
+#   (2) walmart_error_records 里 "触发词 + 品牌" 组合 E 占比 ≥ 90%
+#   (3) 样本 ≥ 5 条
+hard_brands:
+  - "Dyson"    # 27/27 = 100% E (9 天数据)
+  - "IKEA"     # 5/5 = 100% E (9 天数据)
+
+# 豁免词 (即使命中触发词+品牌, 这些场景放行)
+# 例: "compatible with most 7/16 inch" → 没具体品牌, 是规格描述, 不应拦
+# 这里留空 (当前白名单严格, 无需豁免)
+exempt:
+  - "universal"       # 通用适配, 非具体品牌
+  - "most brands"     # 多品牌适配
+  - "various brands"

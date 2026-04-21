@@ -620,7 +620,39 @@ def _apply_spec_override(l1: L1Result) -> L1Result:
                     if mrow and not l1.walmart_category:
                         l1.walmart_category = mrow.get("walmart_category")
 
+    # 3. 出版物类 PT 硬禁 (基于 walmart_error_records 9 天数据验证)
+    #    Books 96.7% / Manuals 100% / Comics 100% / Sheet Music 100% /
+    #    Autographed Collectibles 100% 的错误原因都是 E 知产
+    #    搬运卖家卖出版物基本 100% 触发 IP 侵权, 直接硬拦
+    #    注意: Planners (5.8% E) / Record Books (19% E) 不含 - 误伤高
+    if pt in _PUBLICATION_HARD_FORBID and not l1.excluded_category_reason:
+        reason = f"出版物类 PT 搬运无法合规 (数据验证 E 知产占比 ≥96%)"
+        l1.excluded_category_reason = reason
+        l1.hits.append(
+            RuleHit(
+                stage="L1",
+                rule_code="publication_pt_forbidden",
+                penalty=-100,
+                detail={
+                    "walmart_pt": pt,
+                    "reason": reason,
+                    "basis": "walmart_error_records 9 天数据: Books 96.7% / Manuals 100% / Comics 100% / Sheet Music 100% / Autographed 100%",
+                },
+            )
+        )
+
     return l1
+
+
+# 出版物类 PT 硬禁列表 (基于 walmart_error_records 实证数据)
+# 这 5 类 PT 在 9 天 Walmart 日报里 E 知产占比 96-100%, 搬运模式无法合规
+_PUBLICATION_HARD_FORBID = frozenset({
+    "Books",
+    "Manuals & Guides",
+    "Comics",
+    "Sheet Music",
+    "Autographed Collectibles",
+})
 
 
 async def classify(product: ProductInfo, *, skip_llm: bool = False) -> L1Result:
@@ -680,9 +712,9 @@ async def classify(product: ProductInfo, *, skip_llm: bool = False) -> L1Result:
     # seed yaml 叠加 (Amazon 路径/标题关键词硬禁)
     seed_reason = _check_seed_excluded(product)
 
-    # DB-only 快速通道
+    # DB-only 快速通道 (所有路径统一经过 _apply_spec_override, 保证出版物硬禁也生效)
     if skip_llm:
-        return _classify_db_only(product, candidates, seed_reason)
+        return _apply_spec_override(_classify_db_only(product, candidates, seed_reason))
 
     # LLM 综合判定
     try:
@@ -695,7 +727,7 @@ async def classify(product: ProductInfo, *, skip_llm: bool = False) -> L1Result:
         )
     except Exception as e:  # noqa: BLE001
         log.warning("L1 LLM failed for %s: %s - 回落 DB-only 判定", product.asin, e)
-        return _classify_db_only(product, candidates, seed_reason)
+        return _apply_spec_override(_classify_db_only(product, candidates, seed_reason))
 
     if not raw or "_raw" in raw:
         log.warning("L1 LLM 返回非法 JSON %s: %r - 回落 DB-only", product.asin, raw)
