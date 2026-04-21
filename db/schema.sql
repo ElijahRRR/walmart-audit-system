@@ -109,6 +109,38 @@ CREATE INDEX IF NOT EXISTS idx_gt_category ON violation_groundtruth(reason_categ
 CREATE INDEX IF NOT EXISTS idx_gt_source ON violation_groundtruth(source_sheet);
 
 -- ============================================================
+-- 沃尔玛错误商品日报 (9+ 天全量原始记录, 供 groundtruth + 诊断用)
+-- 数据源: 飞书"错误商品记录" spreadsheet (YlA1szPAAhW7CCtmG5hcp6vkndd)
+-- 只拉日报 sheet (XXX问题商品), 跳过聚合/监管删除 sheet
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS walmart_error_records (
+    id            BIGSERIAL PRIMARY KEY,
+    source_sheet  TEXT NOT NULL,       -- '2026.4.17问题商品'
+    sheet_id      TEXT,                -- 'RzUg8'
+    report_date   DATE,                -- 2026-04-17
+    shop          TEXT,
+    asin          TEXT,
+    sku           TEXT,                -- 沃尔玛 SKU
+    title         TEXT,
+    walmart_pt    TEXT,                -- Walmart 分配的 PT (E 列)
+    status        TEXT,                -- UNPUBLISHED / SYSTEM_PROBLEM (F 列)
+    status2       TEXT,                -- ACTIVE / RETIRED (G 列)
+    price         NUMERIC,
+    raw_reason    TEXT NOT NULL,       -- K 列错误原因原文 (富文本拼接)
+    error_code    CHAR(1),             -- A-L/Z (用户分类)
+    recorded_at   TIMESTAMPTZ,         -- L 列时间
+    feed_id       TEXT,                -- M 列
+    synced_at     TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_werror_asin   ON walmart_error_records(asin);
+CREATE INDEX IF NOT EXISTS idx_werror_code   ON walmart_error_records(error_code);
+CREATE INDEX IF NOT EXISTS idx_werror_pt     ON walmart_error_records(walmart_pt);
+CREATE INDEX IF NOT EXISTS idx_werror_date   ON walmart_error_records(report_date);
+CREATE INDEX IF NOT EXISTS idx_werror_src    ON walmart_error_records(source_sheet);
+CREATE INDEX IF NOT EXISTS idx_werror_status ON walmart_error_records(status);
+
+-- ============================================================
 -- LLM 请求缓存 (按输入哈希复用, 节省 qwen-plus token)
 -- 不缓存 product 内容, 而是缓存 (system_prompt + user_prompt + model) 哈希
 -- 产品内容变了 hash 自然变, 不会拿到旧结果
