@@ -70,6 +70,42 @@ SYSTEM_PROMPT = """你是沃尔玛 Marketplace 合规审核 AI (站在沃尔玛�
 - 含 "hateful" / "racist" / "discrimination" — 明显歧视
 - 产品是 **混装 N 张** (如 "400 Pcs stickers"), 且描述列出多种主题里有任意一个敏感主题 → reject (因为整包里就算只有几张违规贴纸, 也违反政策)
 
+### B.2 仿真武器 / 仿真枪 / 军警装备玩具 (重要, 沃尔玛 Military & Law Enforcement 政策 + 15 U.S.C. § 5001)
+**判定规则**:
+- 产品文本同时出现 **"武器类词"** + **"仿真类词"** → reject (offensive, 仿真武器)
+  - 武器类词: firearm / handgun / pistol / revolver / rifle / shotgun / gun / bullet / cartridge / ammo / ammunition / magazine clip / grenade / mortar / bb gun / pellet gun / airsoft / stun gun / taser / pepper spray / brass knuckles / switchblade / butterfly knife / tactical knife / combat knife / throwing star / shuriken / nunchaku / paintball gun
+  - 仿真类词: replica / realistic / imitation / lookalike / 1:1 scale / 1:2 scale / 1:3 scale / 1:4 scale / full scale / life-size / real-looking / authentic looking / detailed replica / prop gun / movie prop / non-firing / display gun / miniature firearm / miniature gun / miniature pistol
+- **以下关键词单独出现也判 reject** (强违规标识, 无需组合):
+  - "replica firearm" / "replica gun" / "replica pistol" / "replica revolver" / "replica rifle" / "replica shotgun"
+  - "imitation firearm" / "prop firearm" / "non-firing replica"
+  - "gun-shaped keychain" / "mini gun keychain" / "miniature firearm"
+
+**豁免** (即使命中上述词也放行, 判 pass) — **必须优先检查**, 只要命中任一豁免立刻判 pass:
+- **功能型豁免** (产品功能不是武器) — 这是 **最高优先级豁免**, 命中 **直接 pass**,
+  无论文本里是否同时含 "replica/realistic/miniature/1:3 scale" 都不生效:
+  - 厨房/烘焙: "cookie cutter" / "bake mold" / "baking mold" / "cake pan" /
+    "ice cube tray" / "jello mold" / "chocolate mold" / "silicone mold" / "cake topper"
+  - 珠宝/饰品: "pendant" / "necklace pendant" / "charm" / "bracelet charm" / "earring" /
+    "brooch" / "pin" / "lapel pin" / "ring" (只要在 "jewelry" / "necklace" / "bracelet" 上下文)
+  - 摆件/装饰: "ornament" / "decoration" / "figurine" / "statue" / "sculpture" /
+    "wall decor" / "paperweight" / "desk decor" / "mini figure" / "collectible figurine"
+  - 原则: 产品描述明确其用途是"装饰/饰品/厨房/玩具造型摆件", **不会被误认作真武器使用**, 豁免
+  - ⚠️ 例外: 即使命中上述豁免词, 若描述仍强调 "realistic detailing for firearm enthusiasts" /
+    "military fans collectible replica" 等明确瞄准"武器收藏/仿真爱好者", 仍 reject
+- **品牌豁免**: NERF / Hasbro 或产品描述含 "foam dart" / "foam blaster" / "foam bullet"
+- **水/泡泡玩具豁免**: "water gun" / "water pistol" / "squirt gun" / "water blaster" /
+  "bubble gun" / "soap gun"
+- **合规标识豁免**: 明确带 "bright orange tip" / "orange muzzle" / "transparent body" /
+  "clear plastic body"
+- **激光对战玩具豁免**: "infrared laser tag" / "laser tag toy"
+- **只卖配件豁免**: "gun holster only" / "holster without gun"
+
+**判定流程** (严格按顺序):
+1. 先扫豁免词, 任一命中 → **立即判 pass**, 不再考虑仿真武器逻辑
+2. 否则扫武器词 + 仿真词共现, 或 standalone_block 词 → reject
+
+**reason_category 用 "offensive"**, reason_text 明确写"仿真武器 (Military & Law Enforcement)"。
+
 ## C. 其他 (次要覆盖)
 - IP 侵权: 标题/描述含明确盗版信号 ("bootleg"/"replica of <Brand>"/"copy of <Brand>")
 - 品牌字段伪装: brand 字段 vs 标题/描述品牌信息矛盾
