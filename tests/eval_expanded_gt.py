@@ -153,10 +153,13 @@ async def run(run_l3: bool, refresh_dmit: bool, gt_file: Path = DEFAULT_GT_FILE,
     present = [s for s in samples if s["asin"] in dmit_map]
     log.warning("实际可跑 eval 样本: %d", len(present))
 
-    # 跑审核 - 外层 product 并发 50 (最优甜点: 实测 sem=100 反而更慢且 recall 降)
-    # 本地下图 base64 内联绕开火山服务端拉 Amazon 图超时, sem=50 下不报错
-    # sem=10 要 7:42 / sem=50 = 2:50 (2.7x) / sem=100 = 3:03 (图下载拥塞)
-    sem = asyncio.Semaphore(50)
+    # 跑审核 - 外层并发按 vision provider 自适应
+    # Gemini free tier 限 ~15 RPM, sem=10 匹配
+    # 火山/qwen 没这限制, sem=50 最优
+    vp = get_settings().vision_provider
+    sem_size = 10 if (vp == "gemini" and run_l4) else 50
+    log.warning("外层 sem = %d (vision_provider=%s, run_l4=%s)", sem_size, vp, run_l4)
+    sem = asyncio.Semaphore(sem_size)
 
     async def _guarded(s):
         async with sem:

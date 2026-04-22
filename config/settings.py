@@ -92,7 +92,8 @@ def get_settings() -> Settings:
         # 有效模型: doubao-seed-1-6-250615 / doubao-1.5-vision-pro-32k-250115
         volcengine_vision_model=_get("VOLCENGINE_VISION_MODEL", "doubao-seed-1-6-250615"),
         # Google Gemini (OpenAI-compatible endpoint: /v1beta/openai)
-        gemini_api_key=_get("GEMINI_API_KEY", "AQ.Ab8RN6JhlmesAjyTnk0Aso5RN8YL2QvUusqOvDN7GKVM7NKcPw"),
+        # AI Studio key (免费额度够用; 旧 Vertex key "AQ.Ab8RN..." 预付费耗尽)
+        gemini_api_key=_get("GEMINI_API_KEY", "AIzaSyC_aC0bm2uatri515mmEL5pKATmknDOkIY"),
         gemini_base_url=_get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/"),
         gemini_vision_model=_get("GEMINI_VISION_MODEL", "gemini-2.5-flash-lite"),
         gemini_text_model=_get("GEMINI_TEXT_MODEL", "gemini-2.5-flash-lite"),

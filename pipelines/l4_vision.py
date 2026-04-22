@@ -79,6 +79,89 @@ async def _urls_to_data_urls(urls: list[str]) -> list[str]:
     return [r for r in results if r]
 
 
+SYSTEM_PROMPT_EN = """You are a Walmart Marketplace visual compliance reviewer, acting on behalf of Walmart to audit product images submitted by Chinese drop-shipping sellers. Output strict JSON only — no explanations, no markdown wrappers.
+
+# Detect 7 types of visual violations
+
+## 1. Big-brand logo (trademark)
+Clearly visible logos or full-word marks of known brands:
+- Sportswear: Nike / Adidas / Jordan / Under Armour / Puma / Converse / Supreme
+- 3C / Electronics: Apple / Samsung / Sony / Bose / Dyson / Beats / Rolex / Garmin
+- Luxury: LV (Louis Vuitton) / Gucci / Chanel / Hermès / Prada / Burberry
+- Entertainment: Disney / Marvel / Star Wars / HBO
+- Other: LEGO / IKEA / Starbucks / McDonald's / Coca-Cola / Pepsi
+
+## 2. ® / ™ / © symbols
+If ® / ™ / © appears after any brand name or text, and the seller is not the brand owner, it's an infringement signal.
+
+## 3. Cartoon / Anime / IP characters
+- Disney (Mickey / Donald Duck / Princess line / Frozen / Toy Story)
+- Pixar (The Incredibles / Toy Story / Finding Nemo)
+- Marvel / DC superheroes (Spider-Man / Iron Man / Batman / Superman / Wolverine)
+- Japanese anime / Pokémon (Pikachu / Doraemon / Naruto / One Piece)
+- Studio Ghibli (Totoro / Spirited Away / Kiki)
+- Sanrio (Hello Kitty / Kuromi / Cinnamoroll)
+- SpongeBob / Peppa Pig / Paw Patrol / Sesame Street / Muppets
+
+## 4. Sports team / University logos
+- Four major US pro leagues: NBA / NFL / MLB / NHL / MLS — any team logo
+- NCAA Division I schools (Alabama Crimson Tide / Ohio State Buckeyes / Kentucky Wildcats / Auburn Tigers / Texas A&M, etc.)
+- FIFA World Cup / UEFA Champions League / F1 team logos
+
+## 5. Celebrity portraits / signatures
+Recognizable public figures' faces or signatures:
+- Politicians: Trump / Biden / Obama / Harris / Putin
+- Musicians: Taylor Swift / Beyoncé / BTS / Enhypen
+- Athletes: LeBron / Kobe / Tom Brady / Messi / Ronaldo / Michael Jordan / Babe Ruth
+- Other notable public figures
+
+## 6. Offensive content
+- Hate symbols (Nazi swastika / Confederate flag / KKK)
+- Graphic violence / nudity / sexual innuendo
+- Religious insult / racist symbols
+
+## 7. Copycat design (Trade Dress / Design Patent)
+Product shape / color / packaging clearly imitates a famous product:
+- Stanley Cup tumbler (tapered shape with large handle)
+- YETI Rambler (distinct double-wall insulated form)
+- iPhone / AirPods / Apple Watch silhouette
+- Tiffany blue + white ribbon gift box
+- Classic Coca-Cola glass bottle shape / red-white wave script
+- Hermès orange box
+- LV Monogram pattern / Gucci red-green web stripe
+
+---
+
+# Decision rules
+
+- **Default verdict = pass** — if evidence is ambiguous, let it pass (avoid over-blocking normal products)
+- Only `confidence = "high"` findings trigger reject; medium/low are recorded but do not reject
+- Specify image_index (0-based) for each finding
+- State the actual brand / ip_name (not just "there is a logo")
+
+# Output JSON schema
+
+{
+  "verdict": "pass" | "reject",
+  "image_issues": [
+    {
+      "image_index": 0,
+      "issue": "big_brand_logo|registered_symbol|cartoon_ip|sports_team|celebrity|offensive|copycat_design",
+      "subtype": "Trademark | Copyright | Design Patent | Trade Dress | Publicity Rights | Offensive | Counterfeit",
+      "brand_or_ip": "<specific brand / IP name, e.g. Nike / Mickey Mouse / Stanley Cup>",
+      "confidence": "high" | "medium" | "low",
+      "detail": "<brief description, up to 20 words, of where / how it appears>"
+    }
+  ],
+  "reasoning": "<overall judgment rationale, up to 30 words>"
+}
+
+Constraints:
+- verdict=reject ⇔ at least one image_issues entry has confidence=high
+- image_issues can be an empty array (pass)
+- Do not invent findings; only report what is actually visible in the images
+"""
+
 SYSTEM_PROMPT = """你是沃尔玛 Marketplace 视觉合规审核 AI, 站在沃尔玛官方立场审核中国搬运卖家产品图片.
 只输出严格 JSON, 不要解释文字或 markdown 前后缀.
 
@@ -195,6 +278,37 @@ Walmart 类目: {l1.walmart_category or '(空)'}
 """
 
 
+def _build_user_prompt_en(
+    product: ProductInfo,
+    l1: L1Result,
+    l3: L3Result | None,
+) -> str:
+    """English user prompt (for Gemini); same semantics as Chinese version."""
+    bullets_txt = "\n".join(f"  - {b}" for b in product.bullet_points[:3]) or "  (none)"
+    l3_hint = ""
+    if l3 and l3.reason_text:
+        l3_hint = f"\n# L3 text-stage note\nL3 reason: {l3.reason_text[:150]}"
+
+    return f"""# Product context (aids visual judgment)
+
+ASIN: {product.asin}
+Title: {product.title[:200]}
+Brand field (seller-declared): {product.brand or '(empty)'}
+Walmart Product Type: {l1.walmart_product_type or '(unknown)'}
+Walmart Category: {l1.walmart_category or '(empty)'}
+
+Top 3 bullet points:
+{bullets_txt}
+{l3_hint}
+
+# Task
+
+Inspect the following {{img_count}} product images and output JSON per the 7-category system rubric.
+- If the title explicitly claims authorization (® / ™ / Official / Licensed / Authorized), trust it and do NOT reject.
+- If the seller's brand field matches the brand visible in the image, trust it (it's their own product, not infringement).
+"""
+
+
 def _vision_hit(issue: dict[str, Any]) -> bool:
     """high confidence 才算 hit."""
     return issue.get("confidence") == "high"
@@ -281,8 +395,13 @@ async def judge(
         log.warning("L4 %s 所有 %d 张图本地下载失败, 回落 pass", product.asin, len(urls))
         return L4Result(verdict="pass", image_issues=[], hits=[])
 
-    system_prompt = SYSTEM_PROMPT
-    user_prompt = _build_user_prompt(product, l1, l3).replace("{img_count}", str(len(data_urls)))
+    # Gemini 用英文 prompt (更准), 国产模型用中文 (中文训练好)
+    if s.vision_provider == "gemini":
+        system_prompt = SYSTEM_PROMPT_EN
+        user_prompt = _build_user_prompt_en(product, l1, l3).replace("{img_count}", str(len(data_urls)))
+    else:
+        system_prompt = SYSTEM_PROMPT
+        user_prompt = _build_user_prompt(product, l1, l3).replace("{img_count}", str(len(data_urls)))
 
     # 组装多模态消息: system + user(text + images)
     content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]

@@ -29,7 +29,10 @@ log = logging.getLogger(__name__)
 
 _SEM: asyncio.Semaphore | None = None
 _CLIENT: AsyncOpenAI | None = None
+# Gemini AI Studio 免费层 gemini-2.5-flash-lite 限 ~15 RPM, 我们 sem=10 保守
+# 重试 429 (RateLimitError) + 超时; 注意 RateLimitError 继承 APIError, 只对 429 重试
 _RETRIABLE = (RateLimitError, APITimeoutError)
+_GEMINI_SEM_SIZE = 10   # 独立于 llm_client, 避免把 qwen/volcengine 也限到 10
 
 
 def _client() -> AsyncOpenAI:
@@ -46,9 +49,10 @@ def _client() -> AsyncOpenAI:
 
 
 def _sem() -> asyncio.Semaphore:
+    """Gemini 独立 semaphore (free tier 限 ~15 RPM, 保守 sem=10)."""
     global _SEM
     if _SEM is None:
-        _SEM = asyncio.Semaphore(get_settings().llm_concurrency)
+        _SEM = asyncio.Semaphore(_GEMINI_SEM_SIZE)
     return _SEM
 
 
@@ -112,8 +116,9 @@ async def vision_json(
     sem = _sem()
 
     async for attempt in AsyncRetrying(
-        stop=stop_after_attempt(s.llm_retry_attempts + 1),
-        wait=wait_exponential(multiplier=s.llm_retry_base_delay, min=1, max=10),
+        # Gemini free tier 429 要求等 ~14s, 重试次数拉到 5 + wait 到 30
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=2, min=2, max=30),
         retry=retry_if_exception_type(_RETRIABLE),
         reraise=True,
     ):
@@ -156,8 +161,9 @@ async def chat_json(
     sem = _sem()
 
     async for attempt in AsyncRetrying(
-        stop=stop_after_attempt(s.llm_retry_attempts + 1),
-        wait=wait_exponential(multiplier=s.llm_retry_base_delay, min=1, max=10),
+        # Gemini free tier 429 要求等 ~14s, 重试次数拉到 5 + wait 到 30
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=2, min=2, max=30),
         retry=retry_if_exception_type(_RETRIABLE),
         reraise=True,
     ):
