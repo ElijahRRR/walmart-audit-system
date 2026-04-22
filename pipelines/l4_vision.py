@@ -243,26 +243,35 @@ async def judge(
         {"role": "user", "content": content},
     ]
 
+    # 按 provider 路由 (qwen / volcengine)
+    raw: dict[str, Any] = {}
     try:
-        # llm_client.vision_json 只接受 (image_urls, prompt), 这里绕开直接走 chat API 以带 system prompt
-        from integrations.llm_client import _client, _sem
-        async with _sem():
-            resp = await _client().chat.completions.create(
-                model=s.llm_vision_model,
-                messages=messages,
-                temperature=0.1,
+        if s.vision_provider == "volcengine":
+            from integrations import volcengine_client
+            raw = await volcengine_client.vision_json(
+                image_urls=urls,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
                 max_tokens=1024,
             )
-        text = (resp.choices[0].message.content or "").strip()
+        else:  # qwen (DashScope qwen-vl-plus)
+            from integrations.llm_client import _client, _sem, _json_from_text
+            async with _sem():
+                resp = await _client().chat.completions.create(
+                    model=s.llm_vision_model,
+                    messages=messages,
+                    temperature=0.1,
+                    max_tokens=1024,
+                )
+            text = (resp.choices[0].message.content or "").strip()
+            raw = _json_from_text(text)
     except Exception as e:  # noqa: BLE001
-        log.warning("L4 vision 调用失败 %s: %s - 回落 pass", product.asin, e)
+        log.warning("L4 vision 调用失败 %s (provider=%s): %s - 回落 pass",
+                    product.asin, s.vision_provider, e)
         return L4Result(verdict="pass", image_issues=[], hits=[])
 
-    # 解析 JSON
-    from integrations.llm_client import _json_from_text
-    raw = _json_from_text(text)
     if not raw or "_raw" in raw:
-        log.warning("L4 vision JSON 解析失败 %s: %r - 回落 pass", product.asin, text[:200])
+        log.warning("L4 vision JSON 解析失败 %s: raw=%r - 回落 pass", product.asin, str(raw)[:200])
         return L4Result(verdict="pass", image_issues=[], hits=[])
 
     issues = raw.get("image_issues") or []

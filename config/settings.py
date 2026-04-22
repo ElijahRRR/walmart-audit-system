@@ -33,6 +33,13 @@ class Settings:
     llm_text_model: str
     llm_vision_model: str
 
+    # --- 视觉 provider 切换 (qwen | volcengine) ---
+    # 默认 volcengine (豆包视觉, 国内中文优势); qwen 走 DashScope qwen-vl-plus
+    vision_provider: str
+    volcengine_api_key: str
+    volcengine_base_url: str
+    volcengine_vision_model: str
+
     # --- Lark ---
     lark_wiki_blacklist: str
     lark_wiki_category_map: str
@@ -72,6 +79,12 @@ def get_settings() -> Settings:
         dashscope_base_url=_get("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
         llm_text_model=_get("LLM_TEXT_MODEL", "qwen-turbo"),
         llm_vision_model=_get("LLM_VISION_MODEL", "qwen-vl-plus"),
+        # 火山方舟 (豆包视觉) - 账号可用后改 VISION_PROVIDER=volcengine 切换
+        vision_provider=_get("VISION_PROVIDER", "qwen"),
+        volcengine_api_key=_get("VOLCENGINE_API_KEY", "ark-3d0011dc-6dcd-4a8d-bf30-e2751eba1b24-41d0c"),
+        volcengine_base_url=_get("VOLCENGINE_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"),
+        # 有效模型: doubao-seed-1-6-250615 / doubao-1.5-vision-pro-32k-250115
+        volcengine_vision_model=_get("VOLCENGINE_VISION_MODEL", "doubao-seed-1-6-250615"),
         lark_wiki_blacklist=_get("LARK_WIKI_BLACKLIST", "UhZJw3EtsiFN9skbG0Ac24Dgn4b"),
         lark_wiki_category_map=_get("LARK_WIKI_CATEGORY_MAP", "UKdZwr7JqiO6UckjSnPcwTCgnvd"),
         lark_sheet_violation=_get("LARK_SHEET_VIOLATION", "YlA1szPAAhW7CCtmG5hcp6vkndd"),
