@@ -17,7 +17,7 @@ from typing import Any
 
 from sync._common import db_conn, to_jsonb
 
-from . import l1_category, l2_rules, l3_llm, phase0
+from . import l1_category, l2_rules, l3_llm, l4_vision, phase0
 from .models import AuditOutcome, L1Result, L2Result, L3Result, Phase0Result, ProductInfo, RuleHit
 
 log = logging.getLogger(__name__)
@@ -192,9 +192,13 @@ async def audit_one(
             outcome.verdict = "reject"
             outcome.stage_stopped_at = "L3"
 
-    # L4 (占位)
+    # L4 视觉审核 (只在 L3 通过后跑, 最贵的一层)
     if outcome.verdict == "pass" and run_l4:
-        log.warning("run_l4=True 但 L4 尚未实现")
+        l4 = await l4_vision.judge(product, l1, l2, outcome.l3)
+        outcome.l4 = l4
+        if l4.verdict == "reject":
+            outcome.verdict = "reject"
+            outcome.stage_stopped_at = "L4"
 
     # 持久化
     if persist:

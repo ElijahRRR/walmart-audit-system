@@ -31,7 +31,7 @@ import httpx
 
 from config import ROOT, get_settings
 from integrations.dmit_client import ProductDetail
-from pipelines import l1_category, l2_rules, l3_llm, phase0
+from pipelines import l1_category, l2_rules, l3_llm, l4_vision, phase0
 from pipelines.models import ProductInfo
 
 log = logging.getLogger(__name__)
@@ -61,7 +61,7 @@ async def _fetch_dmit(asins: list[str], base: str) -> dict[str, dict]:
     return res
 
 
-async def audit_one(sample: dict, dmit_item: dict | None, run_l3: bool) -> dict | None:
+async def audit_one(sample: dict, dmit_item: dict | None, run_l3: bool, run_l4: bool = False) -> dict | None:
     if not dmit_item:
         return None
     pd = ProductDetail.from_dmit(dmit_item)
@@ -71,6 +71,7 @@ async def audit_one(sample: dict, dmit_item: dict | None, run_l3: bool) -> dict 
         bullet_points=pd.bullet_points,
         long_description=pd.long_description or "",
         country_of_origin=pd.country_of_origin or "",
+        image_urls=pd.image_urls or [],
     )
 
     p0 = phase0.check(p)
@@ -82,12 +83,14 @@ async def audit_one(sample: dict, dmit_item: dict | None, run_l3: bool) -> dict 
             "l1_pt": None, "l1_category": None,
             "l1_pt_matches_walmart": None,
             "l3_verdict": None, "l3_reason_category": None,
+            "l4_verdict": None, "l4_issues": None,
         }
 
     l1 = await l1_category.classify(p)
     l2 = l2_rules.evaluate(p, l1)
 
     l3 = None
+    l4 = None
     verdict = l2.verdict
     stage = "L2" if l2.verdict == "reject" else None
     if l2.verdict == "pass" and run_l3:
@@ -95,6 +98,13 @@ async def audit_one(sample: dict, dmit_item: dict | None, run_l3: bool) -> dict 
         if l3.verdict == "reject":
             verdict = "reject"
             stage = "L3"
+
+    # L4 只在 L3 pass (或 run_l3=False) 的情况下跑
+    if verdict == "pass" and run_l4:
+        l4 = await l4_vision.judge(p, l1, l2, l3)
+        if l4.verdict == "reject":
+            verdict = "reject"
+            stage = "L4"
 
     # L1 PT 是否匹配 walmart_pt (若 walmart_pt=default, 无法判定)
     l1_matches = None
@@ -114,10 +124,13 @@ async def audit_one(sample: dict, dmit_item: dict | None, run_l3: bool) -> dict 
         "l3_verdict": (l3.verdict if l3 else None),
         "l3_reason_category": (l3.reason_category if l3 else None),
         "l3_reason_text": (l3.reason_text if l3 else None),
+        "l4_verdict": (l4.verdict if l4 else None),
+        "l4_issues":  (l4.image_issues if l4 else None),
+        "images_count": len(p.image_urls or []),
     }
 
 
-async def run(run_l3: bool, refresh_dmit: bool, gt_file: Path = DEFAULT_GT_FILE) -> None:
+async def run(run_l3: bool, refresh_dmit: bool, gt_file: Path = DEFAULT_GT_FILE, run_l4: bool = False) -> None:
     samples = json.loads(gt_file.read_text(encoding="utf-8"))
     log.warning("groundtruth 总计 %d (from %s)", len(samples), gt_file.name)
 
@@ -145,7 +158,7 @@ async def run(run_l3: bool, refresh_dmit: bool, gt_file: Path = DEFAULT_GT_FILE)
 
     async def _guarded(s):
         async with sem:
-            return await audit_one(s, dmit_map.get(s["asin"]), run_l3)
+            return await audit_one(s, dmit_map.get(s["asin"]), run_l3, run_l4)
 
     audited = await asyncio.gather(*[_guarded(s) for s in present])
     results = [r for r in audited if r]
@@ -194,6 +207,18 @@ async def run(run_l3: bool, refresh_dmit: bool, gt_file: Path = DEFAULT_GT_FILE)
             print(f"  [{r['stratum']}] {r['asin']} | L3: {r['l3_reason_category']}")
             print(f"    reason: {r['l3_reason_text']}")
 
+    # 4.5. L4 视觉额外拦下
+    l4_rejected = [r for r in results if r.get("l4_verdict") == "reject"]
+    if l4_rejected:
+        print(f"\n=== L4 视觉额外拦下 ({len(l4_rejected)} 条) ===")
+        for r in l4_rejected:
+            issues = r.get("l4_issues") or []
+            high = [i for i in issues if isinstance(i, dict) and i.get("confidence") == "high"]
+            print(f"  [{r['stratum']}] {r['asin']} | 高置信度命中 {len(high)} 条")
+            for i in high[:3]:
+                print(f"    - img#{i.get('image_index')} {i.get('issue')}/{i.get('subtype')} "
+                      f"brand={i.get('brand_or_ip')}: {i.get('detail')}")
+
     # 5. 保存详细结果
     # 输出名匹配 gt_file: groundtruth_ce200.json → eval_ce200.json
     out_stem = gt_file.stem.replace("groundtruth_", "eval_")
@@ -205,6 +230,7 @@ async def run(run_l3: bool, refresh_dmit: bool, gt_file: Path = DEFAULT_GT_FILE)
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--run-l3", action="store_true")
+    p.add_argument("--run-l4", action="store_true", help="跑 L4 视觉审核 (qwen-vl-plus, 最贵)")
     p.add_argument("--no-refresh-dmit", action="store_true", help="用 json 里记的 dmit_present (不重新检查)")
     p.add_argument("--gt-file", default=str(DEFAULT_GT_FILE), help="groundtruth json 路径")
     p.add_argument("--out-file", default=None, help="输出 json 路径 (默认替换前缀)")
@@ -213,4 +239,4 @@ if __name__ == "__main__":
     logging.basicConfig(level=args.log_level, format="%(asctime)s [%(levelname)s] %(message)s")
 
     gt = Path(args.gt_file)
-    asyncio.run(run(run_l3=args.run_l3, refresh_dmit=not args.no_refresh_dmit, gt_file=gt))
+    asyncio.run(run(run_l3=args.run_l3, refresh_dmit=not args.no_refresh_dmit, gt_file=gt, run_l4=args.run_l4))
