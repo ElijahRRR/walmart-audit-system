@@ -121,6 +121,20 @@ def refresh_cache() -> None:
 # 匹配窗口: trigger 命中后, 往后扫 N 个字符找 brand (~5-8 个词)
 _TRIGGER_WINDOW_CHARS = 60
 
+# 否定前缀 (brand 前面紧跟这些词 = 非该品牌, 豁免)
+# 例: "for Non Bose System" (给非 Bose 系统设计的) / "Not for Dyson" / "Without Roland"
+_NEGATION_PREFIX_RE = re.compile(
+    r"\b(?:non|no|without|w/o|not\s+for|non[- ]?genuine|not\s+a|isn'?t)\b[\s\-]*$",
+    re.IGNORECASE,
+)
+_NEGATION_WINDOW = 15
+
+
+def _is_negated(text: str, match_start: int) -> bool:
+    """brand 命中位置前 15 字符含否定词 → 语义否定, 放行."""
+    prefix = text[max(0, match_start - _NEGATION_WINDOW) : match_start]
+    return bool(_NEGATION_PREFIX_RE.search(prefix))
+
 
 def check(product: ProductInfo) -> Phase0Result:
     """扫 title+bullets+description, "trigger 紧跟 brand" 模式 → blocked.
@@ -156,6 +170,11 @@ def check(product: ProductInfo) -> Phase0Result:
             # 窗口里第一个 brand 命中
             bm = brand_pattern.search(window)
             if bm:
+                # 在全 text 里的 brand 绝对位置
+                abs_brand_start = start + bm.start()
+                # 否定豁免: "for Non Bose" / "Replace Factory Stereo w/Non Bose"
+                if _is_negated(text, abs_brand_start):
+                    continue
                 matched_pairs.append({
                     "trigger": tm.group(0),
                     "brand":   bm.group(1),

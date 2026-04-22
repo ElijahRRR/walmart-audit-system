@@ -93,6 +93,28 @@ def refresh_cache() -> None:
     _load_strict_brands.cache_clear()
 
 
+# 否定前缀 — 如果品牌前面紧跟这些词, 语义是 "非该品牌", 不能算命中
+# 例: "Non Bose System" (为非 Bose 系统设计) / "Without Roland" / "Not for Dyson"
+# 窗口: 前 15 字符 (容 "For Non Bose", "compatible with non-Bose" 等组合)
+_NEGATION_PREFIX_RE = re.compile(
+    r"\b(?:non|no|without|w/o|not\s+for|non[- ]?genuine|not\s+a|isn'?t)\b[\s\-]*$",
+    re.IGNORECASE,
+)
+_NEGATION_WINDOW = 15
+
+
+def _is_negated(text: str, match_start: int) -> bool:
+    """检查 text[match_start] 前 15 字符内是否有否定词.
+
+    例:
+      "w/Non Bose System"     → "w/Non " before "Bose" → 否定
+      "Non-Bose speaker"      → "Non-" before "Bose" → 否定
+      "Compatible with Bose"  → "Compatible with " → 非否定 (compat 交 phase0_compat 处理)
+    """
+    prefix = text[max(0, match_start - _NEGATION_WINDOW) : match_start]
+    return bool(_NEGATION_PREFIX_RE.search(prefix))
+
+
 def check(product: ProductInfo) -> Phase0Result:
     """扫 title/bullets/description/brand, 命中任一 hard/c_hard 品牌 → blocked.
 
@@ -102,6 +124,7 @@ def check(product: ProductInfo) -> Phase0Result:
       ✓ "Dyson V11 Replacement Battery"       — 假冒 Dyson 配件 (IP)
       ✓ "Hyper Tough Screwdriver Set"         — Walmart 自营品牌 (Restricted)
       ✗ "Compatible with Bose"  — compat 语境 (交 phase0_compat 处理)
+      ✗ "w/Non Bose System" / "Without Dyson" — 否定语境放行 (见 _is_negated)
 
     注: 商家自填 brand 字段子串匹配 hard/c_hard 品牌时也算命中
         (如 brand="Baerenreiter Verlag" 包含 "Baerenreiter")
@@ -116,13 +139,16 @@ def check(product: ProductInfo) -> Phase0Result:
     if not pattern:
         return Phase0Result(blocked=False)
 
-    # title/desc 里扫品牌命中
+    # title/desc 里扫品牌命中 (检查每个命中前缀不是否定词)
     matches: list[dict[str, str]] = []
     seen: set[str] = set()
     for m in pattern.finditer(text):
         matched = m.group(1)
         key = matched.lower()
         if key in seen:
+            continue
+        # 否定前缀豁免: "Non Bose" / "Without Roland" → 不算冒用
+        if _is_negated(text, m.start()):
             continue
         seen.add(key)
         # 记录匹配上下文 (前后 20 字)

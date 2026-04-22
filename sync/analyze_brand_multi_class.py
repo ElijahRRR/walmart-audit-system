@@ -32,6 +32,14 @@ log = logging.getLogger(__name__)
 MIN_BRAND_LEN = 4
 _WORD_CHAR = re.compile(r"[A-Za-z0-9]")
 
+# 否定前缀 — "Non Bose" / "Without Dyson" 不算真命中, 防止把无辜品牌误进 c_hard/hard
+# (case: walmart 数据里 6/6 Bose C 全是 "w/Non Bose System", Bose 品牌完全被冤枉)
+_NEGATION_PREFIX_RE = re.compile(
+    r"\b(?:non|no|without|w/o|not\s+for|non[- ]?genuine|not\s+a|isn'?t)\b[\s\-]*$",
+    re.IGNORECASE,
+)
+_NEGATION_WINDOW = 15
+
 
 def _is_word_boundary(text: str, start: int, end: int) -> bool:
     if start > 0 and _WORD_CHAR.match(text[start - 1]):
@@ -39,6 +47,12 @@ def _is_word_boundary(text: str, start: int, end: int) -> bool:
     if end < len(text) and _WORD_CHAR.match(text[end]):
         return False
     return True
+
+
+def _is_negated(text: str, brand_start: int) -> bool:
+    """brand 前 15 字符含否定词 → 放行 (不算命中)."""
+    prefix = text[max(0, brand_start - _NEGATION_WINDOW) : brand_start]
+    return bool(_NEGATION_PREFIX_RE.search(prefix))
 
 
 def load_brands() -> tuple[list[str], dict[str, str]]:
@@ -96,8 +110,12 @@ def analyze() -> dict[str, dict[str, int]]:
                 hit_brands: set[str] = set()
                 for end_idx, brand_lower in A.iter(title_lower):
                     start_idx = end_idx - len(brand_lower) + 1
-                    if _is_word_boundary(title_lower, start_idx, end_idx + 1):
-                        hit_brands.add(brand_lower)
+                    if not _is_word_boundary(title_lower, start_idx, end_idx + 1):
+                        continue
+                    # 否定豁免: "Non Bose" / "Without Dyson" 不算命中
+                    if _is_negated(title_lower, start_idx):
+                        continue
+                    hit_brands.add(brand_lower)
                 if not hit_brands:
                     continue
                 code = row["error_code"] or "_"
@@ -233,6 +251,20 @@ def upsert_multi_class(stats: dict, brand_map: dict) -> None:
                   ADD COLUMN IF NOT EXISTS c_hits INT DEFAULT 0,
                   ADD COLUMN IF NOT EXISTS c_precision_pct NUMERIC(5,2) DEFAULT 0
             """)
+
+            # 关键: 删除本次分析不命中但上次在库的品牌 (全量重算, 避免陈旧数据)
+            # 保留有员工 override 的记录 (override_severity IS NOT NULL)
+            current_brands = [r["brand"] for r in rows]
+            cur.execute(
+                """
+                DELETE FROM blacklist_brand_ip_stats
+                WHERE override_severity IS NULL
+                  AND brand <> ALL(%s)
+                """,
+                (current_brands,),
+            )
+            log.warning("cleared %d stale (non-overridden) records", cur.rowcount)
+
             for batch in batched(rows, 500):
                 cur.executemany(
                     """
