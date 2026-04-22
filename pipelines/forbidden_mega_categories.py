@@ -38,6 +38,7 @@ class MegaCategory:
     reason: str
     pt_contains: tuple[str, ...]
     walmart_category_prefix: tuple[str, ...]
+    walmart_policy: str | None = None   # Walmart 37 条政策 category_en
 
 
 @dataclass
@@ -48,6 +49,7 @@ class MegaHit:
     matched_term: str          # 命中的具体关键词
     walmart_pt: str | None = None
     walmart_category: str | None = None
+    walmart_policy: str | None = None   # 对齐 Walmart 官方政策 category_en
 
 
 @lru_cache(maxsize=1)
@@ -65,9 +67,13 @@ def load_mega_categories() -> list[MegaCategory]:
         reason = str(it.get("reason") or "").strip()
         pt_c = tuple(str(x).strip().lower() for x in (it.get("pt_contains") or []) if str(x).strip())
         cat_p = tuple(str(x).strip().lower() for x in (it.get("walmart_category_prefix") or []) if str(x).strip())
+        walmart_policy = str(it.get("walmart_policy") or "").strip() or None
         if not key or (not pt_c and not cat_p):
             continue
-        out.append(MegaCategory(key=key, reason=reason, pt_contains=pt_c, walmart_category_prefix=cat_p))
+        out.append(MegaCategory(
+            key=key, reason=reason, pt_contains=pt_c,
+            walmart_category_prefix=cat_p, walmart_policy=walmart_policy,
+        ))
     log.info("loaded %d mega forbidden categories", len(out))
     return out
 
@@ -113,6 +119,7 @@ def match_mega(walmart_pt: str, walmart_category: str | None = None) -> MegaHit 
                         matched_term=term,
                         walmart_pt=walmart_pt,
                         walmart_category=walmart_category,
+                        walmart_policy=mc.walmart_policy,
                     )
         # 2. Walmart Category 前缀命中
         if cat_norm:
@@ -125,6 +132,7 @@ def match_mega(walmart_pt: str, walmart_category: str | None = None) -> MegaHit 
                         matched_term=pref,
                         walmart_pt=walmart_pt,
                         walmart_category=walmart_category,
+                        walmart_policy=mc.walmart_policy,
                     )
     return None
 

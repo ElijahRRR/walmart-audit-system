@@ -79,6 +79,7 @@ excluded_categories:
 mega_forbidden_categories:
   # --- 高优先 (更具体) ---
   - key: medical
+    walmart_policy: "Medical Devices"
     reason: "医疗器械禁售: FDA 510(k) 许可"
     pt_contains:
       - "Medical Device"
@@ -118,6 +119,7 @@ mega_forbidden_categories:
 
   # === 新增 G 药品/补充剂禁售 (膳食/顺势疗法/中药) ===
   - key: drugs_supplements
+    walmart_policy: "Dietary Supplements"
     reason: "药品/膳食补充剂禁售: FDA 注册 + restricted sellers + MoCRA, 中国卖家 0 可能合规"
     pt_contains:
       - "Homeopathic"
@@ -139,6 +141,7 @@ mega_forbidden_categories:
 
   # === 新增 特殊-武器/枪支 (实证 B+C 104 条) ===
   - key: weapons_firearms
+    walmart_policy: "Military & Law Enforcement"
     reason: "武器/枪支/弹药禁售: 联邦法绝对禁 + Walmart Firearm Accessories 政策"
     pt_contains:
       - "Firearm"
@@ -166,6 +169,7 @@ mega_forbidden_categories:
 
   # === 新增 烟酒 (Alcohol / Tobacco 100% 禁) ===
   - key: alcohol_tobacco
+    walmart_policy: "Alcohol"
     reason: "酒精/烟草/电子烟完全禁售 (Walmart 零容忍)"
     pt_contains:
       - "Alcohol"
@@ -188,6 +192,7 @@ mega_forbidden_categories:
       - "Alcohol"
 
   - key: pet_food
+    walmart_policy: "Pet Products"
     reason: "宠物食品禁售: FDA 宠物食品设施注册 + AAFCO 标签"
     pt_contains:
       - "Pet Food"
@@ -210,6 +215,7 @@ mega_forbidden_categories:
       - "Pet Health"
 
   - key: baby
+    walmart_policy: "Baby Products"
     reason: "婴童用品禁售: CPSIA/JPMA 认证 + 食品接触合规"
     pt_contains:
       - "Baby"
@@ -230,6 +236,7 @@ mega_forbidden_categories:
       - "Baby"
 
   - key: children_toys
+    walmart_policy: "Children's Products"
     reason: "儿童用品禁售: CPC/CPSIA 测试报告强制"
     pt_contains:
       - "Children"
@@ -250,6 +257,7 @@ mega_forbidden_categories:
       - "Games & Toys"
 
   - key: cosmetics
+    walmart_policy: "Cosmetic Products"
     reason: "化妆品 restricted: MoCRA 2024 + FDA 化妆品合规, 中国卖家几乎不放开"
     pt_contains:
       - "Cosmetic"
@@ -293,6 +301,7 @@ mega_forbidden_categories:
 
   # --- 中优先 (大类) ---
   - key: automotive
+    walmart_policy: "Auto & Motor Vehicles"
     reason: "汽配禁售: DOT/SAE 认证 + 安全件责任"
     pt_contains:
       - "Automotive"
@@ -321,6 +330,7 @@ mega_forbidden_categories:
       - "Auto & Tires"
 
   - key: electronics
+    walmart_policy: "Electronics & RF"
     reason: "电子产品禁售: NRTL/FCC 认证要求, 搬运无法提供"
     pt_contains:
       - "Laptop"
@@ -351,6 +361,7 @@ mega_forbidden_categories:
     walmart_category_prefix: []
 
   - key: apparel
+    walmart_policy: "Textiles & Apparel"
     reason: "服饰禁售: 尺码/SKU管理复杂, 退货率高, 中国卖家难做"
     pt_contains:
       - "Apparel"
@@ -387,6 +398,7 @@ mega_forbidden_categories:
 
   # --- 兜底 (最泛) ---
   - key: food
+    walmart_policy: "Food Products"
     reason: "食品禁售: FDA 食品设施注册 + 标签合规"
     pt_contains:
       - "Food"

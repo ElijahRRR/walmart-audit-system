@@ -31,7 +31,7 @@ import httpx
 
 from config import ROOT, get_settings
 from integrations.dmit_client import ProductDetail
-from pipelines import l1_category, l2_rules, l3_llm, l4_vision, phase0
+from pipelines import l1_category, l2_rules, l3_llm, l4_vision, phase0, reason_mapper
 from pipelines.models import ProductInfo
 
 log = logging.getLogger(__name__)
@@ -74,8 +74,16 @@ async def audit_one(sample: dict, dmit_item: dict | None, run_l3: bool, run_l4: 
         image_urls=pd.image_urls or [],
     )
 
+    # 用 SimpleNamespace 假装有 AuditOutcome, 方便复用 reason_mapper
+    from types import SimpleNamespace
+
     p0 = phase0.check(p)
     if p0.blocked:
+        mock_outcome = SimpleNamespace(
+            verdict='reject', l1=None, l3=None, l4=None,
+            all_hits=p0.hits, phase0=p0,
+        )
+        final_cat = reason_mapper.compute_final_reason(mock_outcome, p)
         return {
             **sample,
             "p_title": p.title, "p_brand": p.brand,
@@ -84,6 +92,7 @@ async def audit_one(sample: dict, dmit_item: dict | None, run_l3: bool, run_l4: 
             "l1_pt_matches_walmart": None,
             "l3_verdict": None, "l3_reason_category": None,
             "l4_verdict": None, "l4_issues": None,
+            "final_reason_category": final_cat,
         }
 
     l1 = await l1_category.classify(p)
@@ -93,9 +102,11 @@ async def audit_one(sample: dict, dmit_item: dict | None, run_l3: bool, run_l4: 
     l4 = None
     verdict = l2.verdict
     stage = "L2" if l2.verdict == "reject" else None
-    if l2.verdict == "pass" and run_l3:
+
+    # L3 双模式: L2 pass 时 L3 是裁决; L2 reject 时 L3 只做 reason annotation
+    if run_l3:
         l3 = await l3_llm.judge(p, l1, l2)
-        if l3.verdict == "reject":
+        if l2.verdict == "pass" and l3.verdict == "reject":
             verdict = "reject"
             stage = "L3"
 
@@ -105,6 +116,19 @@ async def audit_one(sample: dict, dmit_item: dict | None, run_l3: bool, run_l4: 
         if l4.verdict == "reject":
             verdict = "reject"
             stage = "L4"
+
+    # 计算 final_reason_category
+    all_hits = []
+    all_hits.extend(p0.hits if p0 else [])
+    all_hits.extend(l1.hits if l1 else [])
+    all_hits.extend(l2.hits if l2 else [])
+    all_hits.extend(l3.hits if l3 else [])
+    all_hits.extend(l4.hits if l4 else [])
+    mock_outcome = SimpleNamespace(
+        verdict=verdict, l1=l1, l3=l3, l4=l4,
+        all_hits=all_hits, phase0=p0,
+    )
+    final_cat = reason_mapper.compute_final_reason(mock_outcome, p)
 
     # L1 PT 是否匹配 walmart_pt (若 walmart_pt=default, 无法判定)
     l1_matches = None
@@ -127,6 +151,7 @@ async def audit_one(sample: dict, dmit_item: dict | None, run_l3: bool, run_l4: 
         "l4_verdict": (l4.verdict if l4 else None),
         "l4_issues":  (l4.image_issues if l4 else None),
         "images_count": len(p.image_urls or []),
+        "final_reason_category": final_cat,
     }
 
 

@@ -131,6 +131,10 @@ class AuditOutcome:
     l3: L3Result | None = None
     l4: L4Result | None = None
 
+    # 统一的对齐 Walmart 37 条政策 category_en 的最终拒绝原因 (verdict=reject 时有意义)
+    # 由 reason_mapper.compute_final_reason 填充
+    final_reason_category: str | None = None
+
     @property
     def all_hits(self) -> list[RuleHit]:
         bag: list[RuleHit] = []

@@ -17,7 +17,7 @@ from typing import Any
 
 from sync._common import db_conn, to_jsonb
 
-from . import l1_category, l2_rules, l3_llm, l4_vision, phase0
+from . import l1_category, l2_rules, l3_llm, l4_vision, phase0, reason_mapper
 from .models import AuditOutcome, L1Result, L2Result, L3Result, Phase0Result, ProductInfo, RuleHit
 
 log = logging.getLogger(__name__)
@@ -159,6 +159,8 @@ async def audit_one(
             phase0=phase0_result,
             l2=None,
         )
+        # L0 即决, 先算 final_reason (读 phase0 hit 的 walmart_policy)
+        outcome.final_reason_category = reason_mapper.compute_final_reason(outcome, product)
         if persist:
             try:
                 upsert_product(product)
@@ -183,14 +185,16 @@ async def audit_one(
         l2=l2,
     )
 
-    # L3 LLM 语义审核 (仅 L2 pass 才跑)
-    if l2.verdict == "pass" and run_l3:
+    # L3 LLM 语义审核
+    # - 若 L2 pass: L3 是最终裁决, 可以改 verdict
+    # - 若 L2 reject: L3 是 reason 标注 (不改 verdict, 只提供对齐 Walmart 政策的精确 reason)
+    if run_l3:
         l3 = await l3_llm.judge(product, l1, l2)
         outcome.l3 = l3
-        if l3.verdict == "reject":
-            # L3 不扣分, 直接改终裁
+        if l2.verdict == "pass" and l3.verdict == "reject":
             outcome.verdict = "reject"
             outcome.stage_stopped_at = "L3"
+        # 若 L2 已 reject, L3 只做 annotation, stage_stopped_at 保持 L2
 
     # L4 视觉审核 (只在 L3 通过后跑, 最贵的一层)
     if outcome.verdict == "pass" and run_l4:
@@ -199,6 +203,9 @@ async def audit_one(
         if l4.verdict == "reject":
             outcome.verdict = "reject"
             outcome.stage_stopped_at = "L4"
+
+    # 计算 final_reason_category (Walmart 37 条政策标准名, 对齐合规报告)
+    outcome.final_reason_category = reason_mapper.compute_final_reason(outcome, product)
 
     # 持久化
     if persist:

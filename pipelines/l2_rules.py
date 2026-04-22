@@ -176,6 +176,7 @@ def _rule_forbidden_mega_cat(l1: L1Result) -> list[RuleHit]:
                 "matched_term": hit.matched_term,
                 "walmart_pt": hit.walmart_pt,
                 "walmart_category": hit.walmart_category,
+                "walmart_policy": hit.walmart_policy,   # 对齐 Walmart 37 条政策
             },
         )
     ]
