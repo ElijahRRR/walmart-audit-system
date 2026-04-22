@@ -33,12 +33,18 @@ class Settings:
     llm_text_model: str
     llm_vision_model: str
 
-    # --- 视觉 provider 切换 (qwen | volcengine) ---
-    # 默认 volcengine (豆包视觉, 国内中文优势); qwen 走 DashScope qwen-vl-plus
+    # --- 视觉 provider 切换 (qwen | volcengine | gemini) ---
+    # volcengine (豆包视觉, 国内中文优势); qwen 走 DashScope; gemini 走 Google
     vision_provider: str
     volcengine_api_key: str
     volcengine_base_url: str
     volcengine_vision_model: str
+
+    # --- Google Gemini (支持文本 + 多模态) ---
+    gemini_api_key: str
+    gemini_base_url: str
+    gemini_vision_model: str
+    gemini_text_model: str
 
     # --- Lark ---
     lark_wiki_blacklist: str
@@ -85,6 +91,11 @@ def get_settings() -> Settings:
         volcengine_base_url=_get("VOLCENGINE_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"),
         # 有效模型: doubao-seed-1-6-250615 / doubao-1.5-vision-pro-32k-250115
         volcengine_vision_model=_get("VOLCENGINE_VISION_MODEL", "doubao-seed-1-6-250615"),
+        # Google Gemini (OpenAI-compatible endpoint: /v1beta/openai)
+        gemini_api_key=_get("GEMINI_API_KEY", "AQ.Ab8RN6JhlmesAjyTnk0Aso5RN8YL2QvUusqOvDN7GKVM7NKcPw"),
+        gemini_base_url=_get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/"),
+        gemini_vision_model=_get("GEMINI_VISION_MODEL", "gemini-2.5-flash-lite"),
+        gemini_text_model=_get("GEMINI_TEXT_MODEL", "gemini-2.5-flash-lite"),
         lark_wiki_blacklist=_get("LARK_WIKI_BLACKLIST", "UhZJw3EtsiFN9skbG0Ac24Dgn4b"),
         lark_wiki_category_map=_get("LARK_WIKI_CATEGORY_MAP", "UKdZwr7JqiO6UckjSnPcwTCgnvd"),
         lark_sheet_violation=_get("LARK_SHEET_VIOLATION", "YlA1szPAAhW7CCtmG5hcp6vkndd"),

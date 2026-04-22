@@ -297,10 +297,18 @@ async def judge(
     # 按 provider 路由 (qwen / volcengine)
     raw: dict[str, Any] = {}
     try:
-        if s.vision_provider == "volcengine":
+        if s.vision_provider == "gemini":
+            from integrations import gemini_client
+            raw = await gemini_client.vision_json(
+                image_urls=data_urls,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=1024,
+            )
+        elif s.vision_provider == "volcengine":
             from integrations import volcengine_client
             raw = await volcengine_client.vision_json(
-                image_urls=data_urls,   # base64 data URLs, 不是原 URL
+                image_urls=data_urls,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 max_tokens=1024,
