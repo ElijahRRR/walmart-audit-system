@@ -271,9 +271,50 @@ def _build_system_prompt(include_sticker: bool, include_weapons: bool) -> str:
 """)
 
     parts.append("""
-## C. 其他 (次要覆盖)
-- IP 侵权: 标题/描述含明确盗版信号 ("bootleg"/"replica of <Brand>"/"copy of <Brand>") → reason_category 用 "Intellectual Property"
-- 品牌字段伪装: brand 字段 vs 标题/描述品牌信息矛盾 → reason_category 用 "brand_misuse"
+## C. 知识产权 (Intellectual Property) — 7 种子类精确识别
+
+Walmart Prohibited Products Policy: Intellectual Property 覆盖以下 7 种侵权模式.
+命中任一 → reason_category='Intellectual Property', reason_text 开头必须写子类 (如 '[外观专利]...'):
+
+### C.1 Trademark (商标) — 最常见, L2 R4/R5 已前置
+- 仿冒 Nike/Adidas/Disney/LEGO 等知名 logo 或名字
+- title 含 brand name 且 brand 字段 != 该 brand, 无 ®/™/Licensed/Authorized/Genuine/OEM 授权声明
+- 判定: 走 §A 品牌真伪逻辑, 命中写 '[商标]...'
+
+### C.2 Copyright (版权)
+- 翻印书籍/乐谱/漫画 (书类 PT 已硬禁, 这里覆盖伪装成其他 PT 的)
+- 盗版音乐/影视/游戏
+- 仿宝可梦/迪士尼/漫威原创插画 ("Pokemon art" / "Disney-style character")
+- 判定: title 或 bullets 含知名 IP 名 + 无版权授权声明 → '[版权]...'
+
+### C.3 Design Patent (外观专利) — D 开头专利, 难自动化但 LLM 能判
+- 仿爆款产品外观 (Stanley Cup 杯型 / Yeti Tumbler 仿造 / AirPods 壳仿 Apple / iPhone 壳设计)
+- title 明示 "Stanley Cup"/"Yeti style tumbler"/"AirPods case for Apple" 且 brand != 原产品方
+- 判定: 产品描述**将造型/外形**作为核心卖点 + 提及知名大牌 → '[外观专利]...'
+
+### C.4 Utility Patent (发明专利)
+- 未授权冒用专利技术 (Dyson 气旋马达 / Roomba 路径算法 / SodaStream 气瓶接口)
+- title 或 bullets 含 "same technology as Dyson" / "patented design of <brand>"
+- **较难自动检测**, 只在文本明示时判 → '[发明专利]...'
+
+### C.5 Trade Dress (商业包装)
+- 仿整体视觉识别 (可口可乐瓶形 + 红白配色 / Tiffany 蓝盒子 / Hermès 橙色包装)
+- 产品色彩/排版/包装高度相似于某品牌标志风格 → '[商业包装]...'
+
+### C.6 Publicity Rights (肖像权) — 实证高发
+- 未授权用**名人/运动员/政治人物**肖像
+- 包括: NFL/NBA/MLB 球员名、Trump / Taylor Swift / LeBron / Kobe 等
+- 名人名字 + 商品 (T恤/杯子/海报/纪念品) → '[肖像权]...'
+
+### C.7 Counterfeit (假冒)
+- 声称是真品但价格显著低于市场 ("100% Authentic Louis Vuitton" $29.99)
+- 不明码价便宜奢侈品 → '[假冒]...'
+
+---
+
+## D. 品牌字段伪装 (brand_misuse)
+- brand 字段填 'Unbranded' / 'Generic' / 自创山寨名, 但 title/描述里明确说/展示真品牌 logo
+- → reason_category='brand_misuse', reason_text='[品牌伪装] brand=X 但描述含 Y'
 
 # 输出规范 (严格 JSON)
 

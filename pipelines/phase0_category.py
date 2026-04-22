@@ -28,11 +28,21 @@ log = logging.getLogger(__name__)
 
 # Amazon 顶级类目 → 禁售原因
 # key 必须是 Amazon 官方顶级类目名 (精确到大小写+标点)
+# 新增原则 (参考 walmart_prohibited_policy 和 walmart_error_records 9 天实证数据):
+#   只加"整个大类 90%+ 都会触发 Walmart 禁售 / 中国卖家不可能合规"的类目.
+#   细分有合规品的大类 (Baby/Toys/Pet/Industrial) 放 L1/L2 精细判, L0 不盲拦.
 FORBIDDEN_AMAZON_TOPS: dict[str, str] = {
-    "Books": "Books 禁售: 版权/内容合规风险, 搬运模式不适合",
-    "Kindle Store": "Kindle Store 禁售: 电子书版权, 搬运模式不做",
-    "Clothing, Shoes & Jewelry": "服饰/鞋/珠宝禁售: 尺码/SKU管理复杂, 退货率高, 中国卖家难做",
-    "Automotive": "汽配禁售: DOT/SAE 认证 + 安全件责任",
+    # === 原有 4 大类 ===
+    "Books":                    "Books 禁售: 版权/内容合规风险, 搬运模式不适合",
+    "Kindle Store":             "Kindle Store 禁售: 电子书版权, 搬运模式不做",
+    "Clothing, Shoes & Jewelry": "服饰/鞋/珠宝禁售: 尺码/SKU管理复杂 + 珠宝 AML 审批",
+    "Automotive":               "汽配禁售: DOT/SAE 认证 + 安全件责任 + CARB/delete kit 违规高发",
+
+    # === 新增: Walmart 整类 restricted, 中国卖家 0 可能合规 ===
+    "Beauty & Personal Care":   "化妆品 restricted: MoCRA 2024 要求 US Responsible Person, 中国卖家几乎不放开",
+    "Health & Household":       "药品/膳食补充剂 restricted: FDA 注册 + AML vetting + MoCRA, 中国卖家 0 可能合规",
+    "Health & Personal Care":   "同 Health & Household (Amazon 历史别名)",
+    "Grocery & Gourmet Food":   "食品大部分禁售: USDA 禁中国肉类 + FDA 食品设施注册, 常温干货条件允许但搬运难",
 }
 
 

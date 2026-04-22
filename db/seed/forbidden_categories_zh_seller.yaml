@@ -96,9 +96,96 @@ mega_forbidden_categories:
       - "Prescription"
       - "OTC Drug"
       - "Pharmaceutical"
+      # 新增 (来自 walmart_error_records F 类实证 PT):
+      - "Medical Thermometer"
+      - "Heating Pad"
+      - "Drug Test"
+      - "Catheter"
+      - "Spirometer"
+      - "Urinary Tract Infection Test Strip"
+      - "Endoscope"
+      - "Eye Drop"
+      - "Instrument Tray"
+      - "Compression Glove"
+      - "Compression Sleeve"
+      - "Compression Sock"
+      - "Protective Eyewear"   # 实证 11 条 F 类
+      - "Sport Goggle"
     walmart_category_prefix:
       - "Health"
       - "Medical"
+      - "Personal Care"
+
+  # === 新增 G 药品/补充剂禁售 (膳食/顺势疗法/中药) ===
+  - key: drugs_supplements
+    reason: "药品/膳食补充剂禁售: FDA 注册 + restricted sellers + MoCRA, 中国卖家 0 可能合规"
+    pt_contains:
+      - "Homeopathic"
+      - "Herbal Remedy"
+      - "Herbal Supplement"
+      - "Dietary Supplement"
+      - "Protein Supplement"
+      - "Mineral Supplement"
+      - "Vitamin"
+      - "Probiotic"
+      - "Weight Loss"
+      - "Melatonin"
+      - "Animal Supplement"          # 宠物补充剂也禁 (FDA/AAFCO)
+      - "Pet Vitamin"
+      - "Pet Supplement"
+    walmart_category_prefix:
+      - "Dietary Supplements"
+      - "Homeopathic"
+
+  # === 新增 特殊-武器/枪支 (实证 B+C 104 条) ===
+  - key: weapons_firearms
+    reason: "武器/枪支/弹药禁售: 联邦法绝对禁 + Walmart Firearm Accessories 政策"
+    pt_contains:
+      - "Firearm"
+      - "Ammunition"
+      - "Tactical Knife"
+      - "Throwing Knife"
+      - "Pocket Knife"             # Walmart 拦得严, 实证多条
+      - "Switchblade"
+      - "Butterfly Knife"
+      - "Brass Knuckle"
+      - "Pepper Spray"
+      - "Taser"
+      - "Stun Gun"
+      - "Crossbow"
+      - "Airsoft"
+      - "BB Gun"
+      - "Pellet Gun"
+      - "Paintball Gun"
+      - "Body Armor"
+      - "Ballistic"
+      - "Bulletproof"
+    walmart_category_prefix:
+      - "Hunting"
+      - "Weapons"
+
+  # === 新增 烟酒 (Alcohol / Tobacco 100% 禁) ===
+  - key: alcohol_tobacco
+    reason: "酒精/烟草/电子烟完全禁售 (Walmart 零容忍)"
+    pt_contains:
+      - "Alcohol"
+      - "Wine"
+      - "Beer"
+      - "Liquor"
+      - "Distill"
+      - "Moonshine"
+      - "Tobacco"
+      - "Cigarette"
+      - "Cigar"
+      - "Vape"
+      - "E-Cigarette"
+      - "Vaping"
+      - "Nicotine"
+      - "Hookah"
+      - "Shisha"
+    walmart_category_prefix:
+      - "Tobacco"
+      - "Alcohol"
 
   - key: pet_food
     reason: "宠物食品禁售: FDA 宠物食品设施注册 + AAFCO 标签"
@@ -113,8 +200,14 @@ mega_forbidden_categories:
       - "Cat Treat"
       - "Pet Supplement"
       - "Pet Vitamin"
+      # 实证 (walmart_error_records F 类)
+      - "Animal Feed"
+      - "Pet Milk Replacer"
+      - "Pet Repellent"             # 杀虫剂类, EPA 注册
+      - "Other Pet Health Supplies"
     walmart_category_prefix:
       - "Pet Food"
+      - "Pet Health"
 
   - key: baby
     reason: "婴童用品禁售: CPSIA/JPMA 认证 + 食品接触合规"
@@ -157,7 +250,7 @@ mega_forbidden_categories:
       - "Games & Toys"
 
   - key: cosmetics
-    reason: "化妆品禁售: FDA 化妆品合规 + 成分披露"
+    reason: "化妆品 restricted: MoCRA 2024 + FDA 化妆品合规, 中国卖家几乎不放开"
     pt_contains:
       - "Cosmetic"
       - "Makeup"
@@ -177,8 +270,26 @@ mega_forbidden_categories:
       - "Fragrance"
       - "Hair Dye"
       - "Hair Color"
+      # 新增 (walmart_error_records F-cosmetics 实证)
+      - "Other Nail Care"
+      - "Nail Base Coat"
+      - "Hand Sanitizer"
+      - "Body Moisturizer"
+      - "Deodorant"
+      - "Antiperspirant"
+      - "Dry Shampoo"
+      - "Teeth Whitening"
+      - "Tampon"
+      - "Hand Soap"
+      - "Shampoo"
+      - "Hair Oil"
+      - "Aromatherapy"
+      - "Essential Oil"
+      - "Body Care Set"
+      - "Temporary Tattoo"
     walmart_category_prefix:
       - "Beauty"
+      - "Personal Care"
 
   # --- 中优先 (大类) ---
   - key: automotive
