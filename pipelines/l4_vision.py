@@ -1,4 +1,4 @@
-"""L4 视觉审核 — qwen-vl-plus 扫产品主图 + 辅图, 检测 7 类图像违规。
+"""L4 视觉审核 — 豆包/qwen-vl 扫产品主图 + 辅图, 检测 7 类图像违规。
 
 只在 L3 通过后跑 (最贵的一层, 不浪费 LLM vision tokens).
 
@@ -23,8 +23,12 @@ public:
 """
 from __future__ import annotations
 
+import asyncio
+import base64
 import logging
 from typing import Any
+
+import httpx
 
 from config import get_settings
 from integrations import llm_client
@@ -32,6 +36,47 @@ from integrations import llm_client
 from .models import L1Result, L2Result, L3Result, L4Result, ProductInfo, RuleHit
 
 log = logging.getLogger(__name__)
+
+# 本地下载并发 + 超时 (绕开火山服务端下 Amazon 图超时 bug)
+_IMG_DL_SEM = asyncio.Semaphore(30)
+_IMG_DL_TIMEOUT = 8.0
+
+
+async def _download_and_b64(url: str) -> str | None:
+    """本地下载图 → data URL (base64 内联). 失败返回 None.
+
+    传 base64 给 vision API, 绕开火山服务端下 Amazon 图超时的问题.
+    """
+    async with _IMG_DL_SEM:
+        try:
+            async with httpx.AsyncClient(
+                trust_env=False, timeout=_IMG_DL_TIMEOUT,
+                follow_redirects=True,
+            ) as c:
+                r = await c.get(url, headers={"User-Agent": "Mozilla/5.0"})
+                if r.status_code != 200 or not r.content:
+                    return None
+                # 推断 mime
+                ct = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+                if not ct.startswith("image/"):
+                    # 从 URL 后缀猜
+                    if url.lower().endswith(".png"):
+                        ct = "image/png"
+                    elif url.lower().endswith(".webp"):
+                        ct = "image/webp"
+                    else:
+                        ct = "image/jpeg"
+                b64 = base64.b64encode(r.content).decode("ascii")
+                return f"data:{ct};base64,{b64}"
+        except Exception as e:  # noqa: BLE001
+            log.debug("图下载失败 %s: %s", url, e)
+            return None
+
+
+async def _urls_to_data_urls(urls: list[str]) -> list[str]:
+    """并发下载 + 转 base64, 只保留成功的."""
+    results = await asyncio.gather(*(_download_and_b64(u) for u in urls))
+    return [r for r in results if r]
 
 
 SYSTEM_PROMPT = """你是沃尔玛 Marketplace 视觉合规审核 AI, 站在沃尔玛官方立场审核中国搬运卖家产品图片.
@@ -230,13 +275,19 @@ async def judge(
     if not urls:
         return L4Result(verdict="pass", image_issues=[], hits=[])
 
+    # 本地下载 + base64 转 data URL (绕开火山服务端拉 Amazon 图超时的 bug)
+    data_urls = await _urls_to_data_urls(urls)
+    if not data_urls:
+        log.warning("L4 %s 所有 %d 张图本地下载失败, 回落 pass", product.asin, len(urls))
+        return L4Result(verdict="pass", image_issues=[], hits=[])
+
     system_prompt = SYSTEM_PROMPT
-    user_prompt = _build_user_prompt(product, l1, l3).replace("{img_count}", str(len(urls)))
+    user_prompt = _build_user_prompt(product, l1, l3).replace("{img_count}", str(len(data_urls)))
 
     # 组装多模态消息: system + user(text + images)
     content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
-    for url in urls:
-        content.append({"type": "image_url", "image_url": {"url": url}})
+    for u in data_urls:
+        content.append({"type": "image_url", "image_url": {"url": u}})
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -249,7 +300,7 @@ async def judge(
         if s.vision_provider == "volcengine":
             from integrations import volcengine_client
             raw = await volcengine_client.vision_json(
-                image_urls=urls,
+                image_urls=data_urls,   # base64 data URLs, 不是原 URL
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 max_tokens=1024,
@@ -292,7 +343,7 @@ async def judge(
                 "issues": high_hits,
                 "all_issues": issues,
                 "reasoning": raw.get("reasoning"),
-                "images_scanned": len(urls),
+                "images_scanned": len(data_urls),
             },
         ))
 

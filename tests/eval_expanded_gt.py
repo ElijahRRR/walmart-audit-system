@@ -153,8 +153,10 @@ async def run(run_l3: bool, refresh_dmit: bool, gt_file: Path = DEFAULT_GT_FILE,
     present = [s for s in samples if s["asin"] in dmit_map]
     log.warning("实际可跑 eval 样本: %d", len(present))
 
-    # 跑审核 (并发 10, 避免 L1/L3 LLM 打爆)
-    sem = asyncio.Semaphore(10)
+    # 跑审核 - 外层 product 并发 50 (最优甜点: 实测 sem=100 反而更慢且 recall 降)
+    # 本地下图 base64 内联绕开火山服务端拉 Amazon 图超时, sem=50 下不报错
+    # sem=10 要 7:42 / sem=50 = 2:50 (2.7x) / sem=100 = 3:03 (图下载拥塞)
+    sem = asyncio.Semaphore(50)
 
     async def _guarded(s):
         async with sem:
