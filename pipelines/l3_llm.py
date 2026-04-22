@@ -363,6 +363,155 @@ SYSTEM_PROMPT = _build_system_prompt(True, True)
 
 
 # =============================================================
+# English system prompt (for Gemini / cross-language LLMs)
+# =============================================================
+
+
+@lru_cache(maxsize=8)
+def _build_system_prompt_en(include_sticker: bool, include_weapons: bool) -> str:
+    """English L3 system prompt — same semantics as Chinese version.
+
+    Gemini handles instruction-following best in English.
+    """
+    parts: list[str] = [
+        """You are a Walmart Marketplace compliance AI reviewer, acting on behalf of Walmart.
+Sellers are Chinese drop-shippers with no certifications, processing tens of thousands of products daily.
+Output strict JSON only — no explanations, no markdown wrappers.
+
+# Task
+
+The preceding rule engine (L2) has already filtered obvious violations. Items sent to you are "rule-suspected but not blocked". You perform the **final semantic judgment**, mainly covering two areas:
+
+## A. Brand authenticity (for L2 R4/R5 matched terms)
+- R4/R5 pass you all "blacklisted brand hits" and "USPTO trademarks" found in the text
+- **Most are generic English words** (e.g. top/summer/must/chair/fire/escape/weather/mountain/deluxe)
+- Only treat as REAL brand if ONE of these holds:
+  (a) It is a **well-known major brand** (Nike/Apple/Disney/LEGO/Marvel/NBA/Pokémon/Gucci/Louis Vuitton…)
+  (b) The text contains **authorization signals** (®/™/©, "Official", "Licensed", "Authorized", "Authentic", "Genuine", "OEM for <Brand>")
+  (c) The brand field claims one brand, but title/description describes another (e.g. brand='Unbranded' but title says "Disney-style" → impersonation)
+- Generic words are NOT violations even if USPTO-registered (many small US trademarks; do not over-block)
+
+## B. Offensive content (Walmart Offensive Content Policy)
+Based on policy, judge from title/description/bullets:
+- Sexual/adult themes (adult toys/dolls/bondage/chastity devices/sexual innuendo/Couples/Intimacy/Sensual/Erotic)
+- Sexualization of minors
+- Racial slurs / stereotypes / racist symbols
+- Intolerance symbols (Nazi swastika outside religious context / Confederate flag / KKK)
+- Mocking/disparaging political candidates
+- Mocking/celebrating tragedies, disasters, animal abuse
+- Mocking protected characteristics (race/gender/sexual orientation/religion/disability/body/age)
+"""
+    ]
+
+    if include_sticker:
+        parts.append(f"""
+### B.1 Stickers / posters / patches / emblems / flags / T-shirts / decorative art / mug decals — special alert
+
+Violations for these products hide in the specific image/text. **If the text contains ANY of the sensitive theme words below (or combinations), lean toward REJECT (offensive):**
+
+{_fmt_sticker_themes()}
+
+- If the product is a **mixed pack of N items** (e.g. "400 Pcs stickers") and the description lists multiple themes including any sensitive theme → REJECT (even a few bad stickers violate policy).
+""")
+
+    if include_weapons:
+        parts.append(f"""
+### B.2 Replica weapons / toy guns / military-police toy gear (Walmart Military & Law Enforcement + 15 U.S.C. § 5001)
+
+{_fmt_weapons_block()}
+
+**Decision flow** (in strict order):
+1. First check exemptions. If any exemption hits → **immediately pass**, do not continue.
+2. Else check standalone (single term triggers), or weapon-term + realistic-term co-occurrence → REJECT.
+
+**reason_category = "Offensive Content"**, and reason_text should clearly state "Replica weapons (Military & Law Enforcement)".
+""")
+
+    parts.append("""
+## C. Intellectual Property — detect 7 subtypes precisely
+
+Walmart Prohibited Products Policy: Intellectual Property covers these 7 infringement patterns.
+Any match → reason_category='Intellectual Property', AND reason_text MUST START WITH the subtype tag (e.g. '[Design Patent] ...'):
+
+### C.1 Trademark — most common, L2 R4/R5 pre-filters
+- Imitating Nike/Adidas/Disney/LEGO etc. logos or names
+- title contains brand name but brand_field ≠ that brand, with no ®/™/Licensed/Authorized/Genuine/OEM claim
+- Decision: follow §A brand authenticity logic; tag with '[Trademark] ...'
+
+### C.2 Copyright
+- Reprinted books/sheet music/comics (book PTs already hard-blocked; covers disguised PTs here)
+- Pirated music / video / games
+- Copies of Pokémon / Disney / Marvel original art ("Pokemon art" / "Disney-style character")
+- Decision: title or bullets contain famous IP name without license → '[Copyright] ...'
+
+### C.3 Design Patent — D-prefixed US patents; hard to automate but LLM can judge
+- Imitating popular product shapes (Stanley Cup tumbler / Yeti Tumbler / AirPods case for Apple / iPhone case design)
+- title explicitly says "Stanley Cup" / "Yeti style tumbler" / "AirPods case for Apple" while brand ≠ original
+- Decision: product description features **shape/form** as selling point + mentions a known big brand → '[Design Patent] ...'
+
+### C.4 Utility Patent
+- Unauthorized use of patented technology (Dyson cyclone motor / Roomba navigation / SodaStream gas canister interface)
+- title or bullets say "same technology as Dyson" / "patented design of <brand>"
+- **Hard to detect**, only judge when explicit in text → '[Utility Patent] ...'
+
+### C.5 Trade Dress
+- Imitating overall visual identity (Coca-Cola bottle shape + red-white / Tiffany blue box / Hermès orange packaging)
+- Product colors/layout/packaging closely resemble a brand's signature style → '[Trade Dress] ...'
+
+### C.6 Publicity Rights — observed frequently
+- Unauthorized use of **celebrity/athlete/politician** likeness
+- Including: NFL/NBA/MLB player names, Trump / Taylor Swift / LeBron / Kobe etc.
+- Celebrity name + merchandise (T-shirt/mug/poster/collectible) → '[Publicity Rights] ...'
+
+### C.7 Counterfeit
+- Claiming to be genuine but priced significantly below market ("100% Authentic Louis Vuitton" at $29.99)
+- Cheap luxury items without verified licensing → '[Counterfeit] ...'
+
+---
+
+## D. Brand-field impersonation (brand_misuse)
+- brand field says 'Unbranded' / 'Generic' / some fake name, but title/description clearly references/shows a real brand logo
+- → reason_category='brand_misuse', reason_text='[Brand impersonation] brand=X but description contains Y'
+
+# Output format (strict JSON)
+
+{
+  "verdict": "pass" | "reject",
+  "reason_category": "<must be one from the user prompt's candidate list; for verdict=pass use 'none'>",
+  "reason_text": "<short English reason, ≤80 chars; empty if verdict=pass>",
+  "signals": {
+    "has_trademark_symbol": true|false,
+    "has_authorization_claim": true|false,
+    "offensive_signals": ["<specific signal>",...]
+  },
+  "blacklist_brand_verdict": [
+    {"brand": "<matched term>", "is_real_brand": true|false, "evidence": "<brief reasoning>"}
+  ],
+  "llm_confidence": "high" | "medium" | "low"
+}
+
+**Constraints**:
+- Default verdict=pass unless evidence is clear.
+- reason_category MUST be from the candidate list in the user prompt (usually one of Walmart's 37 Prohibited Product Policy category_en values, or brand_misuse, or none).
+- When verdict=pass, reason_category MUST be "none".
+- blacklist_brand_verdict: evaluate every term L2 R4 matched (up to first 10).
+- Also evaluate L2 R5 USPTO marks in the same structure.
+- Do NOT invent brands that were not in the matched list.
+""")
+    return "".join(parts)
+
+
+def get_system_prompt_en(
+    walmart_category: str | None,
+    walmart_pt: str | None = None,
+    product_text_hint: str | None = None,
+) -> str:
+    """English version of get_system_prompt, for Gemini / cross-language LLMs."""
+    sticker, weapons = _blocks_for(walmart_category, walmart_pt, product_text_hint)
+    return _build_system_prompt_en(sticker, weapons)
+
+
+# =============================================================
 # walmart_pt_meta.notes 读取 (飞书人工标注, 如 "⚠️T&S抽查48h内")
 # =============================================================
 
@@ -502,6 +651,85 @@ Amazon 类目: {product.amazon_category_path or '(空)'}
 """
 
 
+def _build_user_prompt_en(
+    product: ProductInfo, l1: L1Result, l2: L2Result,
+    policies: list[dict[str, Any]],
+) -> str:
+    """English L3 user prompt (for Gemini / cross-language LLMs)."""
+    bullets_txt = "\n".join(f"  - {b}" for b in product.bullet_points[:5]) or "  (none)"
+    desc = (product.long_description or "").strip()
+    if len(desc) > 800:
+        desc = desc[:800] + "... (truncated)"
+
+    l2_txt, r4_brands = _summarize_l2_hits(l2)
+    policy_txt = l3_policy_router.format_for_prompt(policies)
+
+    brand_list = (
+        "\n".join(f"  - {b}" for b in r4_brands)
+        if r4_brands
+        else "  (no R4/R5 matches — skip brand-authenticity check)"
+    )
+
+    pt_notes = _get_pt_notes(l1.walmart_product_type or "")
+    notes_line = (
+        f"\nFeishu manual notes (pt_meta.notes): {pt_notes[:200]}"
+        if pt_notes
+        else ""
+    )
+
+    routed_cats = [p["category_en"] for p in policies if p.get("category_en")]
+    reason_cat_candidates = routed_cats + ["brand_misuse", "none"]
+    cat_candidates_txt = "\n".join(f"  - {c}" for c in reason_cat_candidates)
+
+    return f"""# Product info
+
+ASIN: {product.asin}
+Title: {product.title}
+Brand field (seller-declared): {product.brand or '(empty)'}
+Country of origin: {product.country_of_origin or '(empty)'}
+Amazon category: {product.amazon_category_path or '(empty)'}
+Walmart PT: {l1.walmart_product_type or '(empty)'} (confidence {l1.pt_confidence}, source {l1.pt_source})
+Walmart Category: {l1.walmart_category or '(empty)'}{notes_line}
+
+Bullet points:
+{bullets_txt}
+
+Long description:
+{desc or '(empty)'}
+
+# L2 rule-engine hits
+
+{l2_txt}
+
+# Terms awaiting brand/trademark judgment (from L2 R4/R5, up to 10 — decide real brand vs generic word)
+
+{brand_list}
+
+# Relevant Walmart prohibited-product policies (for reference — if matched, reason_category = corresponding category_en)
+
+{policy_txt}
+
+# Candidate reason_category (when verdict=reject, must pick from this list)
+
+{cat_candidates_txt}
+
+# Task reminders
+
+1. **Brand authenticity**: For each matched term, judge is_real_brand given title/description context.
+   - Generic English words (top/summer/must/chair/fire/escape/weather/mountain/deluxe/modern/classic/pro...) → false
+   - Only true if text contains ®/™/Official/Licensed/Authentic/OEM-for etc. authorization signals.
+2. **Offensive content**: Match against policies above; if clear violation → reason_category="Offensive Content".
+   - Couples/Intimacy/Sensual keywords + suggestive imagery → Offensive Content
+   - Stickers/posters/T-shirts possibly printed with race/political symbols → Offensive Content
+3. **Category compliance**: If the product matches a policy (PFAS Chemicals / Baby Products / Hazardous Items etc.), use that policy's category_en as reason_category.
+4. **Brand impersonation**: brand='Unbranded' but description implies a big brand → reason_category="brand_misuse".
+5. **Feishu manual notes**: If pt_meta.notes contains "⚠️ T&S audit / high risk" warnings, judge more strictly.
+6. **Default = pass** — reject ONLY with clear evidence. When verdict=pass, reason_category MUST be "none".
+
+Output strictly in the JSON format defined in the system prompt.
+"""
+
+
 # =============================================================
 # 调 LLM + 结果转 L3Result
 # =============================================================
@@ -629,9 +857,16 @@ async def judge(product: ProductInfo, l1: L1Result, l2: L2Result) -> L3Result:
         max_policies=5,
     )
     # system prompt 按 category + PT + title hint 分叉
+    # provider 是 gemini 时用英文 prompt (用户反馈 Gemini 对英文 prompt 更准)
     text_hint = (product.title or "") + " " + " ".join(product.bullet_points[:2])
-    system_prompt = get_system_prompt(l1.walmart_category, l1.walmart_product_type, text_hint)
-    user_prompt = _build_user_prompt(product, l1, l2, routed_policies)
+    from config import get_settings
+    _use_en = (get_settings().llm_text_provider == "gemini")
+    if _use_en:
+        system_prompt = get_system_prompt_en(l1.walmart_category, l1.walmart_product_type, text_hint)
+        user_prompt = _build_user_prompt_en(product, l1, l2, routed_policies)
+    else:
+        system_prompt = get_system_prompt(l1.walmart_category, l1.walmart_product_type, text_hint)
+        user_prompt = _build_user_prompt(product, l1, l2, routed_policies)
 
     try:
         raw = await llm_client.chat_json(
