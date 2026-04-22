@@ -1,9 +1,14 @@
-"""F7 - 同步黑名单品牌 (飞书 TRO案件及商标黑名单 > 品牌明细 sheet 6IpYri 126130 行)。
+"""F7 - 同步黑名单品牌 (飞书 TRO案件及商标黑名单).
 
-表头: 公司名称 | 品牌名 | Serial Number | 注册号 | 状态 |
-      Nice编号 | Nice类目(中) | Nice类目(英) | 商品/服务描述 | 入库日期
+**两个子表都同步, 取并集**:
+  - 黑名单品牌 (jF8dOw, ~36k 行): 员工维护的精简黑名单, 3 列
+    表头: 品牌名 | 来源 | 入库日期
+    ⭐ 这个是权威黑名单 (可能包含手工加的 Sony/Roland/Seiko 等)
+  - 品牌明细 (6IpYri, ~126k 行): TRO 商标明细 (多商标/品牌), 10 列
+    表头: 公司名称 | 品牌名 | Serial Number | 注册号 | 状态 |
+          Nice编号 | Nice类目(中) | Nice类目(英) | 商品/服务描述 | 入库日期
 
-落库到 blacklist_brands 表, brand 作为 primary key, 重复取最新。
+落库到 blacklist_brands 表, brand 作为 primary key, 重复 ON CONFLICT DO UPDATE.
 """
 from __future__ import annotations
 
@@ -17,8 +22,13 @@ from ._common import SyncResult, batched, db_conn, finish_sync_run, start_sync_r
 
 log = logging.getLogger(__name__)
 
-SHEET_ID = "6IpYri"  # 品牌明细
-LAST_COL = "J"       # 10 列
+# 两个 sheet 都同步
+SHEETS = [
+    {"id": "jF8dOw", "last_col": "C", "source": "飞书-黑名单品牌", "kind": "simple",  # 精简黑名单 (3 列)
+     "desc": "员工手工维护的权威黑名单"},
+    {"id": "6IpYri", "last_col": "J", "source": "飞书-品牌明细",   "kind": "detailed", # TRO 明细 (10 列)
+     "desc": "TRO 商标明细含 Serial/Nice 类目"},
+]
 WIKI_TOKEN_FALLBACK = "UhZJw3EtsiFN9skbG0Ac24Dgn4b"
 
 
@@ -31,19 +41,45 @@ def _resolve_obj_token() -> str:
     return node["obj_token"]
 
 
-def _row_to_record(row: list) -> dict | None:
-    """行 -> dict, 跳过空 brand。"""
+def _norm_brand(v: object) -> str:
+    """从任意类型 (str/bool/int/None) 强转成字符串 brand 名 + strip."""
+    if v is None:
+        return ""
+    s = str(v).strip()
+    return s
+
+
+def _row_to_record_simple(row: list, source_label: str) -> dict | None:
+    """jF8dOw 精简表行解析: [品牌名, 来源, 入库日期]."""
     if not row:
         return None
-    # 容错: 行长度可能不够
-    padded = row + [None] * (10 - len(row))
-    company, brand, serial_no, reg_no, status, nice_code, nice_zh, nice_en, desc, imported_at = padded[:10]
-    brand = (brand or "").strip()
-    if not brand or brand == "品牌名":  # 跳过表头行
+    padded = row + [None] * (3 - len(row))
+    brand, origin, imported_at = padded[:3]
+    brand = _norm_brand(brand)
+    if not brand or brand in {"品牌名", "True", "False"}:
         return None
     return {
         "brand": brand,
-        "source": "飞书-TRO",
+        "source": source_label,
+        "raw": {
+            "origin": _norm_brand(origin) or None,
+            "imported_at_src": _norm_brand(imported_at) or None,
+        },
+    }
+
+
+def _row_to_record_detailed(row: list, source_label: str) -> dict | None:
+    """6IpYri 明细表行解析 (10 列)."""
+    if not row:
+        return None
+    padded = row + [None] * (10 - len(row))
+    company, brand, serial_no, reg_no, status, nice_code, nice_zh, nice_en, desc, imported_at = padded[:10]
+    brand = _norm_brand(brand)
+    if not brand or brand in {"品牌名", "True", "False"}:
+        return None
+    return {
+        "brand": brand,
+        "source": source_label,
         "raw": {
             "company": company,
             "serial_number": serial_no,
@@ -56,6 +92,12 @@ def _row_to_record(row: list) -> dict | None:
             "imported_at_src": imported_at,
         },
     }
+
+
+def _row_to_record(row: list, kind: str, source_label: str) -> dict | None:
+    if kind == "simple":
+        return _row_to_record_simple(row, source_label)
+    return _row_to_record_detailed(row, source_label)
 
 
 def _upsert_batch(records: list[dict]) -> int:
@@ -87,22 +129,28 @@ def run() -> SyncResult:
     total_out = 0
     try:
         obj_token = _resolve_obj_token()
-        log.info("spreadsheet obj_token=%s, reading full sheet %s ...", obj_token[:12], SHEET_ID)
-        # 分页读 (126130 行, 每页 200, 约 630 页)
-        rows = lc.read_paginated(obj_token, SHEET_ID, last_col_letter=LAST_COL, page_size=200)
-        log.info("fetched %d rows from sheet", len(rows))
-        total_in = len(rows)
+        log.info("spreadsheet obj_token=%s", obj_token[:12])
 
-        # 转换
+        # 依次同步两个子表, brand 去重合并
         records: list[dict] = []
         seen: set[str] = set()
-        for r in rows:
-            rec = _row_to_record(r)
-            if rec and rec["brand"] not in seen:
-                seen.add(rec["brand"])
-                records.append(rec)
 
-        log.info("unique brands: %d", len(records))
+        for sh in SHEETS:
+            log.info("reading sheet %s (%s) ...", sh["id"], sh["desc"])
+            rows = lc.read_paginated(obj_token, sh["id"], last_col_letter=sh["last_col"], page_size=200)
+            log.info("  fetched %d rows", len(rows))
+            total_in += len(rows)
+
+            local_new = 0
+            for r in rows:
+                rec = _row_to_record(r, sh["kind"], sh["source"])
+                if rec and rec["brand"] not in seen:
+                    seen.add(rec["brand"])
+                    records.append(rec)
+                    local_new += 1
+            log.info("  unique new brands from this sheet: %d (cumulative: %d)", local_new, len(records))
+
+        log.info("total unique brands to upsert: %d", len(records))
 
         # 批量写
         for chunk in batched(records, 500):

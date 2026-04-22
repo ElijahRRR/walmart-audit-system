@@ -34,6 +34,8 @@ import re
 import time
 from collections import Counter
 
+import ahocorasick  # pyahocorasick: 快速多模式匹配, O(N+M) 替代 regex 合并 O(N²)
+
 from sync._common import batched, db_conn, finish_sync_run, start_sync_run
 
 log = logging.getLogger(__name__)
@@ -70,17 +72,41 @@ def load_brands() -> list[str]:
     return brands
 
 
-def compile_brand_regex(brands: list[str]) -> re.Pattern:
-    """把所有品牌合并成一个 alt regex. 按长度降序, 防止短词优先抢匹配."""
-    sorted_brands = sorted(brands, key=lambda b: -len(b))
-    safe = [re.escape(b) for b in sorted_brands]
-    return re.compile(r"\b(" + "|".join(safe) + r")\b", re.IGNORECASE)
+def build_aho_automaton(brands: list[str]) -> ahocorasick.Automaton:
+    """用 Aho-Corasick 多模式匹配. O(N+M) 线性扫, 36k 品牌也几秒搞定.
+
+    所有品牌转小写存 (大小写不敏感匹配要 text 也转小写).
+    """
+    A = ahocorasick.Automaton()
+    for b in brands:
+        key = b.lower()
+        if key:
+            A.add_word(key, key)
+    A.make_automaton()
+    return A
+
+
+# word-boundary 检测: Aho-Corasick 不区分 "cat" vs "caterpillar",
+# 需要手工验证匹配前后是 非字母数字
+_WORD_CHAR = re.compile(r"[A-Za-z0-9]")
+
+
+def _is_word_boundary(text: str, start: int, end: int) -> bool:
+    """检查 text[start:end] 的前后是否是 word-boundary (非字母数字)."""
+    if start > 0 and _WORD_CHAR.match(text[start - 1]):
+        return False
+    if end < len(text) and _WORD_CHAR.match(text[end]):
+        return False
+    return True
 
 
 def analyze() -> dict[str, tuple[int, int]]:
     """扫 walmart_error_records, 返回 {brand_lower: (total_hits, e_hits)}."""
     brands = load_brands()
-    pattern = compile_brand_regex(brands)
+    log.info("building Aho-Corasick automaton for %d brands ...", len(brands))
+    t_build = time.time()
+    A = build_aho_automaton(brands)
+    log.info("  built in %.1fs", time.time() - t_build)
 
     total_counter: Counter[str] = Counter()
     e_counter: Counter[str] = Counter()
@@ -98,7 +124,13 @@ def analyze() -> dict[str, tuple[int, int]]:
                 title = row["title"] or ""
                 if not title:
                     continue
-                hit_brands = {m.group(1).lower() for m in pattern.finditer(title)}
+                title_lower = title.lower()
+                hit_brands: set[str] = set()
+                for end_idx, brand_lower in A.iter(title_lower):
+                    start_idx = end_idx - len(brand_lower) + 1
+                    # word-boundary 检查 (cat 不该命中 caterpillar)
+                    if _is_word_boundary(title_lower, start_idx, end_idx + 1):
+                        hit_brands.add(brand_lower)
                 if not hit_brands:
                     continue
                 is_e = row["error_code"] == "E"
@@ -110,7 +142,6 @@ def analyze() -> dict[str, tuple[int, int]]:
     log.info("scanned %d rows in %.1fs, %d unique brands hit",
              rows_scanned, time.time() - t0, len(total_counter))
 
-    # 构造 {brand_lower: (total, e)}, 回填原文
     result: dict[str, tuple[int, int]] = {}
     for b_lower, total in total_counter.items():
         e = e_counter.get(b_lower, 0)
