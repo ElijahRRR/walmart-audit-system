@@ -579,8 +579,9 @@ def evaluate(product: ProductInfo, l1: L1Result) -> L2Result:
       3. 跑 L2 五条规则 (R1-R5)
       4. 下界保护
 
-    注: 原 R6 "compat+硬品牌" 已移到 Phase0 第 3 步 (pipelines.phase0_compat),
-        逻辑上更早拦, 省 L1/L2 计算.
+    注: 原 R6 "compat+硬品牌" 曾移到 Phase0, 后又移除 — 因为 compat 触发词 + title 品牌词
+        的真伪判断交给 L3 LLM (有语境) 比 Phase0 硬拦更准确.
+        现在 title 里的品牌词由 R4 (-15) + R5 USPTO (-10) 软标记, 留 L3 判真伪.
     """
     score = 100
     all_hits: list[RuleHit] = []
