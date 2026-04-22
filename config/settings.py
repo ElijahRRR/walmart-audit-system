@@ -79,8 +79,8 @@ def get_settings() -> Settings:
         dashscope_base_url=_get("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
         llm_text_model=_get("LLM_TEXT_MODEL", "qwen-turbo"),
         llm_vision_model=_get("LLM_VISION_MODEL", "qwen-vl-plus"),
-        # 火山方舟 (豆包视觉) - 账号可用后改 VISION_PROVIDER=volcengine 切换
-        vision_provider=_get("VISION_PROVIDER", "qwen"),
+        # 火山方舟 (豆包视觉) - 默认 provider (ce200 eval 证实优于 qwen-vl-plus, 独家救回 14 vs 3)
+        vision_provider=_get("VISION_PROVIDER", "volcengine"),
         volcengine_api_key=_get("VOLCENGINE_API_KEY", "ark-3d0011dc-6dcd-4a8d-bf30-e2751eba1b24-41d0c"),
         volcengine_base_url=_get("VOLCENGINE_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"),
         # 有效模型: doubao-seed-1-6-250615 / doubao-1.5-vision-pro-32k-250115
