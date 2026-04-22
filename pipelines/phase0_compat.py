@@ -62,24 +62,29 @@ def _load_triggers_exempts() -> tuple[list[re.Pattern], list[re.Pattern]]:
 
 @lru_cache(maxsize=1)
 def _load_hard_brands() -> tuple[list[str], re.Pattern | None]:
-    """从 DB (severity='hard') + yaml (additional_hard_brands) 合并加载硬品牌.
+    """从 DB (severity in hard, c_hard) + yaml (additional_hard_brands) 合并加载.
 
-    两个来源:
-      1. blacklist_brand_ip_stats WHERE severity='hard' — 自动从数据筛出 (precision≥70%)
-      2. yaml.additional_hard_brands — 手工补充 (员工业务直觉 / 数据未覆盖的品牌)
-    取并集, 防止任一遗漏.
+    三个来源:
+      1. severity='hard' — E 知产 precision ≥ 70% (Dyson, Sony, Rolex, IKEA...)
+      2. severity='c_hard' — Walmart Restricted Sellers 品牌 C 占比 ≥ 70%
+         (Hyper Tough, Bose, Roland, Simmons, Alesis, Casio, Seiko, 大学球队 ...)
+      3. yaml.additional_hard_brands — 员工手工补充
+    compat 触发词配合 hard/c_hard 品牌都算冒用:
+      - "Filter for Dyson"     (E)  ✓
+      - "Replacement for Bose" (C)  ✓
+      - "for Roland XP-80"     (C)  ✓
 
     返回: (brand_list, 合并 regex). 若无 hard 品牌返回 ([], None).
     """
     brands_set: set[str] = set()
 
-    # 1. DB 自动筛出的 hard 品牌
+    # 1+2. DB 筛出的 hard + c_hard 品牌 (E 知产 + C 限制卖家)
     with db_conn() as c:
         with c.cursor() as cur:
             cur.execute(
                 """
                 SELECT brand FROM blacklist_brand_ip_stats
-                WHERE COALESCE(override_severity, severity) = 'hard'
+                WHERE COALESCE(override_severity, severity) IN ('hard', 'c_hard')
                 """
             )
             for row in cur.fetchall():

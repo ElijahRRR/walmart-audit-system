@@ -18,17 +18,31 @@ from __future__ import annotations
 import logging
 from functools import lru_cache
 
+import yaml
+
+from config import ROOT
 from sync._common import db_conn
 
 from .models import Phase0Result, ProductInfo, RuleHit
 
 log = logging.getLogger(__name__)
 
+_COMPAT_YAML = ROOT / "db" / "seed" / "compat_ip_brands.yaml"
+
 
 @lru_cache(maxsize=1)
 def _load_blacklist_brands() -> dict[str, str]:
-    """返回 {规整后小写 brand → 原文 brand} 的映射, 用于命中时回显原文。"""
+    """返回 {规整后小写 brand → 原文 brand} 的映射, 用于命中时回显原文.
+
+    数据来源:
+      1. blacklist_brands 表 (飞书黑名单品牌, 36k)
+      2. compat_ip_brands.yaml additional_hard_brands (yaml 手工补充, 20+ 个)
+         - 覆盖飞书没维护但数据/L3 验证的真品牌 (Drum Workshop / Mike Balter /
+           Nexgrill / Ryobi 等)
+    """
     out: dict[str, str] = {}
+
+    # 1. DB
     with db_conn() as c:
         with c.cursor() as cur:
             cur.execute("SELECT brand FROM blacklist_brands")
@@ -39,7 +53,20 @@ def _load_blacklist_brands() -> dict[str, str]:
                 norm = " ".join(raw.lower().split())
                 if norm and norm not in out:
                     out[norm] = raw
-    log.info("phase0 loaded %d blacklist brands", len(out))
+
+    # 2. yaml 手工补充 (同样按品牌字段精准匹配策略合并)
+    if _COMPAT_YAML.exists():
+        with _COMPAT_YAML.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        for b in (data.get("additional_hard_brands") or []):
+            raw = (b or "").strip()
+            if not raw:
+                continue
+            norm = " ".join(raw.lower().split())
+            if norm and norm not in out:
+                out[norm] = raw
+
+    log.info("phase0 loaded %d brand keys (DB blacklist + yaml additional)", len(out))
     return out
 
 

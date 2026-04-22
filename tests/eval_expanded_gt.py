@@ -37,7 +37,7 @@ from pipelines.models import ProductInfo
 log = logging.getLogger(__name__)
 
 OUT_DIR = ROOT / "tests" / "out"
-GT_FILE = OUT_DIR / "groundtruth_expanded.json"
+DEFAULT_GT_FILE = OUT_DIR / "groundtruth_expanded.json"
 
 
 async def _fetch_dmit(asins: list[str], base: str) -> dict[str, dict]:
@@ -117,9 +117,9 @@ async def audit_one(sample: dict, dmit_item: dict | None, run_l3: bool) -> dict 
     }
 
 
-async def run(run_l3: bool, refresh_dmit: bool) -> None:
-    samples = json.loads(GT_FILE.read_text(encoding="utf-8"))
-    log.warning("groundtruth 总计 %d", len(samples))
+async def run(run_l3: bool, refresh_dmit: bool, gt_file: Path = DEFAULT_GT_FILE) -> None:
+    samples = json.loads(gt_file.read_text(encoding="utf-8"))
+    log.warning("groundtruth 总计 %d (from %s)", len(samples), gt_file.name)
 
     # 拉详情 (默认 refresh=True: 重新检查 DMIT, 捕获新完成的采集)
     if refresh_dmit:
@@ -195,7 +195,9 @@ async def run(run_l3: bool, refresh_dmit: bool) -> None:
             print(f"    reason: {r['l3_reason_text']}")
 
     # 5. 保存详细结果
-    out_file = OUT_DIR / "eval_expanded_gt.json"
+    # 输出名匹配 gt_file: groundtruth_ce200.json → eval_ce200.json
+    out_stem = gt_file.stem.replace("groundtruth_", "eval_")
+    out_file = OUT_DIR / f"{out_stem}.json"
     out_file.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
     log.warning("wrote %s", out_file)
 
@@ -204,8 +206,11 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--run-l3", action="store_true")
     p.add_argument("--no-refresh-dmit", action="store_true", help="用 json 里记的 dmit_present (不重新检查)")
+    p.add_argument("--gt-file", default=str(DEFAULT_GT_FILE), help="groundtruth json 路径")
+    p.add_argument("--out-file", default=None, help="输出 json 路径 (默认替换前缀)")
     p.add_argument("--log-level", default="WARNING")
     args = p.parse_args()
     logging.basicConfig(level=args.log_level, format="%(asctime)s [%(levelname)s] %(message)s")
 
-    asyncio.run(run(run_l3=args.run_l3, refresh_dmit=not args.no_refresh_dmit))
+    gt = Path(args.gt_file)
+    asyncio.run(run(run_l3=args.run_l3, refresh_dmit=not args.no_refresh_dmit, gt_file=gt))
