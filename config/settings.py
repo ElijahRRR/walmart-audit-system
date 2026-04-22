@@ -70,7 +70,7 @@ def get_settings() -> Settings:
         dmit_api_key=_get("DMIT_API_KEY"),
         dashscope_api_key=_get("DASHSCOPE_API_KEY"),
         dashscope_base_url=_get("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-        llm_text_model=_get("LLM_TEXT_MODEL", "qwen-plus"),
+        llm_text_model=_get("LLM_TEXT_MODEL", "qwen-turbo"),
         llm_vision_model=_get("LLM_VISION_MODEL", "qwen-vl-plus"),
         lark_wiki_blacklist=_get("LARK_WIKI_BLACKLIST", "UhZJw3EtsiFN9skbG0Ac24Dgn4b"),
         lark_wiki_category_map=_get("LARK_WIKI_CATEGORY_MAP", "UKdZwr7JqiO6UckjSnPcwTCgnvd"),
