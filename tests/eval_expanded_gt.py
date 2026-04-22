@@ -103,10 +103,11 @@ async def audit_one(sample: dict, dmit_item: dict | None, run_l3: bool, run_l4: 
     verdict = l2.verdict
     stage = "L2" if l2.verdict == "reject" else None
 
-    # L3 双模式: L2 pass 时 L3 是裁决; L2 reject 时 L3 只做 reason annotation
-    if run_l3:
+    # L3 只在 L2 pass 时跑 (简单架构, 省 LLM)
+    # L2 reject 的 walmart_policy 已由 yaml / cert 规则映射, 不靠 L3 annotation
+    if l2.verdict == "pass" and run_l3:
         l3 = await l3_llm.judge(p, l1, l2)
-        if l2.verdict == "pass" and l3.verdict == "reject":
+        if l3.verdict == "reject":
             verdict = "reject"
             stage = "L3"
 

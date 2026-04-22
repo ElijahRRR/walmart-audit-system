@@ -136,6 +136,7 @@ def _rule_zh_seller_forbidden(l1: L1Result) -> list[RuleHit]:
             detail={
                 "walmart_pt": pt,
                 "walmart_category": row.get("walmart_category"),
+                "walmart_policy": "Restricted/Illegal",   # 中国卖家禁售, 映射 Walmart 政策
                 "zh_can_do": row.get("zh_can_do"),
                 "access_state": row.get("access_state"),
                 "source": "walmart_pt_meta.zh_seller_forbidden",
@@ -294,6 +295,22 @@ def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
 
     # A. meta 硬性认证命中 → -100
     if hard_matches:
+        # 按 cert 类型推 walmart_policy (直接对齐 Walmart 政策, 不需要 L3)
+        _cert_str = " ".join(hard_matches).lower()
+        if any(k in _cert_str for k in ['cpsia', 'cpc', 'gcc']):
+            _policy = "Children's Products"
+        elif any(k in _cert_str for k in ['fda', 'mocra']):
+            _policy = "Medical Devices" if 'medical' in _cert_str else "Cosmetic Products"
+        elif 'aafco' in _cert_str:
+            _policy = "Pet Products"
+        elif any(k in _cert_str for k in ['ul', 'etl', 'csa', 'nrtl', 'fcc']):
+            _policy = "Electronics & RF"
+        elif 'epa' in _cert_str:
+            _policy = "Hazardous Items"
+        elif any(k in _cert_str for k in ['atf', 'dea']):
+            _policy = "Drugs & Paraphernalia"
+        else:
+            _policy = "General-Use Products"
         return [
             RuleHit(
                 stage="L2",
@@ -301,6 +318,7 @@ def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
                 penalty=-100,
                 detail={
                     "walmart_pt": pt,
+                    "walmart_policy": _policy,   # 直接映射, 不靠 L3 annotation
                     "meta_requirements": meta_req,
                     "matched_hard_kws": hard_matches,
                     "matched_soft_kws": soft_matches,

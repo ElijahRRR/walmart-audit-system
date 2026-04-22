@@ -185,16 +185,15 @@ async def audit_one(
         l2=l2,
     )
 
-    # L3 LLM 语义审核
-    # - 若 L2 pass: L3 是最终裁决, 可以改 verdict
-    # - 若 L2 reject: L3 是 reason 标注 (不改 verdict, 只提供对齐 Walmart 政策的精确 reason)
-    if run_l3:
+    # L3 LLM 语义审核 (仅 L2 pass 才跑 — 最简架构, 省 LLM)
+    # L2 reject 的产品直接用 L2 hit detail 里的 walmart_policy (已由 yaml 和 cert/zh_forbid 规则映射)
+    # 如对特定产品不够精确, 走 yaml 扩充 pt_contains 的路线, 不靠 L3 annotation
+    if l2.verdict == "pass" and run_l3:
         l3 = await l3_llm.judge(product, l1, l2)
         outcome.l3 = l3
-        if l2.verdict == "pass" and l3.verdict == "reject":
+        if l3.verdict == "reject":
             outcome.verdict = "reject"
             outcome.stage_stopped_at = "L3"
-        # 若 L2 已 reject, L3 只做 annotation, stage_stopped_at 保持 L2
 
     # L4 视觉审核 (只在 L3 通过后跑, 最贵的一层)
     if outcome.verdict == "pass" and run_l4:
