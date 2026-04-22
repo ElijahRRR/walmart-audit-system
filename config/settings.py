@@ -33,6 +33,9 @@ class Settings:
     llm_text_model: str
     llm_vision_model: str
 
+    # --- 文本 provider 切换 (dashscope | gemini) — 影响 L1 / L3 ---
+    llm_text_provider: str
+
     # --- 视觉 provider 切换 (qwen | volcengine | gemini) ---
     # volcengine (豆包视觉, 国内中文优势); qwen 走 DashScope; gemini 走 Google
     vision_provider: str
@@ -85,6 +88,8 @@ def get_settings() -> Settings:
         dashscope_base_url=_get("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
         llm_text_model=_get("LLM_TEXT_MODEL", "qwen-turbo"),
         llm_vision_model=_get("LLM_VISION_MODEL", "qwen-vl-plus"),
+        # 文本 provider (dashscope 默认; gemini 走 Gemini API)
+        llm_text_provider=_get("LLM_TEXT_PROVIDER", "dashscope"),
         # 火山方舟 (豆包视觉) - 默认 provider (ce200 eval 证实优于 qwen-vl-plus, 独家救回 14 vs 3)
         vision_provider=_get("VISION_PROVIDER", "volcengine"),
         volcengine_api_key=_get("VOLCENGINE_API_KEY", "ark-3d0011dc-6dcd-4a8d-bf30-e2751eba1b24-41d0c"),

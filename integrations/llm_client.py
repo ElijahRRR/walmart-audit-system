@@ -98,11 +98,16 @@ async def chat_json(
 
     cache=True 时查 llm_cache 表, 命中直接返回 (不计 hit_count, 不调 LLM)。
     缓存键 = sha256(model + messages + temperature + max_tokens) 前 32 位。
+
+    provider 路由 (settings.llm_text_provider): dashscope (默认) / gemini
     """
     s = get_settings()
-    m = model or s.llm_text_model
 
-    # -------- cache 命中短路 --------
+    # 按 provider 路由; 缓存在前面统一处理 (key 含 model 名, 不同 provider 不会混)
+    use_gemini = (s.llm_text_provider == "gemini" and model is None)
+    m = model or (s.gemini_text_model if use_gemini else s.llm_text_model)
+
+    # -------- cache 命中短路 (provider 无关) --------
     cache_key: str | None = None
     if cache:
         cache_key = llm_cache._input_hash(m, messages, temperature=temperature, max_tokens=max_tokens)
@@ -110,6 +115,20 @@ async def chat_json(
         if cached is not None:
             return cached
 
+    if use_gemini:
+        from . import gemini_client
+        result = await gemini_client.chat_json(
+            messages, model=m, temperature=temperature, max_tokens=max_tokens,
+        )
+        if cache_key and result and "_raw" not in result:
+            await llm_cache.cache_put(
+                cache_key, m,
+                {"messages": messages, "temperature": temperature, "max_tokens": max_tokens},
+                result,
+            )
+        return result
+
+    # --- DashScope 路径 (cache 已在上面处理) ---
     sem = _sem()
 
     async for attempt in AsyncRetrying(
