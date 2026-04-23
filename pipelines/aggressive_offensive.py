@@ -101,11 +101,14 @@ def should_aggressive_offensive(
     l1: L1Result,
     product: ProductInfo | None = None,
 ) -> bool:
-    """按 PT + walmart_category + title 判定是否切 aggressive offensive 模式.
+    """L4 图像检测 aggressive 模式判定 (严格).
 
-    用途:
-      - L4: system prompt 追加严格 offensive 指令 + offensive medium 升 high
-      - L3: 混合路由走强模型 (qwen-plus) 而非 turbo, 保 offensive 语义召回
+    仅用于 L4:
+      - system prompt 追加严格 offensive 指令 + offensive medium 升 high
+      - 严格 = 只对确定高风险类目开, 避免对正常产品过激视觉拦截
+
+    不要用于 L3 模型路由 — 用 should_use_strong_l3_model() 代替,
+    那个门槛更低, 覆盖更多 offensive 语义场景.
     """
     pt = (l1.walmart_product_type or "").lower()
     cat = (l1.walmart_category or "").lower()
@@ -129,4 +132,125 @@ def should_aggressive_offensive(
     return False
 
 
-__all__ = ["should_aggressive_offensive"]
+# =============================================================
+# L3 模型路由专用 (比 L4 aggressive 宽松)
+# =============================================================
+
+# 成人暗示 (L3 判 offensive Adult content)
+_L3_ADULT_INNUENDO_KEYWORDS = (
+    "intimacy", "intimate",
+    "couples pillow", "couples set",   # "couples" 单独不够, 要组合
+    "sensual", "erotic", "seductive",
+    "adult toy", "adult only",
+    "bondage", "chastity",
+    "nsfw",
+    "fetish",
+)
+
+# 政治人物 — L3 需判断是否真为 Publicity Rights 侵权
+# 单独含这些词不一定违规 (合法周边/新闻), 但值得让 plus 判
+_L3_POLITICAL_FIGURE_KEYWORDS = (
+    " trump", "trump ",          # 加空格避免匹配 "trumpet"
+    " biden", "biden ",
+    " obama", "obama ",
+    " harris", "harris ",
+    " putin", "putin ",
+    "xi jinping", "jinping",
+    " modi", "modi ",
+    " zelensky", "zelensky ",
+    "commander in chief",
+    "commander in crap",         # 特定戏仿
+)
+
+# 敏感历史 / 政治符号 — L3 判 Offensive Content
+_L3_SENSITIVE_HISTORY_KEYWORDS = (
+    "nazi", "third reich", "swastika", "ss bolts",
+    "ussr", "soviet", "kgb", "stasi",
+    "confederate", "kkk", "white power",
+    "hamas", "taliban",
+)
+
+# 低俗幽默 — 单词不够, 但与 "funny/gag/prank" 组合值得 plus 判
+_L3_CRUDE_HUMOR_CORE = (
+    "toilet brush", "toilet bowl",
+    "poop", "crap", "fart", "butt", "ass",
+    "boob", "boobie", "tit",
+)
+_L3_CRUDE_HUMOR_MOD = (
+    "funny", "gag", "prank", "joke", "humor",
+)
+
+
+def _has_crude_humor_combo(title: str) -> bool:
+    """title 含 'toilet brush/poop/crap + funny/gag' 组合 = 低俗幽默, 给 plus 判."""
+    t = title.lower()
+    if not any(c in t for c in _L3_CRUDE_HUMOR_CORE):
+        return False
+    return any(m in t for m in _L3_CRUDE_HUMOR_MOD)
+
+
+def _has_military_culture_combo(title: str) -> bool:
+    """title 含 '军事/军队名词 + 实用品' 组合 — 非 weapons 类 PT 但涉军事意象.
+
+    例: 'Soviet Russian USSR Army Flask Military Water Canteen'
+        PT=Water Bottles (不在 offensive 类), 但 'USSR Army + Military Water Canteen'
+        是仿真武器/军事周边, L3 plus 有能力判, turbo 会放过.
+    """
+    t = title.lower()
+    military_terms = ("army", "military", "navy", "marine", "airforce", "special forces")
+    culture_terms = ("soviet", "ussr", "russian red star", "north korea", "third reich", "nazi")
+    has_mil = any(kw in t for kw in military_terms)
+    has_cult = any(kw in t for kw in culture_terms)
+    return has_mil and has_cult
+
+
+def should_use_strong_l3_model(
+    l1: L1Result,
+    product: ProductInfo | None = None,
+) -> bool:
+    """L3 模型路由判定 — 是否走 qwen-plus (而非 turbo).
+
+    策略: 比 L4 aggressive **宽松** — 只要文本有任何 offensive 语义潜在信号就走 plus.
+    plus 本身具备判断力, 不会因走 plus 就错判 reject; 但 turbo 对以下场景召回弱:
+      - 成人暗示 (Couples Pillow for Intimacy)
+      - 政治人物戏仿 (Toilet Brush Commander in Crap Trump)
+      - 军事意象 (USSR Army Flask)
+      - 低俗幽默组合 (Toilet + Funny)
+
+    返回 True 的产品比例预计 25-30% (比 L4 aggressive 的 15% 宽).
+    成本仍比全 plus 省 40% 左右, 同时保住关键 offensive recall.
+    """
+    # 1. L4 aggressive 产品也一并走 plus (贴纸类 / costume / 大杂烩)
+    if should_aggressive_offensive(l1, product):
+        return True
+
+    if product is None:
+        return False
+    title_lc = (product.title or "").lower()
+    if not title_lc:
+        return False
+
+    # 2. 成人暗示
+    if any(kw in title_lc for kw in _L3_ADULT_INNUENDO_KEYWORDS):
+        return True
+
+    # 3. 政治人物 (可能涉肖像权 / 政治讽刺)
+    if any(kw in title_lc for kw in _L3_POLITICAL_FIGURE_KEYWORDS):
+        return True
+
+    # 4. 敏感历史 / 政治符号
+    if any(kw in title_lc for kw in _L3_SENSITIVE_HISTORY_KEYWORDS):
+        return True
+
+    # 5. 低俗幽默组合
+    if _has_crude_humor_combo(title_lc):
+        return True
+
+    # 6. 军事文化意象组合
+    if _has_military_culture_combo(title_lc):
+        return True
+
+    return False
+
+
+__all__ = ["should_aggressive_offensive", "should_use_strong_l3_model"]

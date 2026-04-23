@@ -888,15 +888,16 @@ async def judge(product: ProductInfo, l1: L1Result, l2: L2Result) -> L3Result:
         system_prompt = get_system_prompt(l1.walmart_category, l1.walmart_product_type, text_hint)
         user_prompt = _build_user_prompt(product, l1, l2, routed_policies)
 
-    # === 混合路由: aggressive 高风险产品用 qwen-plus, 其他用默认 ===
+    # === 混合路由: 高 offensive 语义风险产品用 qwen-plus, 其他用默认 ===
     # 仅 dashscope provider 下激活 (gemini 保持默认 gemini-2.5-flash-lite)
+    # 用 should_use_strong_l3_model (覆盖成人暗示/政治/军事/低俗幽默), 比 L4 aggressive 宽松
     _model_override: str | None = None
     if _settings.llm_text_provider == "dashscope":
-        from .aggressive_offensive import should_aggressive_offensive
-        if should_aggressive_offensive(l1, product):
+        from .aggressive_offensive import should_use_strong_l3_model
+        if should_use_strong_l3_model(l1, product):
             _model_override = "qwen-plus"
-            log.info("L3 混合路由: %s 触发 aggressive → qwen-plus (pt=%r)",
-                     product.asin, l1.walmart_product_type)
+            log.info("L3 混合路由: %s 走 qwen-plus (pt=%r, title=%r)",
+                     product.asin, l1.walmart_product_type, (product.title or "")[:60])
 
     try:
         raw = await llm_client.chat_json(
