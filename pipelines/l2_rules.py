@@ -433,65 +433,6 @@ _COMPAT_PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
-# R6 通用词过滤 — blacklist_brands 里确实有这些词 (USPTO 小品牌), 但它们
-# 作为英语通用词出现在 "Compatible for/fits/designed for" 后的概率远大于品牌.
-# 为了降低 R6 -100 硬拦的误伤, 这些词命中时跳过, 交由 R4 -15 + L3 处理.
-# 每个词都来自真实 eval 误触 case, 或是明显的通用英语词.
-_R6_GENERIC_WHITELIST: set[str] = {
-    # === 之前 eval 实测误触的词 ===
-    "seat", "kind", "variety", "twin", "sportsman", "fishing", "hand", "hands",
-    "simplicity", "effortless", "players", "operation", "comfort", "memory foam",
-    "slim",
-    # === 常见名词 (身体 / 器物 / 场景) ===
-    "chair", "bed", "bag", "bowl", "cup", "can", "box", "case", "rack", "holder",
-    "head", "foot", "feet", "arm", "leg", "neck", "waist", "back",
-    "home", "house", "office", "kitchen", "bathroom", "bedroom", "garden",
-    "car", "truck", "bike", "bicycle", "boat",
-    # === 常见形容词 / 描述词 ===
-    "top", "best", "premium", "deluxe", "ultra", "super", "mega",
-    "fresh", "clean", "clear", "dry", "wet", "cold", "hot", "warm", "cool",
-    "new", "old", "classic", "vintage", "modern",
-    "easy", "simple", "basic", "main", "heavy", "light", "big", "small",
-    "large", "mini", "tiny", "huge",
-    "fast", "slow", "quick", "safe", "smooth", "soft", "hard",
-    # === 数量 / 规格 ===
-    "size", "shape", "color", "style", "design", "type", "model", "version",
-    "series", "edition", "length", "width", "height", "weight",
-    "use", "usage", "purpose", "way", "method", "system",
-    # === 人群 / 对象 ===
-    "people", "person", "adult", "adults", "kid", "kids", "child", "children",
-    "baby", "babies", "men", "women", "boy", "girl", "boys", "girls",
-    "family", "everyone", "beginner", "pro", "senior",
-    # === 时间 / 季节 / 自然 ===
-    "day", "night", "week", "month", "year", "season",
-    "summer", "winter", "spring", "autumn", "fall",
-    "weather", "sun", "sky", "ocean", "river", "mountain",
-    "fire", "water", "air", "earth", "wind", "nature",
-    # === 动物 (英语名) — 常见作通用描述 ===
-    "dog", "cat", "bear", "eagle", "tiger", "lion", "fox", "wolf", "horse",
-    "bird", "fish", "rabbit", "sheep",
-    # === 水果 / 食物 (歧义品牌名) ===
-    "apple", "orange", "lemon", "cherry", "grape", "banana", "peach",
-    # === 歧义专有名词 (可能是品牌也可能人名 / 型号) ===
-    "stanley", "max", "pro", "plus", "air", "one",
-    # === 通用动作 / 方位 ===
-    "escape", "secure", "press", "push", "pull",
-    "enhance", "improve", "reduce", "increase", "support", "protect",
-    "hold", "lift", "carry", "store", "organize", "clean",
-    "north", "south", "east", "west", "left", "right",
-    # === 功能 / 特性词 ===
-    "portability", "durability", "flexibility", "stability", "compatibility",
-    "breathability", "reliability",
-    "performance", "quality", "safety", "security",
-    # === 通用量词 / 包装 ===
-    "pack", "set", "piece", "pair", "lot", "bundle", "kit",
-    "sleeve", "cover", "pouch",
-    # === 材料 ===
-    "plastic", "metal", "steel", "iron", "wood", "leather", "cotton", "fabric",
-    "rubber", "glass", "paper", "foam",
-}
-
-
 def _rule_blacklist_compatible_for(product: ProductInfo) -> list[RuleHit]:
     """R6: "Compatible/fits/replacement for <黑名单品牌>" 模式硬拦.
 
@@ -499,22 +440,19 @@ def _rule_blacklist_compatible_for(product: ProductInfo) -> list[RuleHit]:
       - title/bullets/description 里匹配 COMPAT_PREFIX 前缀
       - 前缀后 **20 字符** 内命中 blacklist_brands 全表 (36793 条)
       - 不是自品牌
-      - 不在 _R6_GENERIC_WHITELIST (通用英语词过滤, 降低误伤)
 
     设计理由:
       语法结构 "Compatible for X" / "fits X" / "designed for X" 里, X 必是
       品牌/产品线指代物. 黑名单任一命中 → 未授权仿制/引用 = IP 侵权.
 
     误伤防护:
-      1. 窗口 20 字符 (原 40 收紧到 20) — 只匹配紧邻前缀的词
-      2. _R6_GENERIC_WHITELIST 过滤 (~100 个明显通用英语词)
-      3. 长度 < 3 的品牌跳过 (LV 等短词歧义大)
-      4. 自品牌不拦
+      1. 窗口 20 字符 (紧邻前缀) — 只匹配最近的品牌词
+      2. 长度 < 3 的品牌跳过 (LV 等短词歧义大)
+      3. 自品牌不拦
 
     扣分: -100 (L2 直接 reject, 不走 L3)
     """
     own_brand = (product.brand or "").strip().lower()
-    # 用 title + 五点 + 长描述前 1000 字
     hay_parts = [product.title or ""]
     hay_parts.extend(product.bullet_points[:5])
     if product.long_description:
@@ -525,21 +463,18 @@ def _rule_blacklist_compatible_for(product: ProductInfo) -> list[RuleHit]:
 
     matches: list[dict[str, Any]] = []
     seen_brands: set[str] = set()
-    # 扫所有 COMPAT 前缀, 对每个前缀检查后面 20 字符内是否含黑名单品牌
     for pm in _COMPAT_PREFIX_RE.finditer(hay):
         tail_start = pm.end()
-        tail = hay[tail_start : tail_start + 60]  # 拿 60 字符做搜索窗口, 限制匹配位置 <= 20
+        tail = hay[tail_start : tail_start + 60]
         for brand, pattern in _compile_blacklist_patterns():
-            if len(brand) < 3:                            # 短品牌名歧义大, 跳过
-                continue
-            if brand.lower() in _R6_GENERIC_WHITELIST:    # 通用词跳过
+            if len(brand) < 3:
                 continue
             if brand.lower() == own_brand:
                 continue
             if brand in seen_brands:
                 continue
             bm = pattern.search(tail)
-            if bm and bm.start() <= 20:  # 前缀后 20 字符内紧邻才算
+            if bm and bm.start() <= 20:
                 seen_brands.add(brand)
                 ctx_start = max(0, pm.start() - 5)
                 ctx_end = min(len(hay), tail_start + bm.end() + 5)
