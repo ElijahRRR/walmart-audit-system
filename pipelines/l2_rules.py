@@ -408,36 +408,10 @@ def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
 
 # =============================================================
 # R6 已删除 (2026-04): "Compatible for <Brand>" 场景改由 L3 LLM 判定
-# -------------------------------------------------------------
-# 历史: R6 曾尝试规则硬拦 "Compatible/fits/replacement for <黑名单品牌>",
-# 但实测黑名单表 36793 条里含大量英语通用词 (seat/kind/fishing/sportsman/
-# operation/variety/players/comfort/walls/windows/cars/american 等),
-# 在 "fits any kind of chair" / "Designed for simplicity" / "Suitable for
-# cars" 等合规描述里被误触, 误伤率 90% (20 条命中 18 条是通用词).
-#
-# 决策: 由 L3 LLM + prompt §A (语法铁证 + 授权声明识别) 处理, 精度更高.
-# should_use_strong_l3_model() 对 compat 前缀产品强制走 qwen-plus.
-# 保留 _COMPAT_PREFIX_RE 常量供 aggressive_offensive.py 路由使用.
+# 原因: blacklist_brands 表含大量通用英语词, 规则硬拦误伤率 90%.
+# 决策: L3 prompt §A 语法铁证规则处理, + aggressive_offensive._has_compat_for_pattern
+#       路由到 qwen-plus 严判.
 # =============================================================
-
-_COMPAT_PREFIX_RE = re.compile(
-    r"\b(?:"
-    r"compatible\s+(?:for|with|to)"
-    r"|compatibility\s+(?:for|with)"
-    r"|works?\s+(?:for|with)"
-    r"|designed\s+(?:for|to\s+(?:fit|replace))"
-    r"|made\s+(?:for|to\s+fit)"
-    r"|intended\s+for"
-    r"|built\s+for"
-    r"|suitable\s+for"
-    r"|aftermarket\s+(?:for|replacement)"
-    r"|oem\s+for"
-    r"|replacement\s+(?:for|part\s+for|parts?\s+for)"
-    r"|replaces?"
-    r"|fits?"
-    r")\s+",
-    re.IGNORECASE,
-)
 
 
 # =============================================================
