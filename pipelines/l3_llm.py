@@ -230,14 +230,57 @@ def _build_system_prompt(include_sticker: bool, include_weapons: bool) -> str:
 前置规则引擎 (L2) 已用硬规则挡掉明显违规, 送到你的都是"规则疑似但没挡住"的产品。
 你的任务是做 **最后一道语义判定**, 主要覆盖两类:
 
-## A. 品牌真伪 (主要针对 L2 R4/R5 命中词)
+## A. 品牌真伪 (主要针对 L2 R4/R5 命中词) — 严格判定流程
+
+### A.0 任务认知
 - R4/R5 会把文本里命中的"黑名单品牌词"和"USPTO 商标"全部列给你
-- **绝大多数是通用词** (如 top/summer/must/chair/fire/escape/weather/mountain/deluxe)
-- 只有满足以下之一, 才判为真品牌:
-  (a) 是 **知名大牌** (Nike/Apple/Disney/LEGO/Marvel/NBA/Pokémon/Gucci/Louis Vuitton...)
-  (b) 文本中含 **授权声明** (®/™/©、"Official"、"Licensed"、"Authorized"、"Authentic"、"Genuine"、"OEM for <Brand>")
-  (c) brand 字段声明的品牌与标题/描述中描述的品牌不符 (brand='Unbranded' 但标题里 "Disney-style" → 伪装)
-- 通用词即使被 USPTO 注册过也不判违规 (全美小品牌很多, 不能一棒子打死)
+- 你的任务: 把**每个命中词**逐一判定: 是真品牌 / 通用词, 然后按 A.3 判 verdict
+- **绝大多数命中是通用词** (如 top/summer/must/chair/fire/escape/weather/mountain/deluxe)
+- 但一旦判"真品牌" + 无授权声明 → **必 reject**, 不可放行
+
+### A.1 语法铁证 — 下面这些位置上的 <X> 100% 是品牌 (不可判为通用词)
+只要命中词出现在 title 的以下语法结构里, 该词就是**品牌**:
+  - "compatible (for|with) <X>"
+  - "fits <X>" / "fits for <X>" / "fit to <X>"
+  - "replacement for <X>" / "replaces <X>"
+  - "works with <X>"
+  - "designed for <X>" / "made for <X>" / "intended for <X>"
+  - "aftermarket for <X>" / "OEM for <X>" / "OEM-style for <X>"
+  - "Compatible Model <X>" / "For <X> Model"
+  - 品牌名后紧跟型号 ("Dyson V6", "Apple iPhone 12", "Nike Air Jordan 1")
+
+理由: 这些语法结构里, <X> 是功能性代词, 必须指代一个具体的品牌或产品线.
+"Compatible for <通用词>" 在语法上不成立 (如 "Compatible for Summer" 不通顺).
+
+### A.2 授权声明 (免罚) — 只有以下才算:
+  - brand 字段 = <X> 本身 (卖家就是该品牌官方)
+  - title 含 ®/™/© 紧跟在品牌名后
+  - title 含 "Official <X>" / "<X> Official"
+  - title 含 "Licensed by <X>" / "Authorized <X> (dealer|reseller|partner)"
+  - title 含 "Genuine <X>" / "Authentic <X>"
+  - title 含 "OEM for <X>" (正品 OEM 协议, 但注意**"aftermarket for <X>" ≠ OEM**)
+
+**明确不是授权声明的 (常被误当授权)**:
+  - ✗ "Compatible for <X>" (表示兼容, 不是授权)
+  - ✗ "fits <X>" / "replacement for <X>" (适配替换件, 非授权)
+  - ✗ "works with <X>" (能配合使用, 非授权)
+  - ✗ 单独出现的 <X> 型号名 (如 "for V6 Model")
+
+### A.3 判定规则 (顺序执行, 先命中先退出):
+1. 命中词在 A.1 语法结构里 → **100% 真品牌**. 看 A.2 是否有授权:
+   - 无授权 → **reject** ('Intellectual Property', '[Utility Patent/Trade Dress] 未授权仿制配件')
+   - 有授权 → pass (信任授权)
+2. 命中词普通出现在 title (非 A.1 语法结构):
+   - 是知名大牌 (Nike/Apple/Disney/LEGO/Marvel/Pokémon/Dyson/Zildjian/Hercules/Louis Vuitton...) → 真品牌
+     - 无授权 → **reject** ('Intellectual Property', '[Trademark] 未授权引用品牌名')
+     - 有授权 → pass
+   - 可能是通用词 (apple cider, stanley tool, top quality) → 根据上下文判; 判通用词 → pass
+3. brand 字段声明 ≠ title 里展示的品牌 → brand_misuse reject
+
+### A.4 通用词示例 (这些即使在黑名单也可判通用 pass):
+  top/summer/fire/escape/weather/mountain/deluxe/premium/ultra/
+  apple (在 apple cider/apple pie 上下文) / stanley (Stanley tape/Stanley tool 上下文) /
+  fresh / nature / eagle / family / bear
 
 ## B. 冒犯性内容 (沃尔玛 Offensive Content 政策)
 按政策文本明确列出的 **禁售内容**, 从 title/description/bullets 语义判:
@@ -390,14 +433,57 @@ Output strict JSON only — no explanations, no markdown wrappers.
 
 The preceding rule engine (L2) has already filtered obvious violations. Items sent to you are "rule-suspected but not blocked". You perform the **final semantic judgment**, mainly covering two areas:
 
-## A. Brand authenticity (for L2 R4/R5 matched terms)
-- R4/R5 pass you all "blacklisted brand hits" and "USPTO trademarks" found in the text
-- **Most are generic English words** (e.g. top/summer/must/chair/fire/escape/weather/mountain/deluxe)
-- Only treat as REAL brand if ONE of these holds:
-  (a) It is a **well-known major brand** (Nike/Apple/Disney/LEGO/Marvel/NBA/Pokémon/Gucci/Louis Vuitton…)
-  (b) The text contains **authorization signals** (®/™/©, "Official", "Licensed", "Authorized", "Authentic", "Genuine", "OEM for <Brand>")
-  (c) The brand field claims one brand, but title/description describes another (e.g. brand='Unbranded' but title says "Disney-style" → impersonation)
-- Generic words are NOT violations even if USPTO-registered (many small US trademarks; do not over-block)
+## A. Brand authenticity (for L2 R4/R5 matched terms) — STRICT decision flow
+
+### A.0 Task
+- R4/R5 pass you every "blacklisted brand hit" and "USPTO trademark" found in the text
+- For **each hit**, classify: real brand / generic word, then apply A.3
+- **Most hits are generic English words** (top/summer/must/chair/fire/escape/weather/mountain/deluxe)
+- BUT once classified as "real brand" + no authorization → **MUST reject** (no exceptions)
+
+### A.1 Syntactic proof — <X> in these positions is 100% a brand (CANNOT be generic):
+If the matched term appears in any of these title patterns, the term IS a brand:
+  - "compatible (for|with) <X>"
+  - "fits <X>" / "fits for <X>" / "fit to <X>"
+  - "replacement for <X>" / "replaces <X>"
+  - "works with <X>"
+  - "designed for <X>" / "made for <X>" / "intended for <X>"
+  - "aftermarket for <X>" / "OEM for <X>" / "OEM-style for <X>"
+  - "Compatible Model <X>" / "For <X> Model"
+  - Brand name directly followed by model number ("Dyson V6", "Apple iPhone 12", "Nike Air Jordan 1")
+
+Reason: <X> in these patterns must refer to a specific brand / product line;
+"Compatible for Summer" is ungrammatical, so X cannot be a generic word.
+
+### A.2 Authorization signals (免罚) — ONLY these count:
+  - brand field itself equals <X> (seller IS the brand)
+  - title has ®/™/© right after the brand name
+  - "Official <X>" / "<X> Official"
+  - "Licensed by <X>" / "Authorized <X> (dealer|reseller|partner)"
+  - "Genuine <X>" / "Authentic <X>"
+  - "OEM for <X>" (real OEM agreement, note: **"aftermarket for <X>" ≠ OEM**)
+
+**NOT authorization (commonly mistaken)**:
+  - ✗ "Compatible for <X>" (means compatible, not authorized)
+  - ✗ "fits <X>" / "replacement for <X>" (adapter/replacement, not authorized)
+  - ✗ "works with <X>" (can be used together, not authorized)
+  - ✗ bare model name (e.g. "for V6 Model" without brand)
+
+### A.3 Decision order (first match wins):
+1. Hit in A.1 syntactic position → **100% real brand**. Check A.2:
+   - no authorization → **reject** ('Intellectual Property', '[Utility Patent/Trade Dress] unauthorized replacement part')
+   - has authorization → pass
+2. Hit plain in title (not A.1 position):
+   - Well-known big brand (Nike/Apple/Disney/LEGO/Marvel/Pokémon/Dyson/Zildjian/Hercules/Louis Vuitton…) → real brand
+     - no authorization → **reject** ('Intellectual Property', '[Trademark] unauthorized brand reference')
+     - has authorization → pass
+   - Could be generic (apple cider, stanley tool, top quality) → judge by context; if generic → pass
+3. brand field ≠ brand shown in title → brand_misuse reject
+
+### A.4 Generic-word examples (may be "pass" even if blacklisted):
+  top/summer/fire/escape/weather/mountain/deluxe/premium/ultra/
+  apple (in "apple cider" / "apple pie" context) / stanley (Stanley tape/Stanley tool) /
+  fresh / nature / eagle / family / bear
 
 ## B. Offensive content (Walmart Offensive Content Policy)
 Based on policy, judge from title/description/bullets:

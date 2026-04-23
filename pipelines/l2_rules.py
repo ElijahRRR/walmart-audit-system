@@ -401,6 +401,130 @@ def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
 
 
 # =============================================================
+# R6: "Compatible/fits/replacement for <黑名单品牌>" 硬拦 → -100
+# =============================================================
+# 语法逻辑: "Compatible for X" / "fits X" / "replacement for X" / "works with X" 等模式中,
+# X 在语法位置上 100% 是品牌名 (无歧义, 不可能是通用词).
+# 黑名单里的品牌出现在这种位置 = 未授权仿制配件引用, 直接 reject.
+# "Compatible for" 不是授权声明 — 只有 Official/Licensed/Authorized/Genuine/OEM 才是.
+
+R6_PENALTY = -100
+
+# 明确表示"兼容/适配/替换/为...设计"的前缀 (出现在此前缀后的 <X> 必定是品牌)
+# 两类:
+#   强前缀带 "for/with": compatible for/with, works with, designed for, made for, ...
+#   弱前缀直接跟品牌:     fits <X>, replaces <X>, replacement for <X>
+_COMPAT_PREFIX_RE = re.compile(
+    r"\b(?:"
+    r"compatible\s+(?:for|with|to)"
+    r"|compatibility\s+(?:for|with)"
+    r"|works?\s+(?:for|with)"
+    r"|designed\s+(?:for|to\s+(?:fit|replace))"
+    r"|made\s+(?:for|to\s+fit)"
+    r"|intended\s+for"
+    r"|built\s+for"
+    r"|suitable\s+for"
+    r"|aftermarket\s+(?:for|replacement)"
+    r"|oem\s+for"
+    r"|replacement\s+(?:for|part\s+for|parts?\s+for)"
+    r"|replaces?"                       # replaces Nike  ← 弱前缀直接跟品牌
+    r"|fits?"                           # fits Nike
+    r")\s+",
+    re.IGNORECASE,
+)
+
+# 黑名单里虽有但常见英语通用词 — 在 R6 场景下不算品牌 (降低误伤)
+# 这些词单独在 title 出现仍由 R4 -15 + L3 判
+_R6_GENERIC_WHITELIST = {
+    # 天气 / 季节
+    "summer", "winter", "spring", "autumn", "weather", "season",
+    # 自然 / 方位
+    "fire", "water", "earth", "wind", "nature", "mountain", "sky", "ocean", "river",
+    "north", "south", "east", "west",
+    # 通用形容
+    "top", "best", "premium", "deluxe", "ultra", "fresh", "clean", "clear",
+    "must", "main", "basic", "classic", "heavy", "light",
+    # 家庭 / 动物
+    "family", "home", "house", "eagle", "bear", "tiger", "lion", "fox", "wolf",
+    # 其他常见噪音
+    "escape", "chair", "bag", "bowl", "cup", "can", "box",
+    "apple",     # 水果歧义
+    "stanley",   # Stanley tape / Stanley tool 常见通用
+}
+
+
+def _rule_blacklist_compatible_for(product: ProductInfo) -> list[RuleHit]:
+    """R6: "Compatible/fits/replacement for <黑名单品牌>" 模式硬拦.
+
+    触发条件: title/描述里匹配 COMPAT_PREFIX 前缀, 且前缀之后的 ~60 字符窗口内
+              出现黑名单品牌 (非自品牌, 非通用词白名单).
+
+    扣分: -100 (L2 直接 reject, 不走 L3)
+
+    为什么不走 L3:
+      - 语法结构 "Compatible for X" / "fits X" 里 X 必是品牌名 (功能性代词)
+      - "Compatible for" 本身不是授权声明
+      - 未授权仿制配件 = 100% IP 侵权, 不需要语义判
+
+    误伤防护 (_R6_GENERIC_WHITELIST):
+      - "Compatible for Summer" 里 summer 即使在黑名单也当通用词放行
+      - 这类词由 R4 -15 + L3 语义判兜底
+    """
+    own_brand = (product.brand or "").strip().lower()
+    # 用 title + 五点 + 长描述前 1000 字
+    hay_parts = [product.title or ""]
+    hay_parts.extend(product.bullet_points[:5])
+    if product.long_description:
+        hay_parts.append(product.long_description[:1000])
+    hay = "\n".join(p for p in hay_parts if p)
+    if not hay:
+        return []
+
+    matches: list[dict[str, Any]] = []
+    seen_brands: set[str] = set()
+    # 扫所有 COMPAT 前缀, 对每个前缀检查后面 60 字符内是否含黑名单品牌
+    for pm in _COMPAT_PREFIX_RE.finditer(hay):
+        tail_start = pm.end()
+        tail = hay[tail_start : tail_start + 100]
+        for brand, pattern in _compile_blacklist_patterns():
+            if len(brand) < 3:                        # 太短品牌名 (LV等) 跳过
+                continue
+            if brand.lower() in _R6_GENERIC_WHITELIST:  # 通用词白名单跳过
+                continue
+            if brand.lower() == own_brand:
+                continue
+            if brand in seen_brands:
+                continue
+            bm = pattern.search(tail)
+            if bm and bm.start() <= 40:  # 前缀后 40 字符内紧邻才算
+                seen_brands.add(brand)
+                ctx_start = max(0, pm.start() - 5)
+                ctx_end = min(len(hay), tail_start + bm.end() + 5)
+                matches.append({
+                    "brand": brand,
+                    "compat_prefix": pm.group().strip(),
+                    "context": hay[ctx_start:ctx_end].strip(),
+                })
+                break  # 每个前缀只记一个品牌
+    if not matches:
+        return []
+
+    return [
+        RuleHit(
+            stage="L2",
+            rule_code="blacklist_compatible_for",
+            penalty=R6_PENALTY,
+            detail={
+                "matches": matches,
+                "count": len(matches),
+                "walmart_policy": "Intellectual Property",
+                "note": "title 里 'Compatible/fits/replacement for <黑名单品牌>' 模式 → 未授权仿制配件",
+            },
+        )
+    ]
+
+
+# =============================================================
 # R4: title/desc 命中黑名单品牌 → -15 (不论多少个)
 # =============================================================
 
@@ -754,9 +878,10 @@ def evaluate(product: ProductInfo, l1: L1Result) -> L2Result:
         _rule_zh_seller_forbidden(l1),
         _rule_forbidden_mega_cat(l1),
         _rule_cat_requires_cert(l1),
+        _rule_blacklist_compatible_for(product),  # R6 硬拦仿制配件 (-100)
         _rule_title_desc_blacklist(product),
         _rule_trademark_live(product, l1),
-        _rule_content_promotional(product),   # R7 新加
+        _rule_content_promotional(product),       # R7 内容宣称
     ]
     for hits in rules:
         for h in hits:
