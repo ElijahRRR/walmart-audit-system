@@ -38,6 +38,7 @@ from functools import lru_cache
 
 from ._stopwords import is_stopword
 from .forbidden_mega_categories import match_mega
+from .high_value_brands import HIGH_VALUE_BRANDS
 from .models import L1Result, L2Result, ProductInfo, RuleHit
 from .nice_class_mapper import classes_for
 from .nrtl_classifier import classify_nrtl_pt
@@ -433,42 +434,38 @@ _COMPAT_PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
-# 黑名单里虽有但常见英语通用词 — 在 R6 场景下不算品牌 (降低误伤)
-# 这些词单独在 title 出现仍由 R4 -15 + L3 判
-_R6_GENERIC_WHITELIST = {
-    # 天气 / 季节
-    "summer", "winter", "spring", "autumn", "weather", "season",
-    # 自然 / 方位
-    "fire", "water", "earth", "wind", "nature", "mountain", "sky", "ocean", "river",
-    "north", "south", "east", "west",
-    # 通用形容
-    "top", "best", "premium", "deluxe", "ultra", "fresh", "clean", "clear",
-    "must", "main", "basic", "classic", "heavy", "light",
-    # 家庭 / 动物
-    "family", "home", "house", "eagle", "bear", "tiger", "lion", "fox", "wolf",
-    # 其他常见噪音
-    "escape", "chair", "bag", "bowl", "cup", "can", "box",
-    "apple",     # 水果歧义
-    "stanley",   # Stanley tape / Stanley tool 常见通用
-}
+# R6 专用: 高辨识度大牌 regex (从 high_value_brands 构建, lru_cache)
+@lru_cache(maxsize=1)
+def _compile_high_value_patterns() -> list[tuple[str, re.Pattern]]:
+    """把 HIGH_VALUE_BRANDS 编译成 regex (word-boundary + IGNORECASE)."""
+    patterns: list[tuple[str, re.Pattern]] = []
+    # 长的优先 (先匹配 "louis vuitton" 再 "vuitton"), 避免子串遮蔽
+    for b in sorted(HIGH_VALUE_BRANDS, key=lambda x: -len(x)):
+        if len(b) < 3:
+            continue
+        try:
+            pat = re.compile(rf"\b{re.escape(b)}\b", re.IGNORECASE)
+            patterns.append((b, pat))
+        except re.error:
+            continue
+    return patterns
 
 
 def _rule_blacklist_compatible_for(product: ProductInfo) -> list[RuleHit]:
-    """R6: "Compatible/fits/replacement for <黑名单品牌>" 模式硬拦.
+    """R6: "Compatible/fits/replacement for <高辨识度大牌>" 模式硬拦.
 
-    触发条件: title/描述里匹配 COMPAT_PREFIX 前缀, 且前缀之后的 ~60 字符窗口内
-              出现黑名单品牌 (非自品牌, 非通用词白名单).
+    触发条件:
+      - title/bullets/description 里匹配 COMPAT_PREFIX 前缀
+      - 前缀后 40 字符内命中 HIGH_VALUE_BRANDS 清单里的品牌
+      - 不是自品牌
+
+    为什么不用 blacklist_brands 全表:
+      blacklist_brands 表 36793 条含大量 USPTO 小众品牌 — 许多是通用英语词
+      (seat/kind/comfort/memory foam/fishing/slim/sportsman/players/...).
+      R6 -100 硬拦需要极低误伤率, 只对无歧义大牌触发才安全.
+      其他 blacklist_brands 的命中由 R4 -15 + L3 语义判处理.
 
     扣分: -100 (L2 直接 reject, 不走 L3)
-
-    为什么不走 L3:
-      - 语法结构 "Compatible for X" / "fits X" 里 X 必是品牌名 (功能性代词)
-      - "Compatible for" 本身不是授权声明
-      - 未授权仿制配件 = 100% IP 侵权, 不需要语义判
-
-    误伤防护 (_R6_GENERIC_WHITELIST):
-      - "Compatible for Summer" 里 summer 即使在黑名单也当通用词放行
-      - 这类词由 R4 -15 + L3 语义判兜底
     """
     own_brand = (product.brand or "").strip().lower()
     # 用 title + 五点 + 长描述前 1000 字
@@ -482,21 +479,17 @@ def _rule_blacklist_compatible_for(product: ProductInfo) -> list[RuleHit]:
 
     matches: list[dict[str, Any]] = []
     seen_brands: set[str] = set()
-    # 扫所有 COMPAT 前缀, 对每个前缀检查后面 60 字符内是否含黑名单品牌
+    # 扫所有 COMPAT 前缀, 对每个前缀检查后面 40 字符内是否含高辨识度大牌
     for pm in _COMPAT_PREFIX_RE.finditer(hay):
         tail_start = pm.end()
         tail = hay[tail_start : tail_start + 100]
-        for brand, pattern in _compile_blacklist_patterns():
-            if len(brand) < 3:                        # 太短品牌名 (LV等) 跳过
-                continue
-            if brand.lower() in _R6_GENERIC_WHITELIST:  # 通用词白名单跳过
-                continue
+        for brand, pattern in _compile_high_value_patterns():
             if brand.lower() == own_brand:
                 continue
             if brand in seen_brands:
                 continue
             bm = pattern.search(tail)
-            if bm and bm.start() <= 40:  # 前缀后 40 字符内紧邻才算
+            if bm and bm.start() <= 40:
                 seen_brands.add(brand)
                 ctx_start = max(0, pm.start() - 5)
                 ctx_end = min(len(hay), tail_start + bm.end() + 5)
@@ -505,7 +498,7 @@ def _rule_blacklist_compatible_for(product: ProductInfo) -> list[RuleHit]:
                     "compat_prefix": pm.group().strip(),
                     "context": hay[ctx_start:ctx_end].strip(),
                 })
-                break  # 每个前缀只记一个品牌
+                break
     if not matches:
         return []
 
