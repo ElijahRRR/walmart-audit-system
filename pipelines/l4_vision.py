@@ -359,9 +359,67 @@ _AGGRESSIVE_OFFENSIVE_CAT_KEYWORDS = {
     "novelty",
 }
 
+# Title-level fallback triggers (L1 PT 错判时兜底用)
+# 只加"高确定性"词 — 避免误伤合规产品
+# 特别不加: political names / religious names / Black History / Juneteenth 等
+# (Walmart 政策明确这些本身**不**算 offensive)
+_AGGRESSIVE_OFFENSIVE_TITLE_KEYWORDS = (
+    # 装扮 / cosplay 类 (图像高风险)
+    "costume", "cosplay", "fancy dress", "fancy-dress",
+    "halloween", "haunted",
+    "masquerade",
+    # 身体挂件 / 妆扮
+    " wig", "wigs",
+    " mask ", "masks", "face mask",    # "mask" 周围加空格避免匹配 "mascara"
+    # 派对 photo booth (常含 racial/political 道具)
+    "photo booth", "photo prop", "party prop",
+)
 
-def _should_aggressive_offensive(l1: L1Result) -> bool:
-    """按 PT + walmart_category 判定是否切 aggressive offensive 阈值."""
+# 大杂烩贴纸包 — 数量阈值以上的 stickers 大包装无法保证每张合规
+# "100 Pcs Stickers" / "500 Stickers Bundle" 类
+import re as _re_agg
+_BULK_STICKER_RE = _re_agg.compile(
+    r"\b(\d{2,5})\s*(?:pcs|pc|pieces?|ct|count|stickers?|decals?|pack)\b"
+    r"[\s\S]{0,80}\b(?:stickers?|decals?)\b",
+    _re_agg.IGNORECASE,
+)
+_BULK_STICKER_RE_REVERSE = _re_agg.compile(
+    r"\b(?:stickers?|decals?)\b[\s\S]{0,80}\b(\d{2,5})\s*(?:pcs|pc|pieces?|ct|count|pack)\b",
+    _re_agg.IGNORECASE,
+)
+
+# 最小触发数量 — 少于 20 张不算大杂烩 (普通套装 6-12 张合理)
+_BULK_STICKER_MIN_COUNT = 20
+
+
+def _title_has_bulk_stickers(title: str) -> tuple[bool, int]:
+    """扫 title 里 "N Pcs Stickers" 或 "Stickers N Count" 模式, 返回 (是否命中, 数量)."""
+    if not title:
+        return False, 0
+    for pat in (_BULK_STICKER_RE, _BULK_STICKER_RE_REVERSE):
+        m = pat.search(title)
+        if m:
+            try:
+                n = int(m.group(1))
+                if n >= _BULK_STICKER_MIN_COUNT:
+                    return True, n
+            except (ValueError, IndexError):
+                pass
+    return False, 0
+
+
+def _should_aggressive_offensive(
+    l1: L1Result,
+    product: ProductInfo | None = None,
+) -> bool:
+    """按 PT + walmart_category + title 判定是否切 aggressive offensive 阈值.
+
+    三层触发 (任一命中即开):
+      1. PT 关键词精确匹配 (Costumes / Halloween Decorations / Stickers 等)
+      2. walmart_category 关键词 (Seasonal / Party / Religion 等)
+      3. title 兜底 (L1 PT 错判时) — 扫 costume/halloween/wig/mask/photo booth 等
+         + "N Pcs Stickers" 大杂烩 (N >= 20)
+    """
     pt = (l1.walmart_product_type or "").lower()
     cat = (l1.walmart_category or "").lower()
     for kw in _AGGRESSIVE_OFFENSIVE_PT_KEYWORDS:
@@ -370,6 +428,17 @@ def _should_aggressive_offensive(l1: L1Result) -> bool:
     for kw in _AGGRESSIVE_OFFENSIVE_CAT_KEYWORDS:
         if kw in cat:
             return True
+
+    # Title 兜底 (L1 PT 错判时用)
+    if product is not None:
+        title_lc = (product.title or "").lower()
+        if title_lc:
+            for kw in _AGGRESSIVE_OFFENSIVE_TITLE_KEYWORDS:
+                if kw in title_lc:
+                    return True
+            bulk, _ = _title_has_bulk_stickers(title_lc)
+            if bulk:
+                return True
     return False
 
 
@@ -503,8 +572,8 @@ async def judge(
         log.warning("L4 %s 所有 %d 张图本地下载失败, 回落 pass", product.asin, len(urls))
         return L4Result(verdict="pass", image_issues=[], hits=[])
 
-    # Offensive aggressive 判定 (根据 PT + category 切更严阈值)
-    aggressive_offensive = _should_aggressive_offensive(l1)
+    # Offensive aggressive 判定 (根据 PT + category + title 切更严阈值)
+    aggressive_offensive = _should_aggressive_offensive(l1, product)
 
     # Gemini 用英文 prompt (更准), 国产模型用中文 (中文训练好)
     if s.vision_provider == "gemini":

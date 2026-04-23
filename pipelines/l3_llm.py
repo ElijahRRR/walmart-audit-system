@@ -257,6 +257,14 @@ def _build_system_prompt(include_sticker: bool, include_weapons: bool) -> str:
 这类产品的"违规"藏在具体图案/文字里, 文本往往只是暗示。**只要文本出现以下任一敏感主题词 (或组合), 倾向 reject (offensive)**:
 {_fmt_sticker_themes()}
 - 产品是 **混装 N 张** (如 "400 Pcs stickers"), 描述列出多种主题里含任一敏感主题 → reject (因为整包里就算只有几张违规贴纸, 也违反政策)
+
+### B.1.1 大杂烩贴纸/徽章包 (≥20 件) 的合规门槛 — 不同于单品
+**这是 Walmart Marketplace 明文合规要求的条款**: 对于 "100 Pcs / 200 Pcs / 500 Pcs stickers" 这类 **杂烩混装大包**, 卖家**无法声明每一张单独合规**, 只要标题/五点中含任一以下特征, 应 reject (reason_category='Offensive Content'):
+  - 标题含 "Funny" / "Humor" / "Prank" / "Joke" / "Crazy" / "Weird" / "Edgy" 等暗示非主流幽默
+  - 标题提到面向 "Adults only" / "Men" (对比"大众性别中立")
+  - 描述列出多主题 (例: "Blue Collar / Welder / Electrician / Construction") 但又补 "Funny" 语感
+  - **不** reject 的情况: 纯动物/自然/卡通 (如"100 Pcs Cute Animal Stickers for Kids")、纯教育类 ("Reward Stickers for Teacher")
+说明: 常规 ≤19 张的单品/礼品套装不受此规则约束, 仍按 B.1 主题词规则判。
 """)
 
     if include_weapons:
@@ -412,6 +420,15 @@ Violations for these products hide in the specific image/text. **If the text con
 {_fmt_sticker_themes()}
 
 - If the product is a **mixed pack of N items** (e.g. "400 Pcs stickers") and the description lists multiple themes including any sensitive theme → REJECT (even a few bad stickers violate policy).
+
+### B.1.1 Bulk sticker / patch / decal packs (≥20 pieces) — compliance threshold distinct from single items
+
+**This is a Walmart Marketplace explicit compliance rule**: for bulk mixed packs like "100 Pcs / 200 Pcs / 500 Pcs stickers", the seller **cannot certify every single piece is compliant**, so REJECT (reason_category='Offensive Content') if the title/bullets contain ANY of the following:
+  - Title contains "Funny" / "Humor" / "Prank" / "Joke" / "Crazy" / "Weird" / "Edgy" — implying non-mainstream humor
+  - Title states "Adults only" / targets "Men" (vs gender-neutral mass appeal)
+  - Description lists multiple occupational / subculture themes (e.g. "Blue Collar / Welder / Electrician / Construction") alongside "Funny" tonal words
+  - **Do NOT reject** the pack if: pure animals / nature / cartoon (e.g. "100 Pcs Cute Animal Stickers for Kids"), or purely educational ("Reward Stickers for Teachers")
+Note: regular ≤19-piece single items or gift sets are NOT subject to this rule — follow B.1 theme rules.
 """)
 
     if include_weapons:
