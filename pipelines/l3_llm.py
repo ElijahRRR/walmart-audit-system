@@ -252,39 +252,42 @@ def _build_system_prompt(include_sticker: bool, include_weapons: bool) -> str:
 理由: 这些语法结构里, <X> 是功能性代词, 必须指代一个具体的品牌或产品线.
 "Compatible for <通用词>" 在语法上不成立 (如 "Compatible for Summer" 不通顺).
 
-### A.2 授权豁免 — **仅 ONE 种情况**算授权, 其他一切授权声明全部不信任
+### A.2 授权豁免 — **没有任何豁免**, 所有"授权声明"一律不信任
 
-**业务背景 (关键)**: 我们处理的卖家是**中国搬运模式**, 日均数万单, **客观上不可能拥有任何大牌授权**.
-title 里出现"Official/Licensed/Authorized/Genuine/OEM for"等授权声明恰恰说明卖家在**冒用授权**,
-是更明确的侵权信号, 不是豁免.
+**业务背景 (关键 — 决定判决逻辑)**:
+  我们处理的卖家 = **中国搬运模式**, 日均数万单.
+  客观上**没有任何卖家**可能真是大牌本身, 也拿不到 Official/Licensed/Authorized/OEM 授权.
+  任何授权声明都是卖家为了逃避平台审核的**虚假宣称**, 一律按侵权判.
 
-**唯一真授权** (豁免):
-  ✓ brand 字段 = <X> 本身 (卖家就是该品牌官方, 自己卖自己的产品)
-
-**以下全部视为"虚假宣称" — 命中照样 reject**:
+**以下所有情况 → reject (无豁免)**:
+  ✗ brand 字段 = <X> (填自己是该品牌也不信, 中国搬运卖家不可能真是 Nike/Dyson/Disney)
   ✗ title 含 "Official <X>" / "<X> Official"
-  ✗ title 含 "Licensed by <X>" / "Authorized <X> (dealer|reseller|partner)"
+  ✗ title 含 "Licensed by <X>" / "Authorized <X>"
   ✗ title 含 "Genuine <X>" / "Authentic <X>"
-  ✗ title 含 "OEM for <X>" (搬运卖家拿不到真 OEM)
-  ✗ title 含 ®/™/© 紧跟品牌名 (强 IP 信号, 已由 L2 R9 硬拦; 进到 L3 仍按侵权判)
-  ✗ "Compatible for <X>" / "fits <X>" / "replacement for <X>" / "works with <X>" (兼容不是授权)
+  ✗ title 含 "OEM for <X>"
+  ✗ title 含 ®/™/© 紧跟品牌名 (L2 R9 已硬拦, 进 L3 仍按侵权判)
+  ✗ "Compatible for <X>" / "fits <X>" / "replacement for <X>" / "works with <X>"
 
 ### A.3 判定规则 (顺序, 先命中先退出):
-1. 命中词在 A.1 语法结构 → **100% 真品牌**
-   - A.2 唯一豁免 (brand 字段 = <X>) → pass
-   - 否则 → **reject** 'Intellectual Property', '[Utility Patent] 未授权仿制配件' /
-                                                '[Trade Dress] 仿外观设计'
+1. 命中词在 A.1 语法结构 (compatible for / fits / replacement for / works with / designed for + X)
+   → **100% 真品牌** → **reject**
+   - reason_category='Intellectual Property'
+   - reason_text '[Utility Patent] 未授权仿制配件' 或 '[Trade Dress] 仿外观设计'
 2. 命中词普通出现在 title (非 A.1 语法结构):
-   - 是知名大牌 (Nike/Apple/Disney/LEGO/Marvel/Pokémon/Dyson/Zildjian/Hercules/Louis Vuitton...):
-     - brand 字段 = <X> → pass (自品牌)
-     - 否则 → **reject** '[Trademark] 未授权引用品牌名' (无论 title 里是否有 Official/Licensed 等)
-   - 判断为通用词 (apple cider / stanley tool / top quality) → pass
-3. brand 字段 ≠ title 展示的主品牌 → **reject** brand_misuse
+   - 是知名大牌 (Nike/Apple/Disney/LEGO/Marvel/Pokémon/Dyson/Zildjian/Hercules/
+     Louis Vuitton/Samsung/Sony/Bose/Stanley 品牌上下文/...) → **reject**
+     reason_text '[Trademark] 未授权引用品牌名'
+     (无论 brand 字段填什么, 无论 title 是否有 Official/Licensed/Genuine 等)
+   - 判断为通用词 (apple cider / stanley tool 工具具体上下文 / summer dress / fire pit) → pass
+3. brand 字段声明 ≠ title 展示的主品牌 (brand='Unbranded' 但 title 说 Disney-style)
+   → **reject** brand_misuse
 
-### A.4 通用词示例 (黑名单里虽有但在特定上下文下判通用 pass):
-  top/summer/fire/escape/weather/mountain/deluxe/premium/ultra/
-  apple (在 apple cider/apple pie 上下文) / stanley (Stanley tape/Stanley tool 上下文) /
+### A.4 通用词示例 (黑名单命中但可判通用 pass 的):
+  top / summer / fire / escape / weather / mountain / deluxe / premium / ultra /
+  apple (在 "apple cider" / "apple pie" 上下文) /
+  stanley (在 "Stanley tool" / "Stanley tape measure" 小工具上下文) /
   fresh / nature / eagle / family / bear
+  注: 若无 "cider/pie/tool/tape" 等明确通用语境, 默认按品牌判 (Apple/Stanley 都是知名大牌)
 
 ## B. 冒犯性内容 (沃尔玛 Offensive Content 政策)
 按政策文本明确列出的 **禁售内容**, 从 title/description/bullets 语义判:
@@ -480,35 +483,36 @@ If the matched term appears in any of these title patterns, the term IS a brand:
 Reason: <X> in these patterns must refer to a specific brand / product line;
 "Compatible for Summer" is ungrammatical, so X cannot be a generic word.
 
-### A.2 Authorization exemption — **ONLY ONE condition** counts, all other claims are distrusted
+### A.2 Authorization exemption — **NO exemption**, all "authorization claims" are distrusted
 
-**Business context (critical)**: the sellers we audit are Chinese drop-shippers processing tens of
-thousands of products daily. They **cannot possibly hold any major-brand authorization**. When title
-claims "Official / Licensed / Authorized / Genuine / OEM for <X>", this is a **fraudulent claim** —
-a stronger infringement signal, NOT an exemption.
+**Business context (critical — determines decision logic)**:
+  Sellers we audit = **Chinese drop-shippers**, tens of thousands of products daily.
+  **No seller** can objectively be a major brand themselves, nor hold real Official/Licensed/
+  Authorized/OEM authorization. Any such claim is a **fraudulent statement** made to evade audit,
+  and should be treated as a stronger infringement signal.
 
-**The only real authorization** (exempts):
-  ✓ brand field itself equals <X> (seller IS the brand, selling their own product)
-
-**All of the following are "false claims" — still reject on hit**:
+**All of the following → reject (no exemption)**:
+  ✗ brand field = <X> (claiming to BE the brand is not trusted — Chinese drop-shippers cannot truly be Nike/Dyson/Disney)
   ✗ "Official <X>" / "<X> Official"
-  ✗ "Licensed by <X>" / "Authorized <X> (dealer|reseller|partner)"
+  ✗ "Licensed by <X>" / "Authorized <X>"
   ✗ "Genuine <X>" / "Authentic <X>"
-  ✗ "OEM for <X>" (drop-shippers cannot obtain real OEM)
-  ✗ ®/™/© after brand name (strong IP signal, should have been caught by L2 R9; if it reached L3, still treat as infringement)
-  ✗ "Compatible for <X>" / "fits <X>" / "replacement for <X>" / "works with <X>" (compatibility ≠ authorization)
+  ✗ "OEM for <X>"
+  ✗ ®/™/© after brand name (L2 R9 already hard-blocks; if it reached L3, still treat as infringement)
+  ✗ "Compatible for <X>" / "fits <X>" / "replacement for <X>" / "works with <X>"
 
 ### A.3 Decision order (first match wins):
-1. Hit in A.1 syntactic position → **100% real brand**
-   - A.2 only exemption (brand field = <X>) → pass
-   - otherwise → **reject** 'Intellectual Property', '[Utility Patent] unauthorized replacement part'
-     or '[Trade Dress] imitation design'
+1. Hit in A.1 syntactic position (compatible for / fits / replacement for / works with / designed for + X)
+   → **100% real brand** → **reject**
+   - reason_category='Intellectual Property'
+   - reason_text '[Utility Patent] unauthorized replacement part' or '[Trade Dress] imitation design'
 2. Hit plain in title (not A.1 position):
-   - Well-known big brand (Nike/Apple/Disney/LEGO/Marvel/Pokémon/Dyson/Zildjian/Hercules/Louis Vuitton…):
-     - brand field = <X> → pass (own brand)
-     - otherwise → **reject** '[Trademark] unauthorized brand reference' (regardless of any Official/Licensed claim in title)
-   - Likely generic (apple cider, stanley tool, top quality) → judge by context; if generic → pass
-3. brand field ≠ brand shown in title → brand_misuse reject
+   - Well-known big brand (Nike/Apple/Disney/LEGO/Marvel/Pokémon/Dyson/Zildjian/Hercules/
+     Louis Vuitton/Samsung/Sony/Bose/Stanley in brand context/…) → **reject**
+     reason_text '[Trademark] unauthorized brand reference'
+     (regardless of what brand field says, regardless of any Official/Licensed/Genuine claim in title)
+   - Likely generic (apple cider / stanley tool in tool context / summer dress / fire pit) → pass
+3. brand field ≠ brand shown in title (brand='Unbranded' but title says Disney-style)
+   → **reject** brand_misuse
 
 ### A.4 Generic-word examples (may be "pass" even if blacklisted):
   top/summer/fire/escape/weather/mountain/deluxe/premium/ultra/

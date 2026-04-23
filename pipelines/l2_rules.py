@@ -784,13 +784,11 @@ def _rule_trademark_symbol_in_title(product: ProductInfo) -> list[RuleHit]:
     识别: 捕捉 "<品牌名> ®" 模式, 品牌名 = 大写开头 + 后续字符 (可含空格/&/连字符).
     例: "Stearns & Foster®" / "Sealy Posturepedic™" / "LEGO®"
 
-    例外: 如果捕捉到的品牌短语 == product.brand 字段, 说明是卖家自品牌声明 (有可能是真的),
-          此时 pass 给 R4/R5 + L3 判.
+    **无自品牌豁免**: 中国搬运模式卖家客观上不可能是任何大牌, 即使 brand 字段
+    声明为同名品牌也视为冒充 → reject.
 
     扣分: -100 (L2 直接 reject, 不走 L3)
     """
-    own_brand = (product.brand or "").strip().lower()
-
     title = product.title or ""
     bullets_txt = " ".join((product.bullet_points or [])[:5])
     long_desc = (product.long_description or "")[:1000]
@@ -800,20 +798,16 @@ def _rule_trademark_symbol_in_title(product: ProductInfo) -> list[RuleHit]:
 
     matches: list[dict[str, Any]] = []
     seen: set[str] = set()
+    # 常见噪声前缀 (误匹配的句首词) — 防 "The Product ®" / "A New Item ®" 误触
+    stop_prefixes = {"the", "a", "an", "this", "our", "my", "your", "new"}
+
     for m in _TRADEMARK_SYMBOL_RE.finditer(hay):
         brand_phrase = (m.group(1) or "").strip()
         symbol = m.group(2)
-        # 过滤短 / 全大写噪声词 (如 "USB ®" 不太合理)
         if len(brand_phrase) < 3:
             continue
-        # 常见噪声前缀 (误匹配的句首词)
-        stop_prefixes = {"the", "a", "an", "this", "our", "my", "your", "new"}
         first = brand_phrase.split()[0].lower() if brand_phrase else ""
         if first in stop_prefixes:
-            continue
-        # 自品牌不拦 (卖家自己声称自己的 ®, 可能是真)
-        if own_brand and (brand_phrase.lower() == own_brand or
-                           own_brand in brand_phrase.lower()):
             continue
         key = brand_phrase.lower()
         if key in seen:
@@ -837,7 +831,7 @@ def _rule_trademark_symbol_in_title(product: ProductInfo) -> list[RuleHit]:
                 "matches": matches,
                 "count": len(matches),
                 "walmart_policy": "Intellectual Property",
-                "note": "title 含 ®/™/℠/© 强 IP 信号, 中国搬运卖家无授权 → reject",
+                "note": "title 含 ®/™/℠/© 强 IP 信号, 中国搬运卖家无授权 (含 brand 字段同名也视作冒充)",
             },
         )
     ]
