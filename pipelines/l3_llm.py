@@ -866,6 +866,8 @@ async def judge(product: ProductInfo, l1: L1Result, l2: L2Result) -> L3Result:
       - LLM 超时/重试全失败时, 保守策略 = **pass** (不新增拒绝, 避免 L3 噪音拖低 precision)
       - 启用 llm_cache, 相同输入哈希命中直接返回 (每条审核 token 开销摊到 1/N)
       - system prompt 按 walmart_category 分叉 (B.1 贴纸/B.2 武器 模块按需载入)
+      - **混合路由**: aggressive offensive 触发的产品用 qwen-plus, 其他用配置默认 (qwen-turbo)
+        (turbo 对隐晦 offensive 语义判断弱 ~9pp, plus 仅对 ~15% 高风险产品额外调用)
     """
     # 按 walmart_category 路由相关政策 (一次, 给 user prompt + reason_category 白名单共用)
     routed_policies = l3_policy_router.pick(
@@ -877,7 +879,8 @@ async def judge(product: ProductInfo, l1: L1Result, l2: L2Result) -> L3Result:
     # provider 是 gemini 时用英文 prompt (用户反馈 Gemini 对英文 prompt 更准)
     text_hint = (product.title or "") + " " + " ".join(product.bullet_points[:2])
     from config import get_settings
-    _use_en = (get_settings().llm_text_provider == "gemini")
+    _settings = get_settings()
+    _use_en = (_settings.llm_text_provider == "gemini")
     if _use_en:
         system_prompt = get_system_prompt_en(l1.walmart_category, l1.walmart_product_type, text_hint)
         user_prompt = _build_user_prompt_en(product, l1, l2, routed_policies)
@@ -885,12 +888,23 @@ async def judge(product: ProductInfo, l1: L1Result, l2: L2Result) -> L3Result:
         system_prompt = get_system_prompt(l1.walmart_category, l1.walmart_product_type, text_hint)
         user_prompt = _build_user_prompt(product, l1, l2, routed_policies)
 
+    # === 混合路由: aggressive 高风险产品用 qwen-plus, 其他用默认 ===
+    # 仅 dashscope provider 下激活 (gemini 保持默认 gemini-2.5-flash-lite)
+    _model_override: str | None = None
+    if _settings.llm_text_provider == "dashscope":
+        from .aggressive_offensive import should_aggressive_offensive
+        if should_aggressive_offensive(l1, product):
+            _model_override = "qwen-plus"
+            log.info("L3 混合路由: %s 触发 aggressive → qwen-plus (pt=%r)",
+                     product.asin, l1.walmart_product_type)
+
     try:
         raw = await llm_client.chat_json(
             [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            model=_model_override,       # None = 用 settings.llm_text_model (默认 turbo)
             max_tokens=1500,
             temperature=0.1,
             cache=True,
