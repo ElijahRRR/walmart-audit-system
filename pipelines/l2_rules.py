@@ -2,15 +2,19 @@
 
 起始 100 分, 累扣, score_final < 60 → reject。
 
-七条规则 (用户 2026-04 重新定义):
-  R1 中国卖家禁售            cat_forbid_zh_seller   -100   (仅映射表 zh_can_do 明确标"否"才触发)
-  R2 禁售大类               forbidden_mega_cat     -100   (12 大禁售类 + 新增 5: religious/cartoon_ip/adult/chemicals/spy/live)
-  R3 类目需证书              cat_requires_cert      -10    (不论多少个, 触发一次就扣)
-  R4 标题/描述命中黑名单      title_desc_blacklist   -15    (不论多少个, 全部输出给 L3 LLM 判通用/品牌)
-  R5 标题/描述命中 USPTO LIVE trademark_live         -10    (不论多少个, 全部输出给 L3 LLM 判通用/品牌)
-  R6 (已删除, 2026-04) — "Compatible for <Brand>" 改 L3 LLM 判 (规则误伤率高)
-  R7 促销/宣称性内容          content_promotional    -20    (Walmart Content Standards 禁 promotional claims)
-  R8 Walmart 严格合规敏感词    walmart_strict_sensitive -30  (文化/宗教/政治/武器装饰/成人暗示 7 子类)
+八条规则 (2026-04 最新, R6 已删除):
+  R1 中国卖家禁售            cat_forbid_zh_seller     -100   (映射表 zh_can_do=否)
+  R2 禁售大类               forbidden_mega_cat       -100   (17 大类: 12 原 + 5 新 religious/cartoon/adult/chemicals/spy/live)
+  R3 类目需证书 — 三档细分:
+      - cat_requires_cert_hard       -100   (FDA/UL/NRTL/CPSIA/EPA 等硬认证, 搬运做不了)
+      - cat_requires_cert_small_part -10    (电气小件 NRTL, 可下游人工审)
+      - cat_requires_cert_soft       -10    (SDS/ASTM/ISO/RoHS/Prop65 等软合规)
+  R4 标题命中黑名单品牌       title_desc_blacklist     -15    (交 L3 LLM 判真品牌/通用词)
+  R5 标题命中 USPTO LIVE     trademark_live           -10    (交 L3 LLM 判)
+  R6 (已删除) — "Compatible for <Brand>" 规则误伤率高, 改 L3 LLM 判
+  R7 促销/宣称性内容          content_promotional      -20    (Walmart Content Standards 禁 promotional claims)
+  R8 Walmart 严格合规敏感词    walmart_strict_sensitive -30    (文化/宗教/政治/武器/成人 7 子类)
+  R9 title 含 ® / ™ / ℠      trademark_symbol_in_title -100  (强 IP 信号, 搬运卖家无授权硬拦, 自品牌除外)
 
 **注意**:
   - 原 R1 (brand 完全等匹配黑名单) 已移出 L2, 由 Phase0 前置处理 (rule_code=phase0_brand_blacklist)
@@ -759,6 +763,87 @@ def _rule_content_promotional(product: ProductInfo) -> list[RuleHit]:
 
 
 # =============================================================
+# R9: title 含 ® / ™ 商标符号 → -100 直接拒
+# =============================================================
+# 逻辑: ®/™/© 紧跟在品牌名后是强 IP 信号, 例 "Stearns & Foster® Mattress".
+#       搬运卖家无授权, 这种标识意味着卖家**故意冒用注册商标**, 直接 reject.
+# 例外: 卖家自品牌的 ® (brand 字段 = 该品牌名) 放行.
+
+R9_PENALTY = -100
+
+# 模式: 紧邻在一个单词 (长度 >= 3) 之后的 ®/™/℠/©
+# 允许单词和 ® 之间有 0-2 个空格 (卖家常不规范地写 "Stearns & Foster ® Mattress")
+_TRADEMARK_SYMBOL_RE = re.compile(
+    r"\b([A-Z][A-Za-z0-9&\-\'\s]{2,50})\s{0,2}([®™℠©])",
+)
+
+
+def _rule_trademark_symbol_in_title(product: ProductInfo) -> list[RuleHit]:
+    """R9: title / bullets / description 含 ® / ™ / ℠ / © 紧跟品牌名 → 硬拦.
+
+    识别: 捕捉 "<品牌名> ®" 模式, 品牌名 = 大写开头 + 后续字符 (可含空格/&/连字符).
+    例: "Stearns & Foster®" / "Sealy Posturepedic™" / "LEGO®"
+
+    例外: 如果捕捉到的品牌短语 == product.brand 字段, 说明是卖家自品牌声明 (有可能是真的),
+          此时 pass 给 R4/R5 + L3 判.
+
+    扣分: -100 (L2 直接 reject, 不走 L3)
+    """
+    own_brand = (product.brand or "").strip().lower()
+
+    title = product.title or ""
+    bullets_txt = " ".join((product.bullet_points or [])[:5])
+    long_desc = (product.long_description or "")[:1000]
+    hay = title + "\n" + bullets_txt + "\n" + long_desc
+    if not hay:
+        return []
+
+    matches: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for m in _TRADEMARK_SYMBOL_RE.finditer(hay):
+        brand_phrase = (m.group(1) or "").strip()
+        symbol = m.group(2)
+        # 过滤短 / 全大写噪声词 (如 "USB ®" 不太合理)
+        if len(brand_phrase) < 3:
+            continue
+        # 常见噪声前缀 (误匹配的句首词)
+        stop_prefixes = {"the", "a", "an", "this", "our", "my", "your", "new"}
+        first = brand_phrase.split()[0].lower() if brand_phrase else ""
+        if first in stop_prefixes:
+            continue
+        # 自品牌不拦 (卖家自己声称自己的 ®, 可能是真)
+        if own_brand and (brand_phrase.lower() == own_brand or
+                           own_brand in brand_phrase.lower()):
+            continue
+        key = brand_phrase.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        matches.append({
+            "brand_phrase": brand_phrase,
+            "symbol": symbol,
+            "context": hay[max(0, m.start() - 10): m.end() + 10].strip(),
+        })
+
+    if not matches:
+        return []
+
+    return [
+        RuleHit(
+            stage="L2",
+            rule_code="trademark_symbol_in_title",
+            penalty=R9_PENALTY,
+            detail={
+                "matches": matches,
+                "count": len(matches),
+                "walmart_policy": "Intellectual Property",
+                "note": "title 含 ®/™/℠/© 强 IP 信号, 中国搬运卖家无授权 → reject",
+            },
+        )
+    ]
+
+
+# =============================================================
 # R8: Walmart 严格合规 — 敏感文化 / 政治 / 宗教 / 特定图案词 → -30
 # =============================================================
 # 目的: 迎合 Walmart 实际审核尺度 (即使 Walmart 政策文本未明列, 实际会拦).
@@ -934,8 +1019,9 @@ def evaluate(product: ProductInfo, l1: L1Result) -> L2Result:
         _rule_cat_requires_cert(l1),
         _rule_title_desc_blacklist(product),
         _rule_trademark_live(product, l1),
-        _rule_content_promotional(product),       # R7 内容宣称
-        _rule_walmart_strict_sensitive(product),  # R8 Walmart 严格合规敏感词
+        _rule_content_promotional(product),        # R7 内容宣称
+        _rule_walmart_strict_sensitive(product),   # R8 Walmart 严格合规敏感词
+        _rule_trademark_symbol_in_title(product),  # R9 title 含 ® 硬拦
     ]
     for hits in rules:
         for h in hits:
