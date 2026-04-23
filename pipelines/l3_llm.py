@@ -352,10 +352,31 @@ Walmart Prohibited Products Policy: Intellectual Property 覆盖以下 7 种侵�
 - 仿整体视觉识别 (可口可乐瓶形 + 红白配色 / Tiffany 蓝盒子 / Hermès 橙色包装)
 - 产品色彩/排版/包装高度相似于某品牌标志风格 → '[商业包装]...'
 
-### C.6 Publicity Rights (肖像权) — 实证高发
-- 未授权用**名人/运动员/政治人物**肖像
-- 包括: NFL/NBA/MLB 球员名、Trump / Taylor Swift / LeBron / Kobe 等
-- 名人名字 + 商品 (T恤/杯子/海报/纪念品) → '[肖像权]...'
+### C.6 Publicity Rights (肖像权) — 实证高发, 严格识别
+
+#### 触发条件 (任一命中 + 无授权声明 → reject '[肖像权]...')
+1. **名人姓名 + 商品类**: title 含以下之一 **且**品类是 (T恤/杯子/海报/笔/贴纸/钥匙扣/枕头/挂画/纪念品/merch 等)
+   - **政治人物**: Trump / Biden / Obama / Harris / Putin / Xi Jinping / Modi / Zelensky
+   - **体育运动员**: LeBron / Kobe / Michael Jordan / Tom Brady / Messi / Ronaldo / Babe Ruth
+                    NFL/NBA/MLB/NHL 球员名
+   - **音乐人**: Taylor Swift / Beyoncé / Ariana Grande / Billie Eilish / Adele / Lady Gaga
+                Drake / Kanye / Kendrick Lamar / The Weeknd
+   - **Kpop/Jpop 艺人**: BTS / Blackpink / TWICE / NewJeans / Enhypen / KATSEYE / Stray Kids /
+                        TXT / Seventeen / Aespa / ITZY / IVE / LE SSERAFIM / Red Velvet /
+                        LISA / JENNIE / ROSÉ / JISOO / V / Jimin / Suga / Jungkook
+   - **演员 / 影视明星**: Tom Cruise / Johnny Depp / Margot Robbie / Zendaya / Timothée Chalamet
+2. **粉丝周边关键词组合** (即使没具体明星名, 文本明确是 fan merch → 大概率有肖像权问题)
+   - title 含 "Kpop" / "K-pop" / "K pop" + 任一商品类
+   - title 含 "Merch" / "Merchandise" / "Fandom" / "Fans" / "Fan Gift"
+   - title 含 "Autograph" / "Signed" / "Collectible" + 明星/运动员名
+3. **豁免** (有授权声明则 pass):
+   - brand 字段 = 该艺人官方品牌 (如 "BTS Official" / "Taylor Swift Eras")
+   - title 明确 "Official" / "Licensed" / "Authorized"
+
+#### 决策
+- 命中以上任一 + 无授权 → **reject**, reason_category='Intellectual Property',
+  reason_text 格式: "[Publicity Rights] 未授权使用 <人名> 肖像/姓名于 <商品类>"
+- 即使 LLM 不认识某个 Kpop 组合名字, 只要 title 有 "Kpop" + "Merch/Fans" + 商品类, 就按 fan merch reject.
 
 ### C.7 Counterfeit (假冒)
 - 声称是真品但价格显著低于市场 ("100% Authentic Louis Vuitton" $29.99)
@@ -561,10 +582,31 @@ Any match → reason_category='Intellectual Property', AND reason_text MUST STAR
 - Imitating overall visual identity (Coca-Cola bottle shape + red-white / Tiffany blue box / Hermès orange packaging)
 - Product colors/layout/packaging closely resemble a brand's signature style → '[Trade Dress] ...'
 
-### C.6 Publicity Rights — observed frequently
-- Unauthorized use of **celebrity/athlete/politician** likeness
-- Including: NFL/NBA/MLB player names, Trump / Taylor Swift / LeBron / Kobe etc.
-- Celebrity name + merchandise (T-shirt/mug/poster/collectible) → '[Publicity Rights] ...'
+### C.6 Publicity Rights — observed frequently, strict identification
+
+#### Trigger conditions (any hit + no authorization → reject '[Publicity Rights] ...'):
+1. **Celebrity name + merchandise category**: title contains one of the below names **AND** the product is (T-shirt/mug/poster/pen/sticker/keychain/pillow/wall art/collectible/merch/etc.)
+   - **Politicians**: Trump / Biden / Obama / Harris / Putin / Xi Jinping / Modi / Zelensky
+   - **Athletes**: LeBron / Kobe / Michael Jordan / Tom Brady / Messi / Ronaldo / Babe Ruth
+                   NFL/NBA/MLB/NHL player names
+   - **Musicians**: Taylor Swift / Beyoncé / Ariana Grande / Billie Eilish / Adele / Lady Gaga
+                    Drake / Kanye / Kendrick Lamar / The Weeknd
+   - **Kpop / Jpop idols**: BTS / Blackpink / TWICE / NewJeans / Enhypen / KATSEYE / Stray Kids /
+                            TXT / Seventeen / Aespa / ITZY / IVE / LE SSERAFIM / Red Velvet /
+                            LISA / JENNIE / ROSÉ / JISOO / V / Jimin / Suga / Jungkook
+   - **Actors / movie stars**: Tom Cruise / Johnny Depp / Margot Robbie / Zendaya / Timothée Chalamet
+2. **Fan-merch keyword combo** (even without a specific celebrity name, text clearly signals fan merch → highly likely publicity rights infringement)
+   - title contains "Kpop" / "K-pop" / "K pop" + any merchandise category
+   - title contains "Merch" / "Merchandise" / "Fandom" / "Fans" / "Fan Gift"
+   - title contains "Autograph" / "Signed" / "Collectible" + celebrity / athlete name
+3. **Exemptions** (authorization signals → pass):
+   - brand field = artist's official brand (e.g. "BTS Official" / "Taylor Swift Eras")
+   - title explicitly states "Official" / "Licensed" / "Authorized"
+
+#### Decision
+- Any hit above + no authorization → **reject**, reason_category='Intellectual Property',
+  reason_text format: "[Publicity Rights] unauthorized use of <person> likeness/name on <product>"
+- Even if LLM doesn't recognize a specific Kpop group name, if title has "Kpop" + "Merch/Fans" + merch category, treat as fan merch and reject.
 
 ### C.7 Counterfeit
 - Claiming to be genuine but priced significantly below market ("100% Authentic Louis Vuitton" at $29.99)

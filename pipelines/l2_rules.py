@@ -825,6 +825,147 @@ def _rule_content_promotional(product: ProductInfo) -> list[RuleHit]:
 
 
 # =============================================================
+# R8: Walmart 严格合规 — 敏感文化 / 政治 / 宗教 / 特定图案词 → -30
+# =============================================================
+# 目的: 迎合 Walmart 实际审核尺度 (即使 Walmart 政策文本未明列, 实际会拦).
+# B 类漏放产品里很大一部分是这类 (Juneteenth/Black History/Bible/Mosque/
+# Soviet/Confederate/Hunting Bullet/Pickaxe/Wine/Cigar 等文本).
+# 单独 -30 不够杀 (score=70), 但叠加 R3/R4/R5/R7 能让多数产品过线 reject.
+# walmart_policy = "Offensive Content" (对齐 Walmart 判决)
+
+R8_PENALTY = -30
+
+# 分类词典. 按子类记录便于 detail 调试
+_R8_SENSITIVE_PATTERNS = {
+    "cultural_day": [
+        # 美国黑人文化节日 (Walmart 实际会标 offensive content)
+        r"\bjuneteenth\b",
+        r"\bblack\s+history\s+month\b",
+        r"\bafro[-\s]american\b",
+        r"\bafrican[-\s]american\b",
+        r"\bafro\s+(?:dope|pride|king|queen)\b",
+        # 其他民族 / 宗教节日 (单一节日一般 OK, 但用户选择严格合规)
+        r"\beid\s+mubarak\b",
+        r"\bramadan\b",
+        r"\bhanukkah\b",
+        r"\bkwanzaa\b",
+    ],
+    "religious_single_faith": [
+        # 单一宗教产品 (Walmart 实际偶尔标 offensive; 用户选严格合规)
+        r"\bbible\s+(?:poster|verse|map|study)\b",
+        r"\b12\s+tribes\s+of\s+israel\b",
+        r"\bmosque\b",
+        r"\bsultan\s+ahmed\b",
+        r"\bislam(?:ic)?\s+(?:poster|prayer|art)\b",
+        r"\btorah\b",
+        r"\bhindu\s+(?:poster|deity|god|goddess)\b",
+        r"\bbuddha\s+(?:statue|poster|figurine)\b",
+    ],
+    "political_sensitive": [
+        # 政治人物 + 讽刺组合 (比 L3 hit 更早)
+        r"\bmaga\b",
+        r"\bdeep\s+state\b",
+        r"\bpolice\s+state\b",
+        r"\bcommander\s+in\s+(?:crap|chief)\b",
+        r"\bliberal\s+tears\b",
+        r"\btrump\s+(?:derangement|syndrome|2024|2028)\b",
+        r"\btrump\s+(?:hat|sticker|flag|pin|shirt)\b",
+        r"\bbiden\s+(?:sucks|fail)\b",
+        r"\blet'?s\s+go\s+brandon\b",
+        r"\bfjb\b",       # "F*** Joe Biden" 缩写
+    ],
+    "historical_intolerance": [
+        # 历史敏感符号 — 严格合规侧不当装饰用
+        r"\bconfederate\b",
+        r"\bussr\s+(?:army|flag|emblem)\b",
+        r"\bsoviet\s+(?:army|flag|emblem|red\s+star)\b",
+        r"\bthird\s+reich\b",
+        r"\bwehrmacht\b",
+        r"\bss\s+(?:bolts|runes)\b",
+        r"\bnazi\b",
+        r"\bkkk\b",
+        r"\bhamas\b",
+        r"\btaliban\b",
+    ],
+    "weapons_decorative": [
+        # 武器 / 弹药 / 暴力图案的装饰商品 (Walmart 大量下架案例)
+        r"\bhunting\s+(?:gifts?|gear)\b",
+        r"\bbullet\s+(?:tumbler|cup|mug|bottle|keychain|necklace|earring)\b",
+        r"\b(?:deer|buck)\s+hunting\s+(?:gift|gear)\b",
+        r"\bgun\s+(?:deer|keychain|pillow|tumbler|mug)\b",
+        r"\bpickaxe\s+(?:prop|model|cosplay)\b",
+        r"\bmachete\s+(?:prop|toy)\b",
+        r"\btactical\s+(?:cosplay|party)\b",
+    ],
+    "adult_innuendo": [
+        # 成人暗示 (单独 hit, 不依赖 L3)
+        r"\bcouples\s+pillow\s+for\s+intimacy\b",
+        r"\bintimacy\s+(?:pillow|set|toy|aid)\b",
+        r"\bsensual\s+(?:massage|oil|gift)\b",
+        r"\berotic\s+(?:art|gift|game)\b",
+        r"\bbondage\s+(?:kit|gear|set)\b",
+    ],
+    "substance_decorative": [
+        # 酒精 / 烟草 / 大麻图案 (装饰商品)
+        r"\bwine\s+and\s+(?:whisky|cigar)\b",
+        r"\bwhisky\s+(?:paint\s+by\s+numbers|on\s+wood)\b",
+        r"\bmarijuana\s+(?:leaf|leaves|art|sticker)\b",
+        r"\bcannabis\s+(?:leaf|art|sticker)\b",
+        r"\bweed\s+(?:leaf|sticker|sign)\b",
+    ],
+}
+
+# 编译所有子类的 regex
+_R8_COMPILED = {
+    subtype: [re.compile(p, re.IGNORECASE) for p in pats]
+    for subtype, pats in _R8_SENSITIVE_PATTERNS.items()
+}
+
+
+def _rule_walmart_strict_sensitive(product: ProductInfo) -> list[RuleHit]:
+    """R8: Walmart 严格合规 — 扫敏感文化 / 政治 / 宗教 / 武器图案 / 成人暗示关键词.
+
+    扣分 -30, 不叠加 (命中任一子类即触发).
+    detail 列出所有命中子类和原文, 交 L3 有机会验证是否合规上下文.
+    """
+    title = (product.title or "")
+    bullets_txt = " ".join((product.bullet_points or [])[:3])
+    scan = title + "\n" + bullets_txt
+    if not scan.strip():
+        return []
+
+    hits_by_type: dict[str, list[str]] = {}
+    for subtype, patterns in _R8_COMPILED.items():
+        matched = []
+        for pat in patterns:
+            m = pat.search(scan)
+            if m:
+                matched.append(m.group(0))
+        if matched:
+            hits_by_type[subtype] = sorted(set(matched))
+
+    if not hits_by_type:
+        return []
+
+    # 扁平化所有匹配短语
+    all_matched = sorted({p for lst in hits_by_type.values() for p in lst})
+    return [
+        RuleHit(
+            stage="L2",
+            rule_code="walmart_strict_sensitive",
+            penalty=R8_PENALTY,
+            detail={
+                "subtypes": list(hits_by_type.keys()),
+                "matches_by_subtype": hits_by_type,
+                "matched_phrases": all_matched,
+                "walmart_policy": "Offensive Content",
+                "note": "Walmart 实际审核会标 offensive, 即使政策文本未明列. 严格合规侧建议 reject.",
+            },
+        )
+    ]
+
+
+# =============================================================
 # public entry
 # =============================================================
 
@@ -860,6 +1001,7 @@ def evaluate(product: ProductInfo, l1: L1Result) -> L2Result:
         _rule_title_desc_blacklist(product),
         _rule_trademark_live(product, l1),
         _rule_content_promotional(product),       # R7 内容宣称
+        _rule_walmart_strict_sensitive(product),  # R8 Walmart 严格合规敏感词
     ]
     for hits in rules:
         for h in hits:

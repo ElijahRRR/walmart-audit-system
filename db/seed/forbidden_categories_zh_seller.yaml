@@ -425,3 +425,131 @@ mega_forbidden_categories:
     walmart_category_prefix:
       - "Food"
       - "Grocery"
+
+  # ==========================================================
+  # 新增 (2026-04 补 9 个未覆盖类目, 用户指令)
+  # ==========================================================
+
+  # --- 04 宗教 + 05 政治敏感产品 + 06 艺术文化 ---
+  - key: religious_political_cultural
+    walmart_policy: "Offensive Content"
+    reason: "宗教 / 政治 / 敏感文化类: 平台严格合规, 搬运模式无法保证不踩官方红线"
+    pt_contains:
+      - "Religious Apparel"
+      - "Religious Jewelry"
+      - "Religious Book"
+      - "Religious Decor"
+      - "Prayer Rug"
+      - "Prayer Bead"
+      - "Rosary"
+      - "Crucifix"
+      - "Bible"
+      - "Quran"
+      - "Koran"
+      - "Torah"
+      - "Hindu Statue"
+      - "Buddha Statue"
+      - "Buddha Figurine"
+      - "Political Campaign"
+      - "Political Merchandise"
+      - "Political Sign"
+
+  # --- 09 卡通 / IP 衍生品 (无授权搬运必侵权) ---
+  - key: cartoon_ip_derivatives
+    walmart_policy: "Intellectual Property"
+    reason: "卡通/IP 衍生品: 未授权搬运 = 版权侵权, Walmart 高频下架区"
+    pt_contains:
+      - "Anime Figure"
+      - "Anime Poster"
+      - "Cartoon Figurine"
+      - "Action Figure"
+      - "Plush Character"
+      - "Character Plush"
+      - "Collectible Figure"
+      - "Cosplay Accessory"
+      - "Fan Merchandise"
+      - "Fan Art"
+      - "Trading Card"      # 粉丝卡 / K-pop Photocard 高频
+      - "Photo Card"
+      - "Photocard"
+
+  # --- 13 特殊成人用品 ---
+  - key: adult_products
+    walmart_policy: "Offensive Content"
+    reason: "成人用品: Walmart 禁售 (sex toy / vibrator / adult novelty 等)"
+    pt_contains:
+      - "Adult Toy"
+      - "Adult Novelty"
+      - "Sex Toy"
+      - "Vibrator"
+      - "Dildo"
+      - "Bondage"
+      - "Fetish"
+      - "BDSM"
+      - "Chastity"
+      - "Masturbator"
+      - "Lubricant"       # 情趣润滑
+      - "Condom"
+      - "Sex Doll"
+      - "Love Doll"
+      - "Intimacy Product"
+
+  # --- 17 农药 / 化学品 + 21 化学清洁试剂 ---
+  - key: pesticides_chemicals
+    walmart_policy: "Hazardous Items"
+    reason: "农药 / 化学试剂: EPA 注册 + TSCA 合规 + 危险品运输, 中国卖家搬运 0 可能合规"
+    pt_contains:
+      - "Pesticide"
+      - "Insecticide"
+      - "Herbicide"
+      - "Fungicide"
+      - "Rodenticide"
+      - "Fertilizer"
+      - "Industrial Chemical"
+      - "Solvent"
+      - "Acid"
+      - "Alkali"
+      - "Bleach"           # 家用漂白剂含强氧化剂
+      - "Drain Cleaner"
+      - "Paint Stripper"
+      - "Degreaser"
+      - "Rust Remover"
+      - "Laboratory Reagent"
+      - "Lab Chemical"
+
+  # --- 19 监控 / 间谍设备 ---
+  - key: surveillance_spy_devices
+    walmart_policy: "Restricted/Illegal"
+    reason: "监控 / 间谍设备: 联邦窃听法 + 部分州禁隐蔽记录, 搬运高风险"
+    pt_contains:
+      - "Spy Camera"
+      - "Hidden Camera"
+      - "Nanny Camera"      # 隐蔽摄像机
+      - "Spy Pen"
+      - "Spy Recorder"
+      - "Covert Camera"
+      - "Micro Recorder"    # 微型录音器
+      - "Audio Bug"
+      - "GPS Tracker"       # 未授权追踪他人非法
+      - "GSM Bug"
+      - "Signal Jammer"     # FCC 禁
+      - "Counter Surveillance"
+
+  # --- 22 活体类产品 ---
+  - key: live_animals_plants
+    walmart_policy: "Restricted/Illegal"
+    reason: "活体动植物: Walmart 禁售 + USDA/APHIS 进口合规 + CITES 物种保护"
+    pt_contains:
+      - "Live Animal"
+      - "Live Pet"
+      - "Live Fish"
+      - "Live Insect"
+      - "Live Reptile"
+      - "Aquarium Fish"
+      - "Tropical Fish"
+      - "Live Plant"
+      - "Live Seed"
+      - "Live Seedling"
+      - "Live Sapling"
+      - "Live Tree"          # 含活体树苗; 人工假树不算
+      - "Aquatic Plant"
