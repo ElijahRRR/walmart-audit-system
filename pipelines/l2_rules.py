@@ -2,12 +2,13 @@
 
 起始 100 分, 累扣, score_final < 60 → reject。
 
-五条规则 (用户 2026-04 重新定义):
+六条规则 (用户 2026-04 重新定义):
   R1 中国卖家禁售            cat_forbid_zh_seller   -100   (仅映射表 zh_can_do 明确标"否"才触发)
   R2 禁售大类               forbidden_mega_cat     -100   (服饰/电子/汽配/baby/食品/儿童/化妆品/医疗/宠物食品)
   R3 类目需证书              cat_requires_cert      -10    (不论多少个, 触发一次就扣)
   R4 标题/描述命中黑名单      title_desc_blacklist   -15    (不论多少个, 全部输出给 L3 LLM 判通用/品牌)
   R5 标题/描述命中 USPTO LIVE trademark_live         -10    (不论多少个, 全部输出给 L3 LLM 判通用/品牌)
+  R7 促销/宣称性内容          content_promotional    -20    (Walmart Content Standards 禁 promotional claims)
 
 **注意**:
   - 原 R1 (brand 完全等匹配黑名单) 已移出 L2, 由 Phase0 前置处理 (rule_code=phase0_brand_blacklist)
@@ -580,8 +581,145 @@ def _rule_trademark_live(product: ProductInfo, l1: L1Result) -> list[RuleHit]:
 
 
 # =============================================================
-# public entry
+# R7: 促销 / 宣称性内容 (Walmart Content Standards) → -20
 # =============================================================
+
+
+R7_PENALTY = -20
+
+# 促销宣称短语 — Walmart Content Standards 明确禁用
+# 分类:
+#   tier_strong: 无证据的质量最高级 / 排名宣传 (用户列举的核心目标)
+#   tier_soft  : 空洞形容词 (常和真描述混用, 仅记录; 交 L3 判是否确有问题)
+# 为了让 L3 有足够上下文, 我们一次把所有命中都扔到 detail; 扣分只扣固定 -20 (触发一次)
+_PROMO_PHRASES_STRONG = [
+    # 最高级 / 无证据
+    r"\bpremium\s+quality\b",
+    r"\bcommercial\s+grade\b",
+    r"\bindustrial\s+grade\b",
+    r"\bprofessional\s+grade\b",
+    r"\bheavy\s+duty\b",            # "heavy duty" 独立短语, 不是 "heavy-duty"
+    r"\bmilitary\s+grade\b",        # 未经认证不可声称
+    r"\bmedical\s+grade\b",         # 需 FDA 支撑, 否则虚假宣传
+    r"\bfood[-\s]grade\b",          # 需 FDA/NSF 支撑
+    # 排名 / 比较最高级
+    r"#\s*1\b",                     # "#1 Best Seller" / "#1 Rated" / "#1 Choice"
+    r"\bno\.\s*1\b",                # "No.1 in..."
+    r"\btop\s+rated\b",
+    r"\bbest\s+seller\b",
+    r"\bbest\s+selling\b",
+    r"\bbest[-\s]in[-\s]class\b",
+    r"\bhighest\s+rated\b",
+    r"\bworld'?s\s+best\b",
+    r"\bworld'?s\s+(?:leading|greatest|finest)\b",
+    r"\bbest[-\s]ever\b",
+    r"\b(?:fda|usda|epa|ul|etl)[-\s]approved\b",   # 声称认证但常无依据, 给 L3 检查
+    # 绝对宣称
+    r"\b100%\s+(?:guaranteed|pure|natural|organic|authentic|genuine)\b",
+    r"\blifetime\s+(?:warranty|guarantee)\b",       # 承诺要核实
+    r"\bmoney[-\s]back\s+guarantee\b",
+    r"\bsatisfaction\s+guaranteed\b",
+]
+
+_PROMO_PHRASES_SOFT = [
+    # 空洞形容词 (单独用时常常合法; 仅记录便于 L3 叠加判断)
+    r"\bultra[-\s]premium\b",
+    r"\bhigh[-\s]quality\b",
+    r"\btop[-\s]quality\b",
+    r"\bsuper[-\s]strong\b",
+    r"\bsuper[-\s]durable\b",
+    r"\bextra[-\s]strong\b",
+    r"\bultra[-\s]durable\b",
+    r"\bunbeatable\b",
+    r"\bunmatched\b",
+    r"\bsecond[-\s]to[-\s]none\b",
+    r"\bas[-\s]seen[-\s]on[-\s]tv\b",
+    r"\bfactory[-\s]direct\b",
+    r"\bamazon'?s\s+choice\b",   # 冒用 Amazon 推荐词
+]
+
+_PROMO_STRONG_RE = re.compile("|".join(_PROMO_PHRASES_STRONG), re.IGNORECASE)
+_PROMO_SOFT_RE = re.compile("|".join(_PROMO_PHRASES_SOFT), re.IGNORECASE)
+
+# 全大写连续词 — 过多大写 Walmart 禁止
+# 连续 3+ 个全大写英文词 (允许中间带数字), 每个词 >= 2 个字符, 跳过纯数字/型号
+_ALLCAPS_RUN_RE = re.compile(
+    r"(?:\b[A-Z][A-Z0-9]{1,}\b[\s\-]+){2,}\b[A-Z][A-Z0-9]{1,}\b"
+)
+
+# 纯数字/常见尺寸单位 token, 不计入 "全大写滥用"
+_ALLCAPS_NOISE_TOKENS = {
+    "USB", "LED", "LCD", "OLED", "HDMI", "AC", "DC", "RGB", "IP",
+    "GHZ", "MHZ", "HZ", "FM", "AM", "3D", "4K", "8K", "HD", "UHD",
+    "PACK", "PCS", "CT", "GSM", "LBS", "OZ", "ML", "FL", "FT",
+    "ISO", "ASTM", "ANSI", "NRTL", "UL", "ETL", "CE", "FCC", "RoHS",
+    "USA", "US", "EU", "UK", "CA", "NBA", "NFL", "MLB", "NHL",
+    "PRO", "PLUS", "MAX", "MINI", "XXL", "XL", "L", "M", "S", "XS",
+}
+
+
+def _scan_allcaps_runs(title: str) -> list[str]:
+    """扫 title 里连续 3+ 个全大写词 (噪声过滤后)。
+
+    返回命中的原文片段列表 (去重后)。
+    """
+    if not title:
+        return []
+    hits = []
+    seen: set[str] = set()
+    for m in _ALLCAPS_RUN_RE.finditer(title):
+        span = m.group(0).strip()
+        if span in seen:
+            continue
+        # 去噪: 如果去掉 noise token 后不足 3 词, 不算
+        tokens = [t for t in re.split(r"[\s\-]+", span) if t]
+        real_tokens = [t for t in tokens if t.upper() not in _ALLCAPS_NOISE_TOKENS]
+        if len(real_tokens) >= 3:
+            seen.add(span)
+            hits.append(span)
+    return hits
+
+
+def _rule_content_promotional(product: ProductInfo) -> list[RuleHit]:
+    """R7: 标题含促销/宣称性内容 (Walmart Content Standards)。
+
+    扫 product.title + bullet_points[0..2] (大头是 title), 不扫 long_description
+    避免过长文本误杀 (description 里"premium quality" 偶尔出现属合理).
+
+    命中就扣 -20 (不叠加), detail 里列全部命中 — L3 LLM 用来判断是否真宣传违规
+    (比如 "Premium Quality Stainless Steel" 如果真是 304 不锈钢可能算描述实情).
+    """
+    title = (product.title or "")
+    bullets_txt = " ".join((product.bullet_points or [])[:3])
+    scan_text = title + "\n" + bullets_txt
+    if not scan_text.strip():
+        return []
+
+    strong_hits = sorted({m.group(0) for m in _PROMO_STRONG_RE.finditer(scan_text)})
+    soft_hits = sorted({m.group(0) for m in _PROMO_SOFT_RE.finditer(scan_text)})
+    allcaps_hits = _scan_allcaps_runs(title)
+
+    if not (strong_hits or allcaps_hits):
+        # 只命中 soft 不扣分 (避免过激), 也不返回 hit
+        return []
+
+    return [
+        RuleHit(
+            stage="L2",
+            rule_code="content_promotional",
+            penalty=R7_PENALTY,
+            detail={
+                "strong_phrases": strong_hits,      # 核心命中 (触发扣分)
+                "soft_phrases": soft_hits,          # 辅助命中 (仅记录)
+                "allcaps_runs": allcaps_hits,       # 连续全大写片段
+                "strong_count": len(strong_hits),
+                "allcaps_count": len(allcaps_hits),
+                "title_preview": title[:200],
+                "walmart_policy": "Content Standards",
+                "note": "L3 LLM 需判断宣称词是否有事实依据 / 是否属合规描述",
+            },
+        )
+    ]
 
 
 # =============================================================
@@ -595,12 +733,14 @@ def evaluate(product: ProductInfo, l1: L1Result) -> L2Result:
     顺序:
       1. 起始 100
       2. 继承 L1.hits 的 penalty (excluded_category 等)
-      3. 跑 L2 五条规则 (R1-R5)
+      3. 跑 L2 六条规则 (R1-R5 + R7)
       4. 下界保护
 
-    注: 原 R6 "compat+硬品牌" 曾移到 Phase0, 后又移除 — 因为 compat 触发词 + title 品牌词
-        的真伪判断交给 L3 LLM (有语境) 比 Phase0 硬拦更准确.
-        现在 title 里的品牌词由 R4 (-15) + R5 USPTO (-10) 软标记, 留 L3 判真伪.
+    注:
+      - R6 不存在 (历史遗留, compat+品牌规则已归并到 Phase0, 再后来移除).
+      - R7 "content_promotional" 扫 Walmart Content Standards 禁用的宣称词.
+        单独 -20 不足以让 score<60, 但叠加 R3/R4/R5 就能拦下大量"I 内容策略"子类产品,
+        且把命中词交给 L3 判真伪.
     """
     score = 100
     all_hits: list[RuleHit] = []
@@ -616,6 +756,7 @@ def evaluate(product: ProductInfo, l1: L1Result) -> L2Result:
         _rule_cat_requires_cert(l1),
         _rule_title_desc_blacklist(product),
         _rule_trademark_live(product, l1),
+        _rule_content_promotional(product),   # R7 新加
     ]
     for hits in rules:
         for h in hits:

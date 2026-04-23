@@ -47,6 +47,12 @@ _L3_NORMALIZE = {
     'pfas chemicals':              'PFAS Chemicals',
     'brand_misuse':               'Intellectual Property',     # brand 伪装归到 IP
     'brand misuse':               'Intellectual Property',
+    # Walmart Content Standards (promotional claims, all-caps abuse 等)
+    'content standards':          'Content Standards',
+    'content_standards':          'Content Standards',
+    'promotional content':        'Content Standards',
+    'promotional':                'Content Standards',
+    'content policy':             'Content Standards',
 }
 
 

@@ -309,9 +309,117 @@ Inspect the following {{img_count}} product images and output JSON per the 7-cat
 """
 
 
-def _vision_hit(issue: dict[str, Any]) -> bool:
-    """high confidence 才算 hit."""
-    return issue.get("confidence") == "high"
+def _vision_hit(issue: dict[str, Any], aggressive_offensive: bool = False) -> bool:
+    """high confidence 才算 hit.
+
+    aggressive_offensive=True 时, offensive 类 issue 即使 medium 也算 hit —
+    针对 Costume/Halloween/Religious/Stickers 等高 offensive 风险 PT, 把阈值降到 medium.
+    这样处理是因为 offensive 视觉特征 (纳粹符号/宗教嘲讽/血腥) 主流 VLM 常给 medium,
+    default pass 会让大量真违规漏掉.
+    """
+    if not isinstance(issue, dict):
+        return False
+    conf = issue.get("confidence")
+    if conf == "high":
+        return True
+    if aggressive_offensive and conf == "medium":
+        issue_type = (issue.get("issue") or "").lower()
+        if "offensive" in issue_type:
+            return True
+    return False
+
+
+# Aggressive offensive 模式触发判定 (PT + category 关键词)
+# 这些 PT / 类目是 Walmart 官方投诉高频区, 图像里出现 offensive 元素的概率显著高于均值
+_AGGRESSIVE_OFFENSIVE_PT_KEYWORDS = {
+    # 节日 / 装扮
+    "costume", "costumes",
+    "halloween",
+    "party decoration", "party decorations", "party supplies",
+    # 宗教 / 政治信仰类 (高概率踩宗教嘲讽 / 政治 figure)
+    "religious", "religion",
+    "flag", "flags", "banner", "banners",
+    "tapestry", "tapestries",
+    # 可任意印图 / 贴纸 / 墙贴 (offensive 主战场)
+    "sticker", "stickers",
+    "decal", "decals",
+    "wall art", "wall decor",
+    "poster", "posters",
+    "t-shirt", "t shirts", "tee",
+    "coffee mug", "mug",
+    "pin", "pins",   # enamel pin / lapel pin
+    "patch", "patches",
+}
+
+_AGGRESSIVE_OFFENSIVE_CAT_KEYWORDS = {
+    "seasonal", "halloween", "party",
+    "religious", "religion",
+    "home decor",
+    "apparel accessories",
+    "novelty",
+}
+
+
+def _should_aggressive_offensive(l1: L1Result) -> bool:
+    """按 PT + walmart_category 判定是否切 aggressive offensive 阈值."""
+    pt = (l1.walmart_product_type or "").lower()
+    cat = (l1.walmart_category or "").lower()
+    for kw in _AGGRESSIVE_OFFENSIVE_PT_KEYWORDS:
+        if kw in pt:
+            return True
+    for kw in _AGGRESSIVE_OFFENSIVE_CAT_KEYWORDS:
+        if kw in cat:
+            return True
+    return False
+
+
+# Offensive aggressive 增强块 — 附加到 system prompt 尾部, 只在 aggressive=True 时加
+AGGRESSIVE_OFFENSIVE_ADDON_EN = """
+
+---
+
+# AGGRESSIVE OFFENSIVE MODE (this product's category has elevated offensive-content risk)
+
+Apply a STRICTER standard to offensive content (issue = "offensive"):
+
+1. ANY visible hate symbol (Nazi swastika, SS runes, Confederate flag, KKK hood, white-supremacist "OK" hand or "88") → confidence = "high"
+2. Religious mockery / blasphemy (Jesus / Muhammad / Buddha in clearly disrespectful pose, satanic symbols on religious product, pentagram on Christian cross etc.) → confidence = "high"
+3. Racist imagery (blackface caricature, "slanted-eye" Asian stereotype, antisemitic nose/hook, etc.) → confidence = "high"
+4. Sexual / nudity / explicit sexual innuendo on products NOT in adult category → confidence = "high"
+5. Graphic violence / gore / dismemberment / realistic weapons-on-person imagery → confidence = "high"
+6. Political attack: leaders depicted with blood, in cages, being shot, hanged, etc. (regardless of which political side) → confidence = "high"
+7. Drug paraphernalia imagery on non-smoking product (marijuana leaves on kids product etc.) → confidence = "high"
+
+IMPORTANT: a costume of a historically sensitive persona (Nazi officer, KKK member, terrorist stereotype, "Native American chief" headdress for party wear) is OFFENSIVE — high.
+Generic skeleton / monster / zombie / pumpkin / witch / vampire for Halloween is NOT offensive — do not flag.
+Religious jewelry / religious decor featuring ONE faith (plain cross, Om, Star of David) is NOT offensive — do not flag.
+
+For all OTHER issue types (logos, cartoons, celebrities, copycat) keep the normal "high-confidence only" standard.
+"""
+
+AGGRESSIVE_OFFENSIVE_ADDON_ZH = """
+
+---
+
+# AGGRESSIVE OFFENSIVE 模式 (此产品类目 offensive 风险升高)
+
+对 "offensive" 类违规用**更严标准**:
+
+1. 任何仇恨符号 (卐纳粹 / SS / 南方邦联旗 / KKK 头罩 / 白人至上主义 "OK" 手势或 "88") → confidence = "high"
+2. 宗教嘲讽 / 亵渎 (耶稣 / 穆罕默德 / 佛像明显不敬, 宗教产品上的撒旦符号, 十字架上的五芒星等) → confidence = "high"
+3. 种族歧视图像 (黑脸 blackface / "眯眯眼" 亚裔刻板 / 反犹钩鼻等) → confidence = "high"
+4. 非成人类目产品上的色情 / 裸露 / 明显性暗示 → confidence = "high"
+5. 血腥暴力 / 肢解 / 真实武器指人 → confidence = "high"
+6. 政治攻击: 领导人被血 / 关笼 / 射杀 / 绞刑形象 (不分党派) → confidence = "high"
+7. 非吸烟类产品上出现大麻叶 / 吸食工具图像 (如儿童产品带大麻叶) → confidence = "high"
+
+重要:
+- Cosplay/装扮 里的历史敏感人物 (纳粹军官 / KKK / 恐怖分子刻板 / 派对用 "印第安酋长头饰") = OFFENSIVE high.
+- 万圣节通用骷髅 / 怪物 / 僵尸 / 南瓜 / 巫婆 / 吸血鬼 = **不** offensive, 不要标.
+- 单一宗教装饰 (纯十字架 / Om / 大卫星) = **不** offensive, 不要标.
+
+其他 issue 类型 (logos / cartoons / celebrities / copycat) 仍保持 "仅 high confidence" 的正常标准.
+"""
 
 
 # DMIT 采集里 Amazon 图 URL 常以 '.' 结尾缺扩展名 (e.g. '..._AC_SL1500_.'),
@@ -395,13 +503,24 @@ async def judge(
         log.warning("L4 %s 所有 %d 张图本地下载失败, 回落 pass", product.asin, len(urls))
         return L4Result(verdict="pass", image_issues=[], hits=[])
 
+    # Offensive aggressive 判定 (根据 PT + category 切更严阈值)
+    aggressive_offensive = _should_aggressive_offensive(l1)
+
     # Gemini 用英文 prompt (更准), 国产模型用中文 (中文训练好)
     if s.vision_provider == "gemini":
         system_prompt = SYSTEM_PROMPT_EN
+        if aggressive_offensive:
+            system_prompt = system_prompt + AGGRESSIVE_OFFENSIVE_ADDON_EN
         user_prompt = _build_user_prompt_en(product, l1, l3).replace("{img_count}", str(len(data_urls)))
     else:
         system_prompt = SYSTEM_PROMPT
+        if aggressive_offensive:
+            system_prompt = system_prompt + AGGRESSIVE_OFFENSIVE_ADDON_ZH
         user_prompt = _build_user_prompt(product, l1, l3).replace("{img_count}", str(len(data_urls)))
+
+    if aggressive_offensive:
+        log.info("L4 aggressive offensive mode ON for %s (pt=%r, cat=%r)",
+                 product.asin, l1.walmart_product_type, l1.walmart_category)
 
     # 组装多模态消息: system + user(text + images)
     content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
@@ -456,12 +575,17 @@ async def judge(
     if not isinstance(issues, list):
         issues = []
 
-    # 判定: 只有 confidence=high 的 issue 才真让 reject
-    high_hits = [i for i in issues if isinstance(i, dict) and _vision_hit(i)]
+    # 判定: 正常 high confidence 才算; aggressive offensive 模式下 offensive medium 也算
+    high_hits = [i for i in issues if isinstance(i, dict) and _vision_hit(i, aggressive_offensive)]
     verdict = "reject" if high_hits else "pass"
 
     hits: list[RuleHit] = []
     if verdict == "reject":
+        # reject 原因如果是 aggressive-escalated offensive, 在 detail 里标出
+        aggressive_escalated = aggressive_offensive and any(
+            (i.get("confidence") == "medium" and "offensive" in (i.get("issue") or "").lower())
+            for i in high_hits
+        )
         hits.append(RuleHit(
             stage="L4",
             rule_code="l4_vision_violation",
@@ -471,6 +595,8 @@ async def judge(
                 "all_issues": issues,
                 "reasoning": raw.get("reasoning"),
                 "images_scanned": len(data_urls),
+                "aggressive_offensive": aggressive_offensive,
+                "aggressive_escalated": aggressive_escalated,
             },
         ))
 
