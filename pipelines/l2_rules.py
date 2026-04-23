@@ -2,13 +2,15 @@
 
 起始 100 分, 累扣, score_final < 60 → reject。
 
-六条规则 (用户 2026-04 重新定义):
+七条规则 (用户 2026-04 重新定义):
   R1 中国卖家禁售            cat_forbid_zh_seller   -100   (仅映射表 zh_can_do 明确标"否"才触发)
-  R2 禁售大类               forbidden_mega_cat     -100   (服饰/电子/汽配/baby/食品/儿童/化妆品/医疗/宠物食品)
+  R2 禁售大类               forbidden_mega_cat     -100   (12 大禁售类 + 新增 5: religious/cartoon_ip/adult/chemicals/spy/live)
   R3 类目需证书              cat_requires_cert      -10    (不论多少个, 触发一次就扣)
   R4 标题/描述命中黑名单      title_desc_blacklist   -15    (不论多少个, 全部输出给 L3 LLM 判通用/品牌)
   R5 标题/描述命中 USPTO LIVE trademark_live         -10    (不论多少个, 全部输出给 L3 LLM 判通用/品牌)
+  R6 (已删除, 2026-04) — "Compatible for <Brand>" 改 L3 LLM 判 (规则误伤率高)
   R7 促销/宣称性内容          content_promotional    -20    (Walmart Content Standards 禁 promotional claims)
+  R8 Walmart 严格合规敏感词    walmart_strict_sensitive -30  (文化/宗教/政治/武器装饰/成人暗示 7 子类)
 
 **注意**:
   - 原 R1 (brand 完全等匹配黑名单) 已移出 L2, 由 Phase0 前置处理 (rule_code=phase0_brand_blacklist)
@@ -401,19 +403,19 @@ def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
 
 
 # =============================================================
-# R6: "Compatible/fits/replacement for <黑名单品牌>" 硬拦 → -100
+# R6 已删除 (2026-04): "Compatible for <Brand>" 场景改由 L3 LLM 判定
+# -------------------------------------------------------------
+# 历史: R6 曾尝试规则硬拦 "Compatible/fits/replacement for <黑名单品牌>",
+# 但实测黑名单表 36793 条里含大量英语通用词 (seat/kind/fishing/sportsman/
+# operation/variety/players/comfort/walls/windows/cars/american 等),
+# 在 "fits any kind of chair" / "Designed for simplicity" / "Suitable for
+# cars" 等合规描述里被误触, 误伤率 90% (20 条命中 18 条是通用词).
+#
+# 决策: 由 L3 LLM + prompt §A (语法铁证 + 授权声明识别) 处理, 精度更高.
+# should_use_strong_l3_model() 对 compat 前缀产品强制走 qwen-plus.
+# 保留 _COMPAT_PREFIX_RE 常量供 aggressive_offensive.py 路由使用.
 # =============================================================
-# 语法逻辑: "Compatible for X" / "fits X" / "replacement for X" / "works with X" 等模式中,
-# X 在语法位置上 100% 是品牌名 (无歧义, 不可能是通用词).
-# 黑名单里的品牌出现在这种位置 = 未授权仿制配件引用, 直接 reject.
-# "Compatible for" 不是授权声明 — 只有 Official/Licensed/Authorized/Genuine/OEM 才是.
 
-R6_PENALTY = -100
-
-# 明确表示"兼容/适配/替换/为...设计"的前缀 (出现在此前缀后的 <X> 必定是品牌)
-# 两类:
-#   强前缀带 "for/with": compatible for/with, works with, designed for, made for, ...
-#   弱前缀直接跟品牌:     fits <X>, replaces <X>, replacement for <X>
 _COMPAT_PREFIX_RE = re.compile(
     r"\b(?:"
     r"compatible\s+(?:for|with|to)"
@@ -427,79 +429,11 @@ _COMPAT_PREFIX_RE = re.compile(
     r"|aftermarket\s+(?:for|replacement)"
     r"|oem\s+for"
     r"|replacement\s+(?:for|part\s+for|parts?\s+for)"
-    r"|replaces?"                       # replaces Nike  ← 弱前缀直接跟品牌
-    r"|fits?"                           # fits Nike
+    r"|replaces?"
+    r"|fits?"
     r")\s+",
     re.IGNORECASE,
 )
-
-def _rule_blacklist_compatible_for(product: ProductInfo) -> list[RuleHit]:
-    """R6: "Compatible/fits/replacement for <黑名单品牌>" 模式硬拦.
-
-    触发条件:
-      - title/bullets/description 里匹配 COMPAT_PREFIX 前缀
-      - 前缀后 **20 字符** 内命中 blacklist_brands 全表 (36793 条)
-      - 不是自品牌
-
-    设计理由:
-      语法结构 "Compatible for X" / "fits X" / "designed for X" 里, X 必是
-      品牌/产品线指代物. 黑名单任一命中 → 未授权仿制/引用 = IP 侵权.
-
-    误伤防护:
-      1. 窗口 20 字符 (紧邻前缀) — 只匹配最近的品牌词
-      2. 长度 < 3 的品牌跳过 (LV 等短词歧义大)
-      3. 自品牌不拦
-
-    扣分: -100 (L2 直接 reject, 不走 L3)
-    """
-    own_brand = (product.brand or "").strip().lower()
-    hay_parts = [product.title or ""]
-    hay_parts.extend(product.bullet_points[:5])
-    if product.long_description:
-        hay_parts.append(product.long_description[:1000])
-    hay = "\n".join(p for p in hay_parts if p)
-    if not hay:
-        return []
-
-    matches: list[dict[str, Any]] = []
-    seen_brands: set[str] = set()
-    for pm in _COMPAT_PREFIX_RE.finditer(hay):
-        tail_start = pm.end()
-        tail = hay[tail_start : tail_start + 60]
-        for brand, pattern in _compile_blacklist_patterns():
-            if len(brand) < 3:
-                continue
-            if brand.lower() == own_brand:
-                continue
-            if brand in seen_brands:
-                continue
-            bm = pattern.search(tail)
-            if bm and bm.start() <= 20:
-                seen_brands.add(brand)
-                ctx_start = max(0, pm.start() - 5)
-                ctx_end = min(len(hay), tail_start + bm.end() + 5)
-                matches.append({
-                    "brand": brand,
-                    "compat_prefix": pm.group().strip(),
-                    "context": hay[ctx_start:ctx_end].strip(),
-                })
-                break
-    if not matches:
-        return []
-
-    return [
-        RuleHit(
-            stage="L2",
-            rule_code="blacklist_compatible_for",
-            penalty=R6_PENALTY,
-            detail={
-                "matches": matches,
-                "count": len(matches),
-                "walmart_policy": "Intellectual Property",
-                "note": "title 里 'Compatible/fits/replacement for <黑名单品牌>' 模式 → 未授权仿制配件",
-            },
-        )
-    ]
 
 
 # =============================================================
@@ -993,11 +927,11 @@ def evaluate(product: ProductInfo, l1: L1Result) -> L2Result:
         score += h.penalty
 
     # 2. 跑 L2 规则
+    # 注: R6 "blacklist_compatible_for" 已删除, 改由 L3 LLM 判 (精度更高)
     rules = [
         _rule_zh_seller_forbidden(l1),
         _rule_forbidden_mega_cat(l1),
         _rule_cat_requires_cert(l1),
-        _rule_blacklist_compatible_for(product),  # R6 硬拦仿制配件 (-100)
         _rule_title_desc_blacklist(product),
         _rule_trademark_live(product, l1),
         _rule_content_promotional(product),       # R7 内容宣称

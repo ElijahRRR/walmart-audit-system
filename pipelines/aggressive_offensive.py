@@ -204,6 +204,35 @@ def _has_military_culture_combo(title: str) -> bool:
     return has_mil and has_cult
 
 
+# Compat 前缀 — 产品标注兼容某品牌 (IP 仿制风险, L3 须严判)
+_COMPAT_FOR_RE = re.compile(
+    r"\b(?:"
+    r"compatible\s+(?:for|with|to)"
+    r"|works?\s+(?:for|with)"
+    r"|designed\s+for"
+    r"|made\s+for"
+    r"|intended\s+for"
+    r"|replacement\s+(?:for|parts?\s+for)"
+    r"|replaces?\s+"
+    r"|aftermarket\s+for"
+    r"|oem\s+for"
+    r"|fits?\s+"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _has_compat_for_pattern(title: str) -> bool:
+    """title 里含 'compatible/fits/replacement for ...' 模式 — 仿制配件高 IP 风险.
+
+    即使后面接的不是明确品牌名 (如 'compatible for V6/DC59/CY22' 只含型号),
+    L3 plus 能按 §A 规则判品牌, turbo 常放行.
+    """
+    if not title:
+        return False
+    return bool(_COMPAT_FOR_RE.search(title))
+
+
 def should_use_strong_l3_model(
     l1: L1Result,
     product: ProductInfo | None = None,
@@ -248,6 +277,11 @@ def should_use_strong_l3_model(
 
     # 6. 军事文化意象组合
     if _has_military_culture_combo(title_lc):
+        return True
+
+    # 7. Compat 前缀 — title 含 "compatible/fits/replacement for" 等仿制配件信号
+    #    即使后面是型号 (V6/CY22) 而非显式品牌, L3 plus 仍能正确识别为品牌引用.
+    if _has_compat_for_pattern(title_lc):
         return True
 
     return False
