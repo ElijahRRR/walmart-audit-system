@@ -1,13 +1,12 @@
 """Orchestrator: 串联 L1 → L2 → L3 → L4, 写 audit_runs / audit_hits DB 表。
 
 当前实现:
-- L1 + L2 端到端 (DB 可持久化)
-- L3 / L4 占位: 若 enable_llm=True 且用户已配置 DASHSCOPE_API_KEY, 抛 NotImplementedError
-  (由后续 F18-F23 填充)
+- Phase0 + L1 + L2 + L3 + L4 全层端到端 (DB 可持久化)
+- L3 / L4 默认开启 (run_l3=True, run_l4=True); 单测/离线场景可显式关掉
 
 public api:
-  async audit_one(product, *, enable_llm=False, persist=True) -> AuditOutcome
-  async audit_batch(products, *, concurrency=20, enable_llm=False) -> list[AuditOutcome]
+  async audit_one(product, *, run_l3=True, run_l4=True, persist=True) -> AuditOutcome
+  async audit_batch(products, *, concurrency=20, run_l3=True, run_l4=True) -> list[AuditOutcome]
 """
 from __future__ import annotations
 
@@ -15,6 +14,7 @@ import asyncio
 import logging
 from typing import Any
 
+from integrations import usage_logger
 from sync._common import db_conn, to_jsonb
 
 from . import l1_category, l2_rules, l3_llm, l4_vision, phase0, reason_mapper
@@ -126,27 +126,44 @@ async def audit_one(
     product: ProductInfo,
     *,
     skip_l1_llm: bool = False,
-    run_l3: bool = False,
-    run_l4: bool = False,
+    run_l3: bool = True,
+    run_l4: bool = True,
     persist: bool = True,
 ) -> AuditOutcome:
     """对单个产品跑审核流水线。
 
-    新流程:
+    完整流程:
       Phase0: 品牌精准黑名单 → 命中直接 reject
         ↓
-      L1: 类目判定 (只输出 PT + walmart_category + zh_can_do)
+      L1: 类目判定 (qwen-plus 输出 PT + walmart_category + zh_can_do)
         ↓
-      L2: 硬规则打分 (R1-R5)
+      L2: 硬规则打分 (R1-R9, R6 已删)
         ↓
-      [L3/L4 占位]
+      L3: LLM 语义 (qwen-turbo/plus 混合路由, 只在 L2 pass 才跑)
+        ↓
+      L4: 视觉审核 (doubao-seed-1-6, 只在 L3 pass 才跑)
 
     flags:
       - skip_l1_llm: True 时 L1 只查 DB 不调 LLM (测试/离线场景)
-      - run_l3:      True 时跑 L3 LLM 语义 (F18-F20, 需 DASHSCOPE_API_KEY)
-      - run_l4:      True 时跑 L4 视觉 (F21-F23, 未实现)
+      - run_l3:      默认 True (单测场景传 False 以省 LLM 配额)
+      - run_l4:      默认 True (单测场景传 False 以省 LLM 配额)
       - persist:     落 audit_runs / audit_hits / products 表
     """
+    # 设审核上下文 — LLM client 透此关联 asin/stage 入 llm_usage 表
+    ctx = usage_logger.set_context(asin=product.asin, stage="L1")
+    try:
+        return await _audit_pipeline(product, skip_l1_llm, run_l3, run_l4, persist)
+    finally:
+        usage_logger.reset_context(ctx)
+
+
+async def _audit_pipeline(
+    product: ProductInfo,
+    skip_l1_llm: bool,
+    run_l3: bool,
+    run_l4: bool,
+    persist: bool,
+) -> AuditOutcome:
     # Phase 0 - 精准前置过滤 (类目禁售 + 品牌黑名单)
     phase0_result = phase0.check(product)
     if phase0_result.blocked:
@@ -163,16 +180,18 @@ async def audit_one(
         outcome.final_reason_category = reason_mapper.compute_final_reason(outcome, product)
         if persist:
             try:
-                upsert_product(product)
-                _persist_run(outcome)
+                await asyncio.to_thread(upsert_product, product)
+                await asyncio.to_thread(_persist_run, outcome)
             except Exception as e:  # noqa: BLE001
                 log.error("persist failed for %s: %s", product.asin, e)
         return outcome
 
     # L1 类目判定 (默认必走 LLM)
+    usage_logger._CTX_STAGE.set("L1")
     l1 = await l1_category.classify(product, skip_llm=skip_l1_llm)
 
     # L2 硬规则打分
+    usage_logger._CTX_STAGE.set("L2")
     l2 = l2_rules.evaluate(product, l1)
 
     outcome = AuditOutcome(
@@ -189,6 +208,7 @@ async def audit_one(
     # L2 reject 的产品直接用 L2 hit detail 里的 walmart_policy (已由 yaml 和 cert/zh_forbid 规则映射)
     # 如对特定产品不够精确, 走 yaml 扩充 pt_contains 的路线, 不靠 L3 annotation
     if l2.verdict == "pass" and run_l3:
+        usage_logger._CTX_STAGE.set("L3")
         l3 = await l3_llm.judge(product, l1, l2)
         outcome.l3 = l3
         if l3.verdict == "reject":
@@ -197,6 +217,7 @@ async def audit_one(
 
     # L4 视觉审核 (只在 L3 通过后跑, 最贵的一层)
     if outcome.verdict == "pass" and run_l4:
+        usage_logger._CTX_STAGE.set("L4")
         l4 = await l4_vision.judge(product, l1, l2, outcome.l3)
         outcome.l4 = l4
         if l4.verdict == "reject":
@@ -206,11 +227,11 @@ async def audit_one(
     # 计算 final_reason_category (Walmart 37 条政策标准名, 对齐合规报告)
     outcome.final_reason_category = reason_mapper.compute_final_reason(outcome, product)
 
-    # 持久化
+    # 持久化 — 用 to_thread 不阻塞 event loop (50 并发下提升 5×)
     if persist:
         try:
-            upsert_product(product)
-            _persist_run(outcome)
+            await asyncio.to_thread(upsert_product, product)
+            await asyncio.to_thread(_persist_run, outcome)
         except Exception as e:  # noqa: BLE001
             log.error("persist failed for %s: %s", product.asin, e)
 
@@ -221,25 +242,66 @@ async def audit_batch(
     products: list[ProductInfo],
     *,
     concurrency: int = 20,
+    ramp_step_ms: int = 0,
     skip_l1_llm: bool = False,
-    run_l3: bool = False,
-    run_l4: bool = False,
+    run_l3: bool = True,
+    run_l4: bool = True,
     persist: bool = True,
 ) -> list[AuditOutcome]:
-    """批量审核。并发由 Semaphore + llm_client 内部 Semaphore(100) 控。"""
-    sem = asyncio.Semaphore(concurrency)
+    """批量审核 — worker pool 模式 (持续分散打 LLM, 避免 gather 瞬间洪峰).
 
-    async def _one(p: ProductInfo) -> AuditOutcome:
-        async with sem:
-            return await audit_one(
-                p,
-                skip_l1_llm=skip_l1_llm,
-                run_l3=run_l3,
-                run_l4=run_l4,
-                persist=persist,
-            )
+    架构对比 (跟参考脚本对齐):
+      旧 asyncio.gather + Semaphore:
+        N 个 task 一次性 schedule, 前 concurrency 个抢 sem 几乎同步打 LLM
+        → deepseek server 瞬间收到 50 个 request → 排队 → 单调用 17-30s
+      新 worker pool from Queue:
+        创建 N 个独立 worker, 各自从 queue 拉产品依次处理
+        worker 完成时间天然抖动 → 持续分散打 LLM → 单调用 5-8s
+        与 xbot 平台 / 参考脚本架构一致 (实测可达 660 ASIN/min)
 
-    return await asyncio.gather(*(_one(p) for p in products))
+    Args:
+        concurrency: worker 数量 (推荐 30-50, 等同旧的 sem 上限)
+        ramp_step_ms: worker 启动错开间隔 ms (默认 0)
+            worker pool 已经天然分散, ramp 仅在希望明确削平启动洪峰时用 (200 推荐).
+            (旧版 ramp 是对每个 task 应用; 新版只对 worker 启动应用, 影响范围极小.)
+    """
+    if not products:
+        return []
+
+    queue: asyncio.Queue = asyncio.Queue()
+    for i, p in enumerate(products):
+        queue.put_nowait((i, p))
+
+    # 按原顺序回填 (worker 完成顺序不保证)
+    results: list[AuditOutcome | None] = [None] * len(products)
+    n_workers = min(concurrency, len(products))
+
+    async def worker(worker_id: int) -> None:
+        if ramp_step_ms > 0:
+            await asyncio.sleep(worker_id * ramp_step_ms / 1000.0)
+        while True:
+            try:
+                idx, prod = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            try:
+                outcome = await audit_one(
+                    prod,
+                    skip_l1_llm=skip_l1_llm,
+                    run_l3=run_l3,
+                    run_l4=run_l4,
+                    persist=persist,
+                )
+                results[idx] = outcome
+            except Exception as e:  # noqa: BLE001
+                # audit_one 内部已捕获大多数异常, 这里兜底防一个产品失败拖垮整批
+                log.error("worker %d audit %s failed: %s", worker_id, prod.asin, e)
+
+    log.info("audit_batch: %d products, %d workers (worker pool mode)",
+             len(products), n_workers)
+    await asyncio.gather(*[worker(i) for i in range(n_workers)])
+
+    return [r for r in results if r is not None]
 
 
 __all__ = ["audit_one", "audit_batch", "upsert_product"]

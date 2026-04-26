@@ -1,4 +1,4 @@
-"""CLI: 跑一批 ASIN 的预审流水线 (L1→L2, L3/L4 待 .env 配齐后启用)。
+"""CLI: 跑一批 ASIN 的预审流水线 (Phase0 → L1 → L2 → L3 → L4 全层默认启用)。
 
 输入: CSV 文件, 至少含列 `asin`; 可选 `title` `brand` `amazon_category_path`
       `bullet_points` (用 '||' 分隔) `long_description` `country_of_origin` `image_urls` (用 '||' 分隔)
@@ -6,9 +6,10 @@
 输出: result.csv, 每行: asin, verdict, score_final, stage, hit_codes, reason_summary
 
 用法:
-  python -m cli.audit_asin_list --input asins.csv --out result.csv
-  python -m cli.audit_asin_list --input asins.csv --out result.csv --enable-llm
-  python -m cli.audit_asin_list --input asins.csv --no-persist        # 只输出不落 DB
+  python -m cli.audit_asin_list --input asins.csv --out result.csv           # 全层默认启用
+  python -m cli.audit_asin_list --input asins.csv --out result.csv --no-l3   # 关掉 L3 (也会跳过 L4)
+  python -m cli.audit_asin_list --input asins.csv --out result.csv --no-l4   # 只关 L4
+  python -m cli.audit_asin_list --input asins.csv --out result.csv --no-persist   # 只输出不落 DB
 """
 from __future__ import annotations
 
@@ -123,12 +124,14 @@ def main() -> int:
     parser.add_argument("--out", type=Path, required=True, help="输出 CSV 路径")
     parser.add_argument("--skip-l1-llm", action="store_true",
                         help="L1 只查 DB 不调 LLM (快速调试; 默认 L1 必走 qwen-plus)")
-    parser.add_argument("--run-l3", action="store_true",
-                        help="跑 L3 LLM 语义审核 (F18-F20, 当前暂缓)")
-    parser.add_argument("--run-l4", action="store_true",
-                        help="跑 L4 视觉审核 (F21-F23, 未实现)")
+    parser.add_argument("--no-l3", action="store_true",
+                        help="关掉 L3 LLM 语义 (默认启用; 关掉会同时跳过 L4)")
+    parser.add_argument("--no-l4", action="store_true",
+                        help="关掉 L4 视觉 (默认启用; 只省视觉成本, L3 仍跑)")
     parser.add_argument("--no-persist", action="store_true", help="不落 audit_runs/audit_hits 表")
     parser.add_argument("--concurrency", type=int, default=20)
+    parser.add_argument("--ramp-step-ms", type=int, default=0,
+                        help="task 启动错开间隔 ms (默认 0 关闭; 拥塞场景设 200 可能 3.6× 提速)")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
@@ -145,9 +148,10 @@ def main() -> int:
         audit_batch(
             products,
             concurrency=args.concurrency,
+            ramp_step_ms=args.ramp_step_ms,
             skip_l1_llm=args.skip_l1_llm,
-            run_l3=args.run_l3,
-            run_l4=args.run_l4,
+            run_l3=not args.no_l3,
+            run_l4=not args.no_l4,
             persist=not args.no_persist,
         )
     )

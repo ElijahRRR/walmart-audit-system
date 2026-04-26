@@ -21,6 +21,8 @@ class ProductInfo:
     long_description: str = ""
     image_urls: list[dict[str, Any]] = field(default_factory=list)
     amazon_category_path: str = ""
+    stock_count: int | None = None       # DMIT.stock_count, None=未知, 0=无货
+    stock_status: str = ""               # DMIT.stock_status: 'In Stock'/'Currently unavailable'/'N/A' 等
 
     @property
     def searchable_text(self) -> str:

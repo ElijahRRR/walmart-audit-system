@@ -189,217 +189,86 @@ def _blocks_for(
 ) -> tuple[bool, bool]:
     """返回 (include_sticker_block, include_weapons_block)。
 
-    三层判定 (后面覆盖前面, 取并集):
-      1. Category 级配置: _CATEGORY_BLOCKS
-      2. PT 关键词 override: PT 名含贴纸/武器相关词 → 强制开对应 block
-      3. Product 文本 hint (title+bullets 前 200 字): 扫关键词再补开
-         (例如 PT 叫 Hard Hat Accessories, 但标题含 "Stickers", 也要开 B.1)
-    未知类目默认两块都带 (保守)。
+    ⭐ 2026-04-26 改为永远 (True, True) — 永远全包 §B.1 sticker + §B.2 weapons.
+
+    原因:
+      DeepSeek prompt cache 按前缀完全匹配命中, 动态切换 §B 块会导致 system
+      prompt 出现 4 种变体 (T/T, T/F, F/T, F/F), 每种独立缓存桶, 整体命中率
+      被分散. 永远全包后 system prompt 100% 固定, 命中率拉到接近 100%.
+
+    成本: system prompt 多 ~300 tokens (几乎不增加, 因为缓存命中部分按 20% 价).
+    LLM 行为: prompt 已写明 "only apply §B.1 if 是贴纸类 / §B.2 if 是武器类",
+              全包不会让模型对非贴纸/非武器产品错判.
+
+    旧逻辑 (按类目/PT/hint 动态切换) 已废弃, 函数保留签名供调试或未来回滚.
     """
-    cat = (walmart_category or "").strip().lower()
-    pt = (walmart_pt or "").strip().lower()
-    hint = (product_text_hint or "").strip().lower()[:500]
-
-    pt_sticker = any(kw in pt for kw in _STICKER_PT_KEYWORDS) if pt else False
-    pt_weapons = any(kw in pt for kw in _WEAPONS_PT_KEYWORDS) if pt else False
-
-    hint_sticker = any(kw in hint for kw in _STICKER_PT_KEYWORDS) if hint else False
-    hint_weapons = any(kw in hint for kw in _WEAPONS_PT_KEYWORDS) if hint else False
-
-    cfg = _CATEGORY_BLOCKS.get(cat)
-    if cfg is None:
-        return (True, True)   # 未知类目保守兜底
-    return (
-        cfg.get("sticker", False) or pt_sticker or hint_sticker,
-        cfg.get("weapons", False) or pt_weapons or hint_weapons,
-    )
+    return (True, True)
 
 
 @lru_cache(maxsize=8)
 def _build_system_prompt(include_sticker: bool, include_weapons: bool) -> str:
-    """按 block 开关动态组装 system prompt。
+    """精简版 system prompt — 把 LLM 自己懂的细则全砍掉, 只留必要业务约束 + 输出规范.
 
-    常用组合只 4 种 (TT/TF/FT/FF), 用 lru_cache 复用。
+    设计原则 (2026-04-26 重写):
+      - LLM (deepseek-chat / v4-flash) 自己已经知道贴纸/武器/IP/名人/卡通角色等常识.
+        无需在 prompt 里塞 B.1/B.2 详细规则, 也无需 C.2/C.6 的具体名单.
+      - 沃尔玛具体禁售政策 LLM 不知道 → 由 user prompt 按 PT 路由后给.
+      - 品牌真假让 LLM 用上下文综合判, 不喂 4 个语境信号 + 示例.
+      - 唯一保留: 业务核心约束 (中国搬运卖家无授权) + 特殊语法铁证 (compatible for X 等).
+
+    签名 include_sticker/include_weapons 保留以兼容旧调用, 函数体不再使用.
     """
-    parts: list[str] = [
-        """你是沃尔玛 Marketplace 合规审核 AI (站在沃尔玛官方立场)。
+    return """你是沃尔玛 Marketplace 合规审核 AI (站在沃尔玛官方立场)。
 卖家是中国搬运模式、无任何证书/认证、每日数万产品。
 你只输出严格 JSON, 不要任何解释文字或 markdown 前后缀。
 
-# 任务
-前置规则引擎 (L2) 已用硬规则挡掉明显违规, 送到你的都是"规则疑似但没挡住"的产品。
-你的任务是做 **最后一道语义判定**, 主要覆盖两类:
+# 业务关键约束
+- 卖家 = 中国搬运模式, 客观上不可能拥有 Nike/Dyson/Disney 等大牌的
+  Official / Licensed / Authorized / OEM 授权.
+- 任何"授权声明"都视为虚假宣称, 一律按侵权判 (无豁免).
+- 默认 pass — 只有清晰证据才 reject.
 
-## A. 品牌真伪 (主要针对 L2 R4/R5 命中词) — 严格判定流程
+# 你的判定职责 (4 个维度)
 
-### A.0 任务认知
-- R4/R5 会把文本里命中的"黑名单品牌词"和"USPTO 商标"全部列给你
-- 你的任务: 把**每个命中词**逐一判定: 是真品牌 / 通用词, 然后按 A.3 判 verdict
-- **绝大多数命中是通用词** (如 top/summer/must/chair/fire/escape/weather/mountain/deluxe)
-- 但一旦判"真品牌" + 无授权声明 → **必 reject**, 不可放行
+## 1. 品牌真伪 (针对 user prompt 列出的"L2 命中词")
+用完整 title/bullets/description 上下文综合判断每个命中词:
+- 是真品牌 → is_real_brand=true
+- 是通用英文词 (如 top/floor/summer/modern/classic 等) → is_real_brand=false
 
-### A.1 语法铁证 — 下面这些位置上的 <X> 100% 是品牌 (不可判为通用词)
-只要命中词出现在 title 的以下语法结构里, 该词就是**品牌**:
-  - "compatible (for|with) <X>"
-  - "fits <X>" / "fits for <X>" / "fit to <X>"
-  - "replacement for <X>" / "replaces <X>"
-  - "works with <X>"
-  - "designed for <X>" / "made for <X>" / "intended for <X>"
-  - "aftermarket for <X>" / "OEM for <X>" / "OEM-style for <X>"
-  - "Compatible Model <X>" / "For <X> Model"
-  - 品牌名后紧跟型号 ("Dyson V6", "Apple iPhone 12", "Nike Air Jordan 1")
+任一命中词 is_real_brand=true → 整品 reject, reason_category='Intellectual Property'.
 
-理由: 这些语法结构里, <X> 是功能性代词, 必须指代一个具体的品牌或产品线.
-"Compatible for <通用词>" 在语法上不成立 (如 "Compatible for Summer" 不通顺).
+特殊语法铁证 (X 必为品牌, 必判 true):
+  "compatible for X" / "fits X" / "replacement for X" / "works with X" /
+  "designed for X" / "OEM for X" / 品牌名后紧跟型号 (如 "Dyson V6")
 
-### A.2 授权豁免 — **没有任何豁免**, 所有"授权声明"一律不信任
+## 2. 冒犯性内容 (Walmart Offensive Content 政策)
+从 title/bullets/description 语义判, 命中以下任一 → reject:
+- 色情 / 成人主题 / 性化未成年 / 捆绑 / 性玩具
+- 种族辱骂 / 仇恨象征 (Confederate / Nazi / Swastika / KKK)
+- 恶搞冒犯 (funny + offensive 混合 / 嘲讽政治人物)
+- 仿真武器 / 玩具枪 / replica firearm (例外: 水枪 / 泡泡枪 /
+  bright orange tip 合规标识 / NERF foam dart 品牌豁免)
 
-**业务背景 (关键 — 决定判决逻辑)**:
-  我们处理的卖家 = **中国搬运模式**, 日均数万单.
-  客观上**没有任何卖家**可能真是大牌本身, 也拿不到 Official/Licensed/Authorized/OEM 授权.
-  任何授权声明都是卖家为了逃避平台审核的**虚假宣称**, 一律按侵权判.
+## 3. 知识产权 (Intellectual Property)
+任一 → reject, reason_category='Intellectual Property':
+- 商标仿冒: 已通过维度 1 处理
+- 版权 IP 角色: 卡通 / 电影 / 游戏 / 动漫 IP 名 + 周边商品
+  (贴纸 / T恤 / 毛绒 / 玩具 / 海报 / 杯子 / 钥匙扣)
+- 外观/发明专利: 文本明示仿造 ("Stanley Cup style" / "AirPods case for Apple")
+- 商业包装 (Trade Dress): 仿知名整体视觉 (可口可乐瓶形 / Tiffany 蓝盒)
+- 肖像权 (Publicity Rights): 名人姓名 + 周边商品
+  (政治人物 / 演员 / 运动员 / 音乐人 / Kpop 艺人)
+- 假冒: "100% Authentic <大牌>" + 显著低价
 
-**以下所有情况 → reject (无豁免)**:
-  ✗ brand 字段 = <X> (填自己是该品牌也不信, 中国搬运卖家不可能真是 Nike/Dyson/Disney)
-  ✗ title 含 "Official <X>" / "<X> Official"
-  ✗ title 含 "Licensed by <X>" / "Authorized <X>"
-  ✗ title 含 "Genuine <X>" / "Authentic <X>"
-  ✗ title 含 "OEM for <X>"
-  ✗ title 含 ®/™/© 紧跟品牌名 (L2 R9 已硬拦, 进 L3 仍按侵权判)
-  ✗ "Compatible for <X>" / "fits <X>" / "replacement for <X>" / "works with <X>"
-
-### A.3 判定规则 (顺序, 先命中先退出):
-1. 命中词在 A.1 语法结构 (compatible for / fits / replacement for / works with / designed for + X)
-   → **100% 真品牌** → **reject**
-   - reason_category='Intellectual Property'
-   - reason_text '[Utility Patent] 未授权仿制配件' 或 '[Trade Dress] 仿外观设计'
-2. 命中词普通出现在 title (非 A.1 语法结构):
-   - 是知名大牌 (Nike/Apple/Disney/LEGO/Marvel/Pokémon/Dyson/Zildjian/Hercules/
-     Louis Vuitton/Samsung/Sony/Bose/Stanley 品牌上下文/...) → **reject**
-     reason_text '[Trademark] 未授权引用品牌名'
-     (无论 brand 字段填什么, 无论 title 是否有 Official/Licensed/Genuine 等)
-   - 判断为通用词 (apple cider / stanley tool 工具具体上下文 / summer dress / fire pit) → pass
-3. brand 字段声明 ≠ title 展示的主品牌 (brand='Unbranded' 但 title 说 Disney-style)
-   → **reject** brand_misuse
-
-### A.4 通用词示例 (黑名单命中但可判通用 pass 的):
-  top / summer / fire / escape / weather / mountain / deluxe / premium / ultra /
-  apple (在 "apple cider" / "apple pie" 上下文) /
-  stanley (在 "Stanley tool" / "Stanley tape measure" 小工具上下文) /
-  fresh / nature / eagle / family / bear
-  注: 若无 "cider/pie/tool/tape" 等明确通用语境, 默认按品牌判 (Apple/Stanley 都是知名大牌)
-
-## B. 冒犯性内容 (沃尔玛 Offensive Content 政策)
-按政策文本明确列出的 **禁售内容**, 从 title/description/bullets 语义判:
-- 色情/成人主题 (情趣玩具/娃娃/捆绑/贞操装置/性暗示/Couples/Intimacy/Sensual/Erotic)
-- 性化未成年
-- 种族辱骂 / 刻板印象 / 种族主义符号
-- 不容忍象征 (非宗教语境的卐字/南方邦联旗/Nazi)
-- 贬低/嘲讽政治候选人
-- 嘲讽/赞美悲剧、灾难、虐待动物
-- 嘲笑基于受保护特征 (种族/性别/性取向/宗教/残疾/体型/年龄)
-"""
-    ]
-
-    if include_sticker:
-        parts.append(f"""
-### B.1 贴纸/海报/补丁/徽章/旗帜/T恤/装饰画/卡套/杯贴 类产品的特殊警戒 (重要)
-这类产品的"违规"藏在具体图案/文字里, 文本往往只是暗示。**只要文本出现以下任一敏感主题词 (或组合), 倾向 reject (offensive)**:
-{_fmt_sticker_themes()}
-- 产品是 **混装 N 张** (如 "400 Pcs stickers"), 描述列出多种主题里含任一敏感主题 → reject (因为整包里就算只有几张违规贴纸, 也违反政策)
-
-### B.1.1 大杂烩贴纸/徽章包 (≥20 件) 的合规门槛 — 不同于单品
-**这是 Walmart Marketplace 明文合规要求的条款**: 对于 "100 Pcs / 200 Pcs / 500 Pcs stickers" 这类 **杂烩混装大包**, 卖家**无法声明每一张单独合规**, 只要标题/五点中含任一以下特征, 应 reject (reason_category='Offensive Content'):
-  - 标题含 "Funny" / "Humor" / "Prank" / "Joke" / "Crazy" / "Weird" / "Edgy" 等暗示非主流幽默
-  - 标题提到面向 "Adults only" / "Men" (对比"大众性别中立")
-  - 描述列出多主题 (例: "Blue Collar / Welder / Electrician / Construction") 但又补 "Funny" 语感
-  - **不** reject 的情况: 纯动物/自然/卡通 (如"100 Pcs Cute Animal Stickers for Kids")、纯教育类 ("Reward Stickers for Teacher")
-说明: 常规 ≤19 张的单品/礼品套装不受此规则约束, 仍按 B.1 主题词规则判。
-""")
-
-    if include_weapons:
-        parts.append(f"""
-### B.2 仿真武器 / 仿真枪 / 军警装备玩具 (重要, 沃尔玛 Military & Law Enforcement 政策 + 15 U.S.C. § 5001)
-{_fmt_weapons_block()}
-**判定流程** (严格按顺序):
-1. 先扫豁免词, 任一命中 → **立即判 pass**, 不再考虑仿真武器逻辑
-2. 否则扫 standalone 单独命中, 或武器词 + 仿真词共现 → reject
-
-**reason_category 用 "Offensive Content"**, reason_text 明确写"仿真武器 (Military & Law Enforcement)"。
-""")
-
-    parts.append("""
-## C. 知识产权 (Intellectual Property) — 7 种子类精确识别
-
-Walmart Prohibited Products Policy: Intellectual Property 覆盖以下 7 种侵权模式.
-命中任一 → reason_category='Intellectual Property', reason_text 开头必须写子类 (如 '[外观专利]...'):
-
-### C.1 Trademark (商标) — 最常见, L2 R4/R5 已前置
-- 仿冒 Nike/Adidas/Disney/LEGO 等知名 logo 或名字
-- title 含 brand name 且 brand 字段 != 该 brand, 无 ®/™/Licensed/Authorized/Genuine/OEM 授权声明
-- 判定: 走 §A 品牌真伪逻辑, 命中写 '[商标]...'
-
-### C.2 Copyright (版权)
-- 翻印书籍/乐谱/漫画 (书类 PT 已硬禁, 这里覆盖伪装成其他 PT 的)
-- 盗版音乐/影视/游戏
-- 仿宝可梦/迪士尼/漫威原创插画 ("Pokemon art" / "Disney-style character")
-- 判定: title 或 bullets 含知名 IP 名 + 无版权授权声明 → '[版权]...'
-
-### C.3 Design Patent (外观专利) — D 开头专利, 难自动化但 LLM 能判
-- 仿爆款产品外观 (Stanley Cup 杯型 / Yeti Tumbler 仿造 / AirPods 壳仿 Apple / iPhone 壳设计)
-- title 明示 "Stanley Cup"/"Yeti style tumbler"/"AirPods case for Apple" 且 brand != 原产品方
-- 判定: 产品描述**将造型/外形**作为核心卖点 + 提及知名大牌 → '[外观专利]...'
-
-### C.4 Utility Patent (发明专利)
-- 未授权冒用专利技术 (Dyson 气旋马达 / Roomba 路径算法 / SodaStream 气瓶接口)
-- title 或 bullets 含 "same technology as Dyson" / "patented design of <brand>"
-- **较难自动检测**, 只在文本明示时判 → '[发明专利]...'
-
-### C.5 Trade Dress (商业包装)
-- 仿整体视觉识别 (可口可乐瓶形 + 红白配色 / Tiffany 蓝盒子 / Hermès 橙色包装)
-- 产品色彩/排版/包装高度相似于某品牌标志风格 → '[商业包装]...'
-
-### C.6 Publicity Rights (肖像权) — 实证高发, 严格识别
-
-#### 触发条件 (任一命中 + 无授权声明 → reject '[肖像权]...')
-1. **名人姓名 + 商品类**: title 含以下之一 **且**品类是 (T恤/杯子/海报/笔/贴纸/钥匙扣/枕头/挂画/纪念品/merch 等)
-   - **政治人物**: Trump / Biden / Obama / Harris / Putin / Xi Jinping / Modi / Zelensky
-   - **体育运动员**: LeBron / Kobe / Michael Jordan / Tom Brady / Messi / Ronaldo / Babe Ruth
-                    NFL/NBA/MLB/NHL 球员名
-   - **音乐人**: Taylor Swift / Beyoncé / Ariana Grande / Billie Eilish / Adele / Lady Gaga
-                Drake / Kanye / Kendrick Lamar / The Weeknd
-   - **Kpop/Jpop 艺人**: BTS / Blackpink / TWICE / NewJeans / Enhypen / KATSEYE / Stray Kids /
-                        TXT / Seventeen / Aespa / ITZY / IVE / LE SSERAFIM / Red Velvet /
-                        LISA / JENNIE / ROSÉ / JISOO / V / Jimin / Suga / Jungkook
-   - **演员 / 影视明星**: Tom Cruise / Johnny Depp / Margot Robbie / Zendaya / Timothée Chalamet
-2. **粉丝周边关键词组合** (即使没具体明星名, 文本明确是 fan merch → 大概率有肖像权问题)
-   - title 含 "Kpop" / "K-pop" / "K pop" + 任一商品类
-   - title 含 "Merch" / "Merchandise" / "Fandom" / "Fans" / "Fan Gift"
-   - title 含 "Autograph" / "Signed" / "Collectible" + 明星/运动员名
-3. **豁免** (有授权声明则 pass):
-   - brand 字段 = 该艺人官方品牌 (如 "BTS Official" / "Taylor Swift Eras")
-   - title 明确 "Official" / "Licensed" / "Authorized"
-
-#### 决策
-- 命中以上任一 + 无授权 → **reject**, reason_category='Intellectual Property',
-  reason_text 格式: "[Publicity Rights] 未授权使用 <人名> 肖像/姓名于 <商品类>"
-- 即使 LLM 不认识某个 Kpop 组合名字, 只要 title 有 "Kpop" + "Merch/Fans" + 商品类, 就按 fan merch reject.
-
-### C.7 Counterfeit (假冒)
-- 声称是真品但价格显著低于市场 ("100% Authentic Louis Vuitton" $29.99)
-- 不明码价便宜奢侈品 → '[假冒]...'
-
----
-
-## D. 品牌字段伪装 (brand_misuse)
-- brand 字段填 'Unbranded' / 'Generic' / 自创山寨名, 但 title/描述里明确说/展示真品牌 logo
-- → reason_category='brand_misuse', reason_text='[品牌伪装] brand=X 但描述含 Y'
+## 4. 品牌字段伪装 (brand_misuse)
+brand 填 Unbranded/Generic/小品牌, 但 title/描述暗示某大牌
+→ reject, reason_category='brand_misuse'
 
 # 输出规范 (严格 JSON)
 
 {
   "verdict": "pass" | "reject",
-  "reason_category": "<从用户 prompt 的候选列表中选一个, verdict=pass 时必须是 none>",
+  "reason_category": "<候选之一; verdict=pass 时必须是 'none'>",
   "reason_text": "<=50字中文简短原因 (verdict=pass 时可留空)",
   "signals": {
     "has_trademark_symbol": true|false,
@@ -407,21 +276,18 @@ Walmart Prohibited Products Policy: Intellectual Property 覆盖以下 7 种侵�
     "offensive_signals": ["<具体信号>",...]
   },
   "blacklist_brand_verdict": [
-    {"brand": "<命中词>", "is_real_brand": true|false, "evidence": "<简短判断理由>"}
+    {"brand": "<命中词>", "is_real_brand": true|false, "evidence": "<简短理由>"}
   ],
   "llm_confidence": "high" | "medium" | "low"
 }
 
-**重要约束**:
-- 除非证据明确, 默认 verdict=pass
-- reason_category 必须是用户 prompt 里 "候选 reason_category" 列表中的一项
-  (通常是沃尔玛官方 37 条 Prohibited Product Policy 的 category_en, 或 brand_misuse / none)
-- verdict=pass 时 reason_category 必须填 "none"
-- blacklist_brand_verdict 对 L2 R4 命中词每个都要评估 (最多评估前 10 个)
-- L2 R5 的 USPTO 商标也可以一并评估
-- 不凭空添加未命中的品牌
-""")
-    return "".join(parts)
+# 约束
+- 默认 verdict=pass, 只有清晰证据才 reject
+- reason_category 必须是 user prompt "候选 reason_category" 列表里的一项
+- verdict=pass 时 reason_category 必须是 "none"
+- blacklist_brand_verdict: 对 L2 R4/R5 命中词每个都要 verdict (最多 10 个)
+- 不凭空添加未列出的品牌
+"""
 
 
 def get_system_prompt(
@@ -500,24 +366,49 @@ Reason: <X> in these patterns must refer to a specific brand / product line;
   ✗ ®/™/© after brand name (L2 R9 already hard-blocks; if it reached L3, still treat as infringement)
   ✗ "Compatible for <X>" / "fits <X>" / "replacement for <X>" / "works with <X>"
 
-### A.3 Decision order (first match wins):
-1. Hit in A.1 syntactic position (compatible for / fits / replacement for / works with / designed for + X)
-   → **100% real brand** → **reject**
-   - reason_category='Intellectual Property'
-   - reason_text '[Utility Patent] unauthorized replacement part' or '[Trade Dress] imitation design'
-2. Hit plain in title (not A.1 position):
-   - Well-known big brand (Nike/Apple/Disney/LEGO/Marvel/Pokémon/Dyson/Zildjian/Hercules/
-     Louis Vuitton/Samsung/Sony/Bose/Stanley in brand context/…) → **reject**
-     reason_text '[Trademark] unauthorized brand reference'
-     (regardless of what brand field says, regardless of any Official/Licensed/Genuine claim in title)
-   - Likely generic (apple cider / stanley tool in tool context / summer dress / fire pit) → pass
-3. brand field ≠ brand shown in title (brand='Unbranded' but title says Disney-style)
-   → **reject** brand_misuse
+### A.3 Decision: per-term contextual judgment
 
-### A.4 Generic-word examples (may be "pass" even if blacklisted):
-  top/summer/fire/escape/weather/mountain/deluxe/premium/ultra/
-  apple (in "apple cider" / "apple pie" context) / stanley (Stanley tape/Stanley tool) /
-  fresh / nature / eagle / family / bear
+**Core principle**: Don't rely on "is famous / is in whitelist". Instead, use **full title/bullets context** to judge whether each matched term acts as a brand or as a generic word **in this specific product**.
+
+#### Step 1: Syntactic position first (hard proof)
+- Term appears in A.1 syntactic structure (compatible for X / fits X / replacement for X / works with X / designed for X / etc.) → **100% real brand** → reject
+- reason_text: '[Utility Patent] unauthorized replacement part' or '[Trade Dress] imitation design'
+
+#### Step 2: For terms in plain positions, judge per-term using 4 contextual signals
+Output is_real_brand=true|false based on:
+
+1. **Position signal**: where the term sits in title
+   - First 1-3 words + uppercase → strongly favors brand (English e-commerce titles 95% follow "Brand + Product Type + Description")
+   - Mid/late position + after a product type word → favors descriptor
+
+2. **Co-occurrence signal**: surrounding words
+   - Followed by product type ("Yaheetech Bathroom Cabinet" / "FOTOSOK Storage") → preceding word is brand
+   - Generic context ("apple cider" / "stanley tool" / "summer dress") → the term itself is generic
+   - Functional adjective context ("Modern Cabinet" / "Premium Quality") → descriptor
+
+3. **Morphology signal**: the word's spelling characteristics
+   - Made-up / non-standard English / brand-style capitalization → favors brand (Yaheetech / FOTOSOK / Sofslee / TaoHFE)
+   - Common English word in generic context → favors descriptor (bathroom / kitchen / modern / floor)
+
+4. **Brand-field signal** (corroborating evidence)
+   - Chinese drop-shippers' brand field is mostly Unbranded / N/A / made-up small brand — NOT a basis for exemption
+   - But if title's first word ≠ brand field → title word more likely to be the real brand (brand_misuse signal)
+
+#### Step 3: Output
+- **ANY** matched term judged is_real_brand=true → **whole product reject**
+  - reason_category='Intellectual Property'
+  - reason_text='[Trademark] unauthorized brand reference <X>'
+  - blacklist_brand_verdict[i] must give per-term evidence (briefly cite the 4 signals above)
+- All matched terms judged is_real_brand=false (with sound contextual evidence) → this part passes (other rules may still reject)
+
+#### A.3 examples (illustrate reasoning, NOT exhaustive lookup table)
+- title='Yaheetech Bathroom Wall Cabinet White'
+  - yaheetech: position=#1, co-occurs with Bathroom (product type), morphology=made-up → **real brand, reject**
+  - bathroom/wall/cabinet: position=mid, co-occurs in product-type context, morphology=common English → generic
+- title='Floor Storage Cabinet Modern Style'
+  - floor/storage/cabinet/modern: all signals point to descriptors → generic, pass (no real brand)
+- title='Compatible for Dyson V6 Battery'
+  - dyson: A.1 syntactic position (Compatible for X) → 100% real brand, reject (Step 1 hits directly)
 
 ## B. Offensive content (Walmart Offensive Content Policy)
 Based on policy, judge from title/description/bullets:
@@ -575,11 +466,16 @@ Any match → reason_category='Intellectual Property', AND reason_text MUST STAR
 - title contains brand name but brand_field ≠ that brand, with no ®/™/Licensed/Authorized/Genuine/OEM claim
 - Decision: follow §A brand authenticity logic; tag with '[Trademark] ...'
 
-### C.2 Copyright
+### C.2 Copyright — IP characters / cartoons / franchises (HIGH PRIORITY)
 - Reprinted books/sheet music/comics (book PTs already hard-blocked; covers disguised PTs here)
 - Pirated music / video / games
-- Copies of Pokémon / Disney / Marvel original art ("Pokemon art" / "Disney-style character")
-- Decision: title or bullets contain famous IP name without license → '[Copyright] ...'
+- **Cartoon / IP character likenesses or names without license** — STRICT IP infringement.
+
+#### Decision
+title/bullets contain ANY cartoon/movie/game/IP character name (Disney/Marvel/Pokemon/Sanrio/Nintendo/Anime/Star Wars/Harry Potter/kids shows IP) AND product is merch (sticker/plush/toy/costume/T-shirt/mug/poster/keychain/lunch box/backpack/birthday party supplies) → **REJECT '[Copyright] unauthorized use of <IP> on <product type>'**.
+"Style/inspired" wording ("Disney-style"/"Pokemon-style") also REJECT.
+Generic word collision with IP (e.g. "cross stitch kit" — stitch is sewing term) judged by context.
+Exception: brand field = official IP brand + Official/Licensed claim → pass (rare).
 
 ### C.3 Design Patent — D-prefixed US patents; hard to automate but LLM can judge
 - Imitating popular product shapes (Stanley Cup tumbler / Yeti Tumbler / AirPods case for Apple / iPhone case design)
@@ -735,8 +631,8 @@ def _build_user_prompt(
 ) -> str:
     bullets_txt = "\n".join(f"  - {b}" for b in product.bullet_points[:5]) or "  (无)"
     desc = (product.long_description or "").strip()
-    if len(desc) > 800:
-        desc = desc[:800] + "...(已截断)"
+    if len(desc) > 600:
+        desc = desc[:600] + "...(已截断)"
 
     l2_txt, r4_brands = _summarize_l2_hits(l2)
     policy_txt = l3_policy_router.format_for_prompt(policies)
@@ -780,32 +676,17 @@ Amazon 类目: {product.amazon_category_path or '(空)'}
 
 {l2_txt}
 
-# 待评估的品牌/商标词 (来自 L2 R4+R5, 前 10 个, 判断是真品牌还是通用词)
+# 待评估的品牌/商标词 (来自 L2 R4+R5, 前 10 个, 综合上下文判 is_real_brand)
 
 {brand_list}
 
-# 沃尔玛相关禁售政策 (重点参考, 命中任一 → reason_category 填对应 category_en)
+# 沃尔玛相关禁售政策 (这些是 LLM 训练数据外的内部规则, 命中任一 → reason_category 填对应 category_en)
 
 {policy_txt}
 
-# 候选 reason_category (verdict 字段为 reject 时必须从此列表选一)
+# 候选 reason_category (verdict=reject 时必须从此列表选一)
 
 {cat_candidates_txt}
-
-# 任务提醒
-
-1. **品牌真伪**: 对上面列出的每个命中词, 结合标题/描述语境, 判 is_real_brand
-   - 通用英文词 (top/summer/must/chair/fire/escape/weather/mountain/deluxe/modern/classic/pro...) → false
-   - 除非产品文本有 ®/™/Official/Licensed/Authentic/OEM for 等授权声明 → 才判 true
-2. **冒犯性**: 对照上面的政策, 判断是否明确违反
-   - Couples/Intimacy/Sensual 等性暗示关键词 + 相关画面暗示 → reason_category="Offensive Content"
-   - 贴纸/海报/T恤/配件 上可能印的种族/政治符号 → reason_category="Offensive Content"
-3. **类目合规**: 命中某条政策 (如 PFAS Chemicals / Baby Products / Hazardous Items) → reason_category 用政策的 category_en 原文
-4. **品牌伪装**: brand='Unbranded' 但描述暗示某大牌 → reason_category="brand_misuse"
-5. **飞书人工标注**: 若 pt_meta.notes 含 "⚠️T&S抽查/高风险" 等警示, 判断时倾向更严格
-6. **默认 pass** — 只有清晰证据才 reject, verdict=pass 时 reason_category="none"
-
-严格按 system prompt 中的 JSON 格式输出。
 """
 
 
@@ -961,6 +842,21 @@ def _coerce_result(
     if not isinstance(brand_verdict, list):
         brand_verdict = []
 
+    # ⭐ 强制覆盖: 任一命中词被 LLM 判 is_real_brand=true → 整品 reject
+    # (即使 LLM 自己输出 verdict=pass — 因为 §A 决策规则要求逐词判定)
+    real_brand_hits = [
+        v for v in brand_verdict
+        if isinstance(v, dict) and v.get("is_real_brand") is True
+    ]
+    if verdict == "pass" and real_brand_hits:
+        first = real_brand_hits[0].get("brand") or "?"
+        log.info("L3 verdict override: pass→reject, is_real_brand=true: %s",
+                 [v.get("brand") for v in real_brand_hits])
+        verdict = "reject"
+        category_lower = "intellectual property"
+        if not reason_text:
+            reason_text = f"[Trademark] 未授权引用品牌名 {first}"
+
     signals = raw.get("signals") or {}
     if not isinstance(signals, dict):
         signals = {}
@@ -1029,16 +925,21 @@ async def judge(product: ProductInfo, l1: L1Result, l2: L2Result) -> L3Result:
         system_prompt = get_system_prompt(l1.walmart_category, l1.walmart_product_type, text_hint)
         user_prompt = _build_user_prompt(product, l1, l2, routed_policies)
 
-    # === 混合路由: 高 offensive 语义风险产品用 qwen-plus, 其他用默认 ===
-    # 仅 dashscope provider 下激活 (gemini 保持默认 gemini-2.5-flash-lite)
-    # 用 should_use_strong_l3_model (覆盖成人暗示/政治/军事/低俗幽默), 比 L4 aggressive 宽松
+    # === 混合路由: 高 offensive 语义风险产品启用 thinking 模式 (深度推理), 其他用快速非 thinking ===
+    # dashscope: turbo (默认) → plus (升级)
+    # deepseek: v4-flash thinking=False 默认 → v4-flash thinking=True 升级 (同模型, 开关 thinking)
+    _enable_thinking = False
     _model_override: str | None = None
-    if _settings.llm_text_provider == "dashscope":
-        from .aggressive_offensive import should_use_strong_l3_model
-        if should_use_strong_l3_model(l1, product):
+    from .aggressive_offensive import should_use_strong_l3_model
+    if should_use_strong_l3_model(l1, product):
+        if _settings.llm_text_provider == "dashscope":
             _model_override = "qwen-plus"
-            log.info("L3 混合路由: %s 走 qwen-plus (pt=%r, title=%r)",
-                     product.asin, l1.walmart_product_type, (product.title or "")[:60])
+        elif _settings.llm_text_provider == "deepseek":
+            # v4-flash 同模型, 切换 thinking=True 走推理 (官方文档: extra_body={"thinking":{"type":"enabled"}})
+            _enable_thinking = True
+        log.info("L3 混合路由: %s 走 %s thinking=%s (pt=%r, title=%r)",
+                 product.asin, _model_override or "(default)", _enable_thinking,
+                 l1.walmart_product_type, (product.title or "")[:60])
 
     try:
         raw = await llm_client.chat_json(
@@ -1046,10 +947,12 @@ async def judge(product: ProductInfo, l1: L1Result, l2: L2Result) -> L3Result:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            model=_model_override,       # None = 用 settings.llm_text_model (默认 turbo)
-            max_tokens=1500,
+            model=_model_override,       # None = 用 settings.llm_text_model (deepseek-v4-flash)
+            max_tokens=4096 if _enable_thinking else 1500,  # thinking 占大头, 给 4K
             temperature=0.1,
             cache=True,
+            thinking=_enable_thinking,   # deepseek 路径下生效
+            reasoning_effort="high",
         )
     except Exception as e:  # noqa: BLE001
         log.error("L3 LLM call failed for %s: %s", product.asin, e)

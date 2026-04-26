@@ -18,12 +18,15 @@ import asyncio
 import json
 import logging
 import re
+import time
 from typing import Any
 
 from openai import APIError, APITimeoutError, AsyncOpenAI, RateLimitError
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from config import get_settings
+
+from . import usage_logger
 
 log = logging.getLogger(__name__)
 
@@ -123,6 +126,7 @@ async def vision_json(
         reraise=True,
     ):
         with attempt:
+            t0 = time.monotonic()
             async with sem:
                 try:
                     resp = await _client().chat.completions.create(
@@ -144,6 +148,10 @@ async def vision_json(
                         )
                     else:
                         raise
+            usage_logger.log_usage_from_response(
+                m, resp, duration_ms=int((time.monotonic() - t0) * 1000),
+                image_count=len(imgs),
+            )
             text = (resp.choices[0].message.content or "").strip()
             return _json_from_text(text)
     raise RuntimeError("unreachable")  # pragma: no cover

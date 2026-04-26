@@ -37,6 +37,8 @@ class ProductDetail:
     long_description: str | None = None
     image_urls: list[dict[str, Any]] = field(default_factory=list)  # [{url, is_main}]
     amazon_category_path: str | None = None
+    stock_count: int | None = None      # DMIT.stock_count
+    stock_status: str | None = None     # DMIT.stock_status
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -85,6 +87,13 @@ class ProductDetail:
             except Exception:
                 pass
 
+        # 库存信息 — DMIT 字段是 stock_count (int) 和 stock_status (str)
+        sc_raw = raw.get("stock_count")
+        try:
+            stock_count = int(sc_raw) if sc_raw is not None and str(sc_raw).strip() != "" else None
+        except (ValueError, TypeError):
+            stock_count = None
+
         return cls(
             asin=raw.get("asin") or raw.get("ASIN") or "",
             title=raw.get("title"),
@@ -94,6 +103,8 @@ class ProductDetail:
             long_description=raw.get("long_description") or raw.get("description"),
             image_urls=images,
             amazon_category_path=category_path,
+            stock_count=stock_count,
+            stock_status=raw.get("stock_status"),
             raw=raw,
         )
 

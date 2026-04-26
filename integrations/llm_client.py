@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from typing import Any
 
 from openai import APIError, APITimeoutError, AsyncOpenAI, RateLimitError
@@ -22,7 +23,7 @@ from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt,
 
 from config import get_settings
 
-from . import llm_cache
+from . import llm_cache, usage_logger
 
 log = logging.getLogger(__name__)
 
@@ -93,19 +94,36 @@ async def chat_json(
     temperature: float = 0.1,
     max_tokens: int = 1024,
     cache: bool = False,
+    thinking: bool = False,
+    reasoning_effort: str = "high",
 ) -> dict[str, Any]:
     """调文本 LLM, 强制 JSON 输出。messages 格式同 OpenAI chat completions。
 
     cache=True 时查 llm_cache 表, 命中直接返回 (不计 hit_count, 不调 LLM)。
     缓存键 = sha256(model + messages + temperature + max_tokens) 前 32 位。
 
-    provider 路由 (settings.llm_text_provider): dashscope (默认) / gemini
+    thinking / reasoning_effort: 仅 deepseek provider 生效, 透传到 deepseek_client.
+        deepseek-v4-flash 默认开 thinking, 这里默认 False (禁用) 以走 chat 速度.
+
+    provider 路由 (settings.llm_text_provider): dashscope (默认) / deepseek / gemini
     """
     s = get_settings()
 
     # 按 provider 路由; 缓存在前面统一处理 (key 含 model 名, 不同 provider 不会混)
     use_gemini = (s.llm_text_provider == "gemini" and model is None)
-    m = model or (s.gemini_text_model if use_gemini else s.llm_text_model)
+    use_deepseek = (s.llm_text_provider == "deepseek" and model is None)
+    if model:
+        # 显式传 model 时, 按 model 名前缀路由
+        if model.startswith("deepseek"):
+            use_deepseek = True
+        elif model.startswith("gemini"):
+            use_gemini = True
+    if use_deepseek:
+        m = model or s.deepseek_model
+    elif use_gemini:
+        m = model or s.gemini_text_model
+    else:
+        m = model or s.llm_text_model
 
     # -------- cache 命中短路 (provider 无关) --------
     cache_key: str | None = None
@@ -113,7 +131,23 @@ async def chat_json(
         cache_key = llm_cache._input_hash(m, messages, temperature=temperature, max_tokens=max_tokens)
         cached = await llm_cache.cache_get(cache_key)
         if cached is not None:
+            usage_logger.log_usage(model=m, cached=True)   # 计 0 成本但留行
             return cached
+
+    if use_deepseek:
+        from . import deepseek_client
+        result = await deepseek_client.chat_json(
+            messages, model=m, temperature=temperature, max_tokens=max_tokens,
+            thinking=thinking, reasoning_effort=reasoning_effort,
+        )
+        if cache_key and result and "_raw" not in result:
+            await llm_cache.cache_put(
+                cache_key, m,
+                {"messages": messages, "temperature": temperature,
+                 "max_tokens": max_tokens, "thinking": thinking},
+                result,
+            )
+        return result
 
     if use_gemini:
         from . import gemini_client
@@ -138,6 +172,7 @@ async def chat_json(
         reraise=True,
     ):
         with attempt:
+            t0 = time.monotonic()
             async with sem:
                 try:
                     resp = await _client().chat.completions.create(
@@ -159,6 +194,9 @@ async def chat_json(
                         )
                     else:
                         raise
+            usage_logger.log_usage_from_response(
+                m, resp, duration_ms=int((time.monotonic() - t0) * 1000),
+            )
             text = (resp.choices[0].message.content or "").strip()
             result = _json_from_text(text)
             # -------- cache 写入 (仅缓存有效 JSON 输出) --------
@@ -240,6 +278,7 @@ async def vision_json(
         reraise=True,
     ):
         with attempt:
+            t0 = time.monotonic()
             async with sem:
                 resp = await _client().chat.completions.create(
                     model=m,
@@ -247,6 +286,10 @@ async def vision_json(
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
+            usage_logger.log_usage_from_response(
+                m, resp, duration_ms=int((time.monotonic() - t0) * 1000),
+                image_count=len(imgs),
+            )
             text = (resp.choices[0].message.content or "").strip()
             return _json_from_text(text)
     raise RuntimeError("unreachable")  # pragma: no cover

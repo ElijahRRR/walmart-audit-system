@@ -49,6 +49,11 @@ class Settings:
     gemini_vision_model: str
     gemini_text_model: str
 
+    # --- DeepSeek (文本 LLM, OpenAI 兼容) ---
+    deepseek_api_key: str
+    deepseek_base_url: str
+    deepseek_model: str
+
     # --- Lark ---
     lark_wiki_blacklist: str
     lark_wiki_category_map: str
@@ -92,16 +97,23 @@ def get_settings() -> Settings:
         llm_text_provider=_get("LLM_TEXT_PROVIDER", "dashscope"),
         # 火山方舟 (豆包视觉) - 默认 provider (ce200 eval 证实优于 qwen-vl-plus, 独家救回 14 vs 3)
         vision_provider=_get("VISION_PROVIDER", "volcengine"),
-        volcengine_api_key=_get("VOLCENGINE_API_KEY", "ark-3d0011dc-6dcd-4a8d-bf30-e2751eba1b24-41d0c"),
+        volcengine_api_key=_get("VOLCENGINE_API_KEY", ""),  # 必须从 .env 读, 避免硬编码 key 泄漏
         volcengine_base_url=_get("VOLCENGINE_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"),
-        # 有效模型: doubao-seed-1-6-250615 / doubao-1.5-vision-pro-32k-250115
-        volcengine_vision_model=_get("VOLCENGINE_VISION_MODEL", "doubao-seed-1-6-250615"),
+        # 有效模型:
+        #   doubao-seed-1-6-flash-250615  (默认, 便宜 30%, 多图视觉够用)
+        #   doubao-seed-1-6-250615        (full, 更稳但贵)
+        #   doubao-1.5-vision-pro-32k-250115
+        volcengine_vision_model=_get("VOLCENGINE_VISION_MODEL", "doubao-seed-1-6-flash-250615"),
         # Google Gemini (OpenAI-compatible endpoint: /v1beta/openai)
         # AI Studio key (免费额度够用; 旧 Vertex key "AQ.Ab8RN..." 预付费耗尽)
         gemini_api_key=_get("GEMINI_API_KEY", "AIzaSyC_aC0bm2uatri515mmEL5pKATmknDOkIY"),
         gemini_base_url=_get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/"),
         gemini_vision_model=_get("GEMINI_VISION_MODEL", "gemini-2.5-flash-lite"),
         gemini_text_model=_get("GEMINI_TEXT_MODEL", "gemini-2.5-flash-lite"),
+        # DeepSeek (api.deepseek.com OpenAI 兼容)
+        deepseek_api_key=_get("DEEPSEEK_API_KEY", ""),  # 必须从 .env 读
+        deepseek_base_url=_get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+        deepseek_model=_get("DEEPSEEK_MODEL", "deepseek-v4-flash"),
         lark_wiki_blacklist=_get("LARK_WIKI_BLACKLIST", "UhZJw3EtsiFN9skbG0Ac24Dgn4b"),
         lark_wiki_category_map=_get("LARK_WIKI_CATEGORY_MAP", "UKdZwr7JqiO6UckjSnPcwTCgnvd"),
         lark_sheet_violation=_get("LARK_SHEET_VIOLATION", "YlA1szPAAhW7CCtmG5hcp6vkndd"),

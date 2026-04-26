@@ -14,7 +14,7 @@
   R6 (已删除) — "Compatible for <Brand>" 规则误伤率高, 改 L3 LLM 判
   R7 促销/宣称性内容          content_promotional      -20    (Walmart Content Standards 禁 promotional claims)
   R8 Walmart 严格合规敏感词    walmart_strict_sensitive -30    (文化/宗教/政治/武器/成人 7 子类)
-  R9 title 含 ® / ™ / ℠      trademark_symbol_in_title -100  (强 IP 信号, 搬运卖家无授权硬拦, 自品牌除外)
+  R9 (已迁移到 Phase0) — title 含 ®/™/℠/© 提前在 L0 拦截, rule_code=phase0_trademark_symbol
 
 **注意**:
   - 原 R1 (brand 完全等匹配黑名单) 已移出 L2, 由 Phase0 前置处理 (rule_code=phase0_brand_blacklist)
@@ -900,6 +900,62 @@ _R8_SENSITIVE_PATTERNS = {
         r"\bcannabis\s+(?:leaf|art|sticker)\b",
         r"\bweed\s+(?:leaf|sticker|sign)\b",
     ],
+    "cartoon_ip_character": [
+        # ===== Disney / Pixar 角色与作品 =====
+        r"\b(?:mickey|minnie)\s+mouse\b",
+        r"\b(?:donald|daisy)\s+duck\b",
+        r"\b(?:goofy|pluto|chip\s+(?:and|&|n)\s+dale)\b",
+        r"\bdisney(?:\s+(?:princess|frozen|aladdin|cars))?\b",
+        r"\b(?:elsa|anna|olaf|sven)\b",                       # Frozen
+        r"\b(?:moana|maui)\b",                                # Moana
+        r"\b(?:simba|mufasa|nala|scar|timon|pumbaa|lion\s+king)\b",
+        r"\b(?:winnie\s+the\s+pooh|tigger|eeyore|piglet)\b",
+        r"\b(?:lilo\s*(?:and|&)?\s*stitch|\bstitch\s+(?:plush|toy|doll|costume|sticker|backpack)|stitch\s+&\s+lilo)\b",
+        r"\b(?:woody|buzz\s+lightyear|toy\s+story|jessie\s+toy)\b",
+        r"\b(?:nemo|dory|finding\s+(?:nemo|dory))\b",
+        r"\b(?:incredibles|wall[-\s]?e|ratatouille|up\s+pixar)\b",
+        r"\b(?:lightning\s+mcqueen|cars\s+(?:movie|disney))\b",
+        r"\b(?:little\s+mermaid|ariel\s+(?:disney|princess)|cinderella|snow\s+white|rapunzel|tangled|brave\s+pixar|aladdin|jasmine|tiana)\b",
+        # ===== Marvel / DC =====
+        r"\b(?:marvel|avengers|x[-\s]?men)\b",
+        r"\b(?:iron\s+man|spider[-\s]?man|captain\s+america|thor\s+(?:marvel|hammer)|hulk\s+(?:marvel|smash)|black\s+widow|black\s+panther|ant[-\s]?man|doctor\s+strange|deadpool|wolverine|hawkeye|loki\s+marvel|scarlet\s+witch)\b",
+        r"\b(?:dc\s+comics|justice\s+league)\b",
+        r"\b(?:batman|superman|wonder\s+woman|aquaman|harley\s+quinn|joker\s+dc)\b",
+        # ===== Pokemon / Nintendo / Sega =====
+        r"\b(?:pokemon|pok[eé]mon|pikachu|charizard|squirtle|bulbasaur|eevee|mewtwo|jigglypuff)\b",
+        r"\b(?:super\s+mario|mario\s+(?:bros|kart|party|odyssey)|luigi\s+nintendo|princess\s+peach|bowser|toad\s+nintendo|yoshi)\b",
+        r"\b(?:donkey\s+kong|sonic\s+(?:hedgehog|the))\b",
+        r"\b(?:zelda|link\s+(?:zelda|nintendo)|breath\s+of\s+the\s+wild)\b",
+        # ===== Sanrio / Hello Kitty =====
+        r"\b(?:hello\s+kitty|sanrio|kuromi|my\s+melody|cinnamoroll|pompompurin|gudetama|keroppi|pochacco)\b",
+        # ===== Studio Ghibli / 日本动漫 =====
+        r"\b(?:studio\s+ghibli|totoro|kiki'?s\s+delivery|spirited\s+away|princess\s+mononoke|howl'?s\s+moving)\b",
+        r"\b(?:naruto|sasuke\s+naruto|kakashi)\b",
+        r"\b(?:one\s+piece|luffy\s+pirate|zoro\s+anime)\b",
+        r"\b(?:dragon\s+ball|goku\s+(?:dbz|saiyan)|vegeta\s+dbz)\b",
+        r"\b(?:demon\s+slayer|kimetsu\s+no\s+yaiba|tanjiro|nezuko)\b",
+        r"\b(?:attack\s+on\s+titan|jujutsu\s+kaisen|gojo\s+satoru|chainsaw\s+man)\b",
+        r"\b(?:my\s+hero\s+academia|deku\s+anime)\b",
+        # ===== Star Wars / Harry Potter =====
+        r"\b(?:star\s+wars|mandalorian|grogu|baby\s+yoda|darth\s+vader|stormtrooper|jedi|sith\s+lord|millennium\s+falcon|kylo\s+ren|rey\s+star\s+wars)\b",
+        r"\b(?:harry\s+potter|hogwarts|dumbledore|hermione|gryffindor|slytherin|hufflepuff|ravenclaw|voldemort|wizarding\s+world|fantastic\s+beasts)\b",
+        # ===== 儿童动画 =====
+        r"\b(?:peppa\s+pig|george\s+pig|paw\s+patrol|chase|skye\s+paw|marshall\s+pup)\b",
+        r"\b(?:bluey|cocomelon|coco\s+melon|baby\s+shark|miss\s+rachel)\b",
+        r"\b(?:my\s+little\s+pony|mlp\s+(?:plush|toy)|equestria)\b",
+        r"\b(?:trolls?\s+(?:movie|world)|despicable\s+me|minions?\s+(?:movie|plush|toy)|gru\s+despicable|shrek\s+(?:movie|donkey))\b",
+        r"\b(?:scooby[-\s]?doo|tom\s+(?:and|&)\s+jerry|smurfs)\b",
+        r"\b(?:sponge\s*bob|patrick\s+star|squidward|sandy\s+cheeks|bikini\s+bottom)\b",
+        r"\b(?:rugrats|teletubbies|sesame\s+street|elmo\s+sesame|big\s+bird|cookie\s+monster\s+sesame)\b",
+        r"\b(?:teenage\s+mutant\s+ninja\s+turtles|tmnt|leonardo\s+turtle|donatello\s+turtle|raphael\s+turtle)\b",
+        r"\b(?:power\s+rangers|transformers|optimus\s+prime|bumblebee\s+transformers|megatron)\b",
+        # ===== Game / Lego =====
+        r"\b(?:fortnite|minecraft|roblox|among\s+us|rainbow\s+friends)\b",
+        r"\blego\s+(?:set|bricks|block|figure|minifig|kit|movie|character)\b",
+        # ===== 其他流行 IP =====
+        r"\b(?:five\s+nights\s+at\s+freddy'?s|fnaf|huggy\s+wuggy|poppy\s+playtime)\b",
+        r"\b(?:barbie\s+(?:doll|movie|fashion)|bratz\s+doll)\b",
+    ],
 }
 
 # 编译所有子类的 regex
@@ -989,7 +1045,7 @@ def evaluate(product: ProductInfo, l1: L1Result) -> L2Result:
         _rule_trademark_live(product, l1),
         _rule_content_promotional(product),        # R7 内容宣称
         _rule_walmart_strict_sensitive(product),   # R8 Walmart 严格合规敏感词
-        _rule_trademark_symbol_in_title(product),  # R9 title 含 ® 硬拦
+        # R9 (trademark_symbol_in_title) 已迁移到 Phase0 (phase0_trademark), 这里不再调用
     ]
     for hits in rules:
         for h in hits:

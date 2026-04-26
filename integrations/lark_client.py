@@ -155,6 +155,36 @@ def read_paginated(
     return all_rows
 
 
+def write_range(
+    spreadsheet_token: str,
+    a1_range: str,
+    values: list[list[Any]],
+    *,
+    as_user: bool = True,
+) -> dict[str, Any]:
+    """写入 A1 范围 (overwrite). values 形状必须和 range 匹配.
+
+    默认走 user 身份 (本机已 lark-cli auth login, 无需在飞书后台给 bot 加权限).
+    as_user=False 时走 bot (需给 bot 应用加表格"可编辑"协作者权限, 适合跨机部署).
+
+    例: write_range(tok, "ea2b2a!C2:E2", [["Bed Pillows","pass",""]])
+    """
+    args = [
+        "sheets",
+        "+write",
+        "--spreadsheet-token",
+        spreadsheet_token,
+        "--range",
+        a1_range,
+        "--values",
+        json.dumps(values, ensure_ascii=False),
+    ]
+    if as_user:
+        args += ["--as", "user"]
+    payload = _run(args)
+    return payload.get("data") or {}
+
+
 def find_cells(
     spreadsheet_token: str,
     sheet_id: str,
@@ -195,5 +225,6 @@ __all__ = [
     "read_range",
     "read_full_sheet",
     "read_paginated",
+    "write_range",
     "find_cells",
 ]

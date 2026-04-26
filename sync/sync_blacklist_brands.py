@@ -49,6 +49,27 @@ def _norm_brand(v: object) -> str:
     return s
 
 
+# 非品牌占位符 - Amazon/DMIT 里 "没品牌" 的字面量.
+# 源头就阻断, 不让它们进 blacklist_brands 表 (进了会让 Phase0 把正常商品全挡).
+_NON_BRAND_PLACEHOLDERS = {
+    "n/a", "na", "n.a.", "n.a",
+    "none", "null", "nil",
+    "unbranded", "no brand", "no brand name", "no name",
+    "generic", "oem", "various",
+    "不详", "无品牌", "无",
+    "-", "--", "---",
+}
+
+
+def _is_garbage_brand(brand: str) -> bool:
+    """过滤表头残留 / 布尔字符串 / 非品牌占位符."""
+    if brand in {"品牌名", "True", "False"}:
+        return True
+    if brand.lower() in _NON_BRAND_PLACEHOLDERS:
+        return True
+    return False
+
+
 def _row_to_record_simple(row: list, source_label: str) -> dict | None:
     """jF8dOw 精简表行解析: [品牌名, 来源, 入库日期]."""
     if not row:
@@ -56,7 +77,7 @@ def _row_to_record_simple(row: list, source_label: str) -> dict | None:
     padded = row + [None] * (3 - len(row))
     brand, origin, imported_at = padded[:3]
     brand = _norm_brand(brand)
-    if not brand or brand in {"品牌名", "True", "False"}:
+    if not brand or _is_garbage_brand(brand):
         return None
     return {
         "brand": brand,
@@ -75,7 +96,7 @@ def _row_to_record_detailed(row: list, source_label: str) -> dict | None:
     padded = row + [None] * (10 - len(row))
     company, brand, serial_no, reg_no, status, nice_code, nice_zh, nice_en, desc, imported_at = padded[:10]
     brand = _norm_brand(brand)
-    if not brand or brand in {"品牌名", "True", "False"}:
+    if not brand or _is_garbage_brand(brand):
         return None
     return {
         "brand": brand,

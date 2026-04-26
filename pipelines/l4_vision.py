@@ -41,6 +41,11 @@ log = logging.getLogger(__name__)
 _IMG_DL_SEM = asyncio.Semaphore(30)
 _IMG_DL_TIMEOUT = 8.0
 
+# L4 判决必须**确定性**: 合规审计要求同一商品多次重跑结果一致.
+# temperature>0 会让 vision LLM 对边缘 case (场景图里的小 logo) 有 variance,
+# 造成同一 ASIN 一次 pass 一次 reject, 无法闭环.
+_L4_TEMPERATURE = 0.0
+
 
 async def _download_and_b64(url: str) -> str | None:
     """本地下载图 → data URL (base64 内联). 失败返回 None.
@@ -501,6 +506,7 @@ async def judge(
                 image_urls=data_urls,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
+                temperature=_L4_TEMPERATURE,
                 max_tokens=1024,
             )
         elif s.vision_provider == "volcengine":
@@ -509,6 +515,7 @@ async def judge(
                 image_urls=data_urls,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
+                temperature=_L4_TEMPERATURE,
                 max_tokens=1024,
             )
         else:  # qwen (DashScope qwen-vl-plus)
@@ -517,7 +524,7 @@ async def judge(
                 resp = await _client().chat.completions.create(
                     model=s.llm_vision_model,
                     messages=messages,
-                    temperature=0.1,
+                    temperature=_L4_TEMPERATURE,
                     max_tokens=1024,
                 )
             text = (resp.choices[0].message.content or "").strip()
