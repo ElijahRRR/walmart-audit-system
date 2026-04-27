@@ -117,6 +117,113 @@ def upsert_product(product: ProductInfo) -> None:
             )
 
 
+def batch_persist(items: list[tuple[ProductInfo, AuditOutcome]]) -> int:
+    """批量写入 products + audit_runs + audit_hits (一个 chunk 完成后调一次).
+
+    架构 (用户 2026-04-27 优化):
+      - 旧: 每 ASIN 在协程里 await asyncio.to_thread 写 3 次 DB
+        700 协程同时争 14 PG 连接 → 协程被 ThreadPool 串行化 → event loop 卡顿
+      - 新: chunk 完成后一次性 batch INSERT
+        减少: connection 占用 (700→14), 事务提交 (3000→3), 锁竞争 (基本消除)
+
+    Args:
+        items: list of (ProductInfo, AuditOutcome)
+    Returns:
+        实际写入 audit_runs 的行数 (0 表示空 chunk).
+    """
+    if not items:
+        return 0
+
+    # 1. products 批量 upsert (executemany)
+    product_rows = [
+        (
+            p.asin, p.title, p.brand, p.country_of_origin,
+            to_jsonb(p.bullet_points), p.long_description,
+            to_jsonb(p.image_urls), p.amazon_category_path,
+        )
+        for p, _ in items
+    ]
+
+    # 2. audit_runs 批量 INSERT (RETURNING run_id 拿回, 后面写 hits 用)
+    audit_run_rows = []
+    for _, outcome in items:
+        audit_run_rows.append((
+            outcome.asin,
+            outcome.l1.walmart_product_type,
+            outcome.l1.pt_confidence,
+            outcome.l1.pt_source,
+            outcome.score_final,
+            outcome.verdict,
+            outcome.stage_stopped_at,
+            outcome.l3.verdict if outcome.l3 else "skip",
+            outcome.l3.reason_category if outcome.l3 else None,
+            outcome.l3.reason_text if outcome.l3 else None,
+            outcome.l4.verdict if outcome.l4 else "skip",
+            to_jsonb(outcome.l4.image_issues) if outcome.l4 else "[]",
+        ))
+
+    with db_conn() as c:
+        with c.cursor() as cur:
+            # products
+            cur.executemany(
+                """
+                INSERT INTO products(
+                    asin, title, brand, country_of_origin,
+                    bullet_points, long_description, image_urls,
+                    amazon_category_path, raw_fetched_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s, NOW(), NOW())
+                ON CONFLICT (asin) DO UPDATE SET
+                  title = EXCLUDED.title, brand = EXCLUDED.brand,
+                  country_of_origin = EXCLUDED.country_of_origin,
+                  bullet_points = EXCLUDED.bullet_points,
+                  long_description = EXCLUDED.long_description,
+                  image_urls = EXCLUDED.image_urls,
+                  amazon_category_path = EXCLUDED.amazon_category_path,
+                  updated_at = NOW()
+                """,
+                product_rows,
+            )
+
+            # audit_runs - 用 INSERT ... RETURNING 一次拿所有 run_id
+            # PostgreSQL 单 INSERT 多 VALUES 子句 + RETURNING 是原子的
+            placeholders = ",".join(["(%s, %s, %s, %s, 100, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)"] * len(audit_run_rows))
+            flat_args: list = []
+            for r in audit_run_rows:
+                flat_args.extend(r)
+            cur.execute(
+                f"""
+                INSERT INTO audit_runs(
+                    asin, walmart_product_type, pt_confidence, pt_source,
+                    score_start, score_final, verdict, stage_stopped_at,
+                    l3_verdict, l3_reason_category, l3_reason_text,
+                    l4_verdict, l4_issues
+                ) VALUES {placeholders}
+                RETURNING run_id
+                """,
+                flat_args,
+            )
+            run_ids = [int(r["run_id"]) for r in cur.fetchall()]
+            assert len(run_ids) == len(items), f"run_ids {len(run_ids)} != items {len(items)}"
+
+            # audit_hits 批量
+            hit_tuples: list[tuple] = []
+            for run_id, (_, outcome) in zip(run_ids, items):
+                for h in outcome.all_hits:
+                    hit_tuples.append(
+                        (run_id, h.stage, h.rule_code, h.penalty, to_jsonb(h.detail))
+                    )
+            if hit_tuples:
+                cur.executemany(
+                    """
+                    INSERT INTO audit_hits(run_id, stage, rule_code, penalty, detail)
+                    VALUES (%s, %s, %s, %s, %s::jsonb)
+                    """,
+                    hit_tuples,
+                )
+
+            return len(run_ids)
+
+
 # =============================================================
 # Pipeline
 # =============================================================

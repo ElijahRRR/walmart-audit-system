@@ -47,17 +47,25 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------
 # 配置 (可用 env / CLI 覆盖)
 # ---------------------------------------------------------------
+# 默认指向"在线产品"大表 (用户 2026-04-27 建立, 11 万 ASIN)
+# 旧 4326 ASIN 表 token = "PDsRsfGRrhmWq1tOt25cHgUAnPh", sheet = "ea2b2a"
+# 用 --spreadsheet-token / --sheet-id 切到任意表
 
-SPREADSHEET_TOKEN = "PDsRsfGRrhmWq1tOt25cHgUAnPh"
-SHEET_ID = "ea2b2a"
+SPREADSHEET_TOKEN = "MO2escopjhLFzVtOzVlcq8xvnmI"
+SHEET_ID = "e7834a"
 
-# 列位置 (0-based, 与读取出的二维数组对齐)
-COL_ASIN = 0    # A
-COL_PT = 2      # C
-COL_VERDICT = 3 # D
-COL_REASON = 4  # E
+# 列位置 (0-based, 与读取出的二维数组对齐) — 新表 v2 8 列结构
+#   A ASIN  B 店铺/上架号  C walmart_product_type  D walmart_category
+#   E 审核结果  F 阻拦层  G reason_category  H 理由详情
+COL_ASIN = 0          # A
+COL_PT = 2            # C
+COL_CATEGORY = 3      # D
+COL_VERDICT = 4       # E
+COL_STAGE = 5         # F
+COL_REASON_CAT = 6    # G
+COL_REASON = 7        # H
 
-# D 列里视为"待审"的值 (空/pending/error 都重跑)
+# E 列(verdict)里视为"待审"的值 (空/pending/error 都重跑)
 RETRY_STATES = ("", "pending", "error")
 
 # 数据行起始 (跳过表头)
@@ -76,27 +84,62 @@ class PendingRow:
 
     @property
     def write_range(self) -> str:
-        """对应 C:E 三列的写回 range."""
-        return f"{SHEET_ID}!C{self.row_num}:E{self.row_num}"
+        """对应 C:H 六列的写回 range (新表 v2)."""
+        return f"{SHEET_ID}!C{self.row_num}:H{self.row_num}"
 
 
-def scan_pending(rows: list[list[Any]], *, limit: int | None = None) -> list[PendingRow]:
+def scan_pending_range(rows: list[list[Any]], *,
+                        base_row: int,
+                        limit: int | None = None,
+                        force_rescan: bool = False) -> list[PendingRow]:
+    """从指定 row_num 开始的 chunk 里扫待审行 (大表分批模式).
+
+    Args:
+        rows: read_row_range 返回的二维数组 (rows[0] 对应 sheet 的 base_row).
+        base_row: rows[0] 对应的真实 sheet row_num (1-based).
+        limit: 取前 N 条 (None 不限).
+        force_rescan: True 时忽略已有 verdict, 强制重审 (用于规则更新后整批重跑).
+    """
+    pending: list[PendingRow] = []
+    for idx, row in enumerate(rows):
+        asin = _cell(row, COL_ASIN)
+        verdict = _cell(row, COL_VERDICT)
+        if not asin:
+            continue
+        if not force_rescan:
+            if verdict and verdict not in RETRY_STATES:
+                continue
+        pending.append(PendingRow(row_num=base_row + idx, asin=asin))
+        if limit and len(pending) >= limit:
+            break
+    return pending
+
+
+def scan_pending(rows: list[list[Any]], *,
+                 limit: int | None = None,
+                 offset: int = 0) -> list[PendingRow]:
     """扫全表找待审行.
 
     Args:
         rows: read_paginated 返回的二维数组, 第 0 行是表头.
         limit: 取前 N 条 (None 不限).
+        offset: 跳过前 N 个数据行 (用于分批跑大表, 不算表头).
     """
     pending: list[PendingRow] = []
+    skipped = 0
     for idx, row in enumerate(rows):
         if idx < DATA_START_ROW - 1:        # 跳过表头
             continue
-        # 取列时容错: 行可能短于 5 列
+        # 取列时容错: 行可能短于 8 列
         asin = _cell(row, COL_ASIN)
         verdict = _cell(row, COL_VERDICT)
         if not asin:
             continue
         if verdict and verdict not in RETRY_STATES:
+            continue
+        # offset: 跳过前 N 个有效数据行
+        if skipped < offset:
+            skipped += 1
             continue
         pending.append(PendingRow(row_num=idx + 1, asin=asin))
         if limit and len(pending) >= limit:
@@ -123,12 +166,19 @@ def _cell(row: list[Any], col: int) -> str:
 class RowResult:
     row: PendingRow
     pt: str
-    verdict: str     # pass/reject/pending/error
+    verdict: str          # pass/reject/pending/skipped/error
     reason: str
+    walmart_category: str = ""  # 大类 (D 列)
+    stage: str = ""             # 阻拦层 L0/L1/L2/L3/L4 (F 列)
+    reason_category: str = ""   # Walmart 37 政策标准名 (G 列)
 
     @property
     def values(self) -> list[str]:
-        return [self.pt, self.verdict, self.reason]
+        """对应 C:H 6 列: PT / category / verdict / stage / reason_cat / reason."""
+        return [
+            self.pt, self.walmart_category, self.verdict,
+            self.stage, self.reason_category, self.reason,
+        ]
 
 
 def _hit_descriptor(rule_code: str, detail: dict, outcome: AuditOutcome) -> str:
@@ -226,8 +276,14 @@ def _hit_descriptor(rule_code: str, detail: dict, outcome: AuditOutcome) -> str:
 
 def _outcome_to_result(row: PendingRow, outcome: AuditOutcome) -> RowResult:
     pt = outcome.l1.walmart_product_type if outcome.l1 else ""
+    cat_d = outcome.l1.walmart_category if outcome.l1 else ""
     if outcome.verdict == "pass":
-        return RowResult(row=row, pt=pt, verdict="pass", reason="")
+        return RowResult(
+            row=row, pt=pt, verdict="pass", reason="",
+            walmart_category=cat_d or "",
+            stage="",
+            reason_category="",
+        )
     # reject — 优先显示 stage_stopped_at 那层的 hits, 其次其他层
     stage = outcome.stage_stopped_at or ""
     cat = outcome.final_reason_category or ""
@@ -235,8 +291,14 @@ def _outcome_to_result(row: PendingRow, outcome: AuditOutcome) -> RowResult:
     others = [h for h in outcome.all_hits if h.stage != stage and h.penalty != 0]
     ordered = decisive + others
     top_hits = [_hit_descriptor(h.rule_code, h.detail, outcome) for h in ordered[:3]]
-    reason = f"{stage} | {cat} | " + "; ".join(top_hits) if top_hits else f"{stage} | {cat}"
-    return RowResult(row=row, pt=pt, verdict="reject", reason=reason.strip(" |"))
+    # 新版 reason 不再前缀 stage/cat (单独列了), 只放 hit 详情
+    reason_detail = "; ".join(top_hits) if top_hits else ""
+    return RowResult(
+        row=row, pt=pt, verdict="reject", reason=reason_detail,
+        walmart_category=cat_d or "",
+        stage=stage,
+        reason_category=cat,
+    )
 
 
 # 数据异常占位 title — DMIT 拉到的明显不可用商品
@@ -296,32 +358,82 @@ async def _audit_with_info(row: PendingRow, info: ProductInfo) -> RowResult:
     return _outcome_to_result(row, outcome)
 
 
-def _process_pool_worker(args: tuple[PendingRow, ProductInfo]) -> RowResult:
-    """ProcessPoolExecutor 子进程入口 — 必须是 module-level function (pickle 要求).
+def _process_pool_worker(args: tuple[PendingRow, ProductInfo, bool]) -> RowResult:
+    """ProcessPoolExecutor 子进程入口 (旧版: 单 ASIN per task).
 
-    每个子进程冷启动:
-      - import modules (~2-3s)
-      - 创建独立 OpenAI client + httpx pool + DB short-lived connection
-      - asyncio.run(audit_one) 跑完一个 ASIN 完整审核
-      - 返回 RowResult (会被 pickle 回主进程)
-
-    架构原因: 单进程 asyncio 在 50+ 并发下受 GIL/connection-pool 锁拖累 (实测多进程
-    比单进程异步快 2.6×). 多进程突破 GIL, 各自独立 connection pool, 让 deepseek
-    server 看到 N 个独立 connection, 资源分配更平稳.
+    保留兼容, 但实测 100 进程占满 14 核 CPU. 新版用 _process_pool_chunk_worker.
     """
     import asyncio as _asyncio
-    row, info = args
-    # anomaly 短路
+    row, info, run_l4 = args
     anomaly = _anomaly_check(info)
     if anomaly:
         verdict_label, reason = anomaly
         return RowResult(row=row, pt="", verdict=verdict_label, reason=reason)
     try:
-        outcome = _asyncio.run(audit_one(info, run_l3=True, run_l4=True, persist=True))
+        outcome = _asyncio.run(audit_one(info, run_l3=True, run_l4=run_l4, persist=True))
     except Exception as e:  # noqa: BLE001
         return RowResult(row=row, pt="", verdict="error",
                          reason=f"审核异常: {str(e)[:80]}")
     return _outcome_to_result(row, outcome)
+
+
+def _process_pool_chunk_worker(
+    chunk: list[tuple[PendingRow, ProductInfo, bool]],
+    async_concurrency: int = 50,
+) -> list[RowResult]:
+    """混合架构子进程入口: chunk 内部用 asyncio + 结束后批量 DB 写入.
+
+    架构演进 (用户 2026-04-27 反馈):
+      v1: 100 ProcessPool × 1 ASIN/task → CPU 严重 over-subscribe
+      v2: 14 ProcessPool × 50 协程 → CPU 健康但 DB 写入串行化
+      v3 (本版): 14 × 50 协程 + persist=False + chunk 结束批量写
+            协程内不写 DB → 700 协程不竞争 14 PG 连接
+            chunk 完成后一次性批量 INSERT (executemany) → 100 次 INSERT 1 次 commit
+
+    DB 写入对比:
+      旧: 协程内 await asyncio.to_thread × 3 次/ASIN × 700 协程 = 串行化在 ThreadPool
+      新: chunk 内全部 audit_one(persist=False), 收集 outcomes, batch_persist 一次写入
+      省: connection 占用 700→1, 事务 commit 数 ~3000→1, 锁竞争基本消除
+    """
+    import asyncio as _asyncio
+    from pipelines.orchestrator import batch_persist
+
+    # 收集每个 ASIN 的 (RowResult, optional outcome). outcome=None 时表示不写 DB.
+    async def _audit_one(row, info, run_l4):
+        anomaly = _anomaly_check(info)
+        if anomaly:
+            verdict_label, reason = anomaly
+            return (RowResult(row=row, pt="", verdict=verdict_label, reason=reason), None, None)
+        try:
+            # persist=False: 不在协程里写 DB, 避免 700 协程争 PG 连接
+            outcome = await audit_one(info, run_l3=True, run_l4=run_l4, persist=False)
+        except Exception as e:  # noqa: BLE001
+            return (RowResult(row=row, pt="", verdict="error",
+                              reason=f"审核异常: {str(e)[:80]}"), None, None)
+        return (_outcome_to_result(row, outcome), info, outcome)
+
+    async def _run_chunk():
+        sem = _asyncio.Semaphore(async_concurrency)
+        async def _bounded(item):
+            async with sem:
+                return await _audit_one(*item)
+        return await _asyncio.gather(*(_bounded(item) for item in chunk))
+
+    triples = _asyncio.run(_run_chunk())
+
+    # chunk 结束后批量写 DB (子进程内 1 次 connection, executemany)
+    persist_items = [(info, outcome) for _, info, outcome in triples if outcome is not None]
+    if persist_items:
+        try:
+            batch_persist(persist_items)
+        except Exception as e:  # noqa: BLE001
+            # batch_persist 失败不影响审核结果, 只 log
+            import logging as _logging
+            _logging.getLogger(__name__).error(
+                "batch_persist 失败 chunk(%d): %s", len(persist_items), e
+            )
+
+    return [t[0] for t in triples]
 
 
 # ---------------------------------------------------------------
@@ -373,7 +485,7 @@ def write_back(results: list[RowResult], *, dry_run: bool = False, batch_size: i
     for seg in segments:
         start = seg[0].row.row_num
         end = seg[-1].row.row_num
-        rng = f"{SHEET_ID}!C{start}:E{end}"
+        rng = f"{SHEET_ID}!C{start}:H{end}"   # 6 列 (新表 v2)
         values = [r.values for r in seg]
         try:
             lark_client.write_range(SPREADSHEET_TOKEN, rng, values)
@@ -390,71 +502,123 @@ def write_back(results: list[RowResult], *, dry_run: bool = False, batch_size: i
 
 
 async def run(args: argparse.Namespace) -> int:
-    log.info("读表: %s / %s", SPREADSHEET_TOKEN, SHEET_ID)
-    rows = await asyncio.to_thread(
-        lark_client.read_paginated, SPREADSHEET_TOKEN, SHEET_ID, "G", 200
-    )
-    log.info("读到 %d 行 (含表头)", len(rows))
+    # 允许 CLI 覆盖默认 spreadsheet/sheet (旧 4326 表 / 新 11 万表 / 任意表)
+    global SPREADSHEET_TOKEN, SHEET_ID
+    if args.spreadsheet_token:
+        SPREADSHEET_TOKEN = args.spreadsheet_token
+    if args.sheet_id:
+        SHEET_ID = args.sheet_id
 
-    pending = scan_pending(rows, limit=args.limit)
+    log.info("读表: %s / %s  (offset=%d, limit=%d, start_row=%s, run_l4=%s)",
+             SPREADSHEET_TOKEN, SHEET_ID, args.offset, args.limit,
+             args.start_row, not args.no_l4)
+    if args.start_row:
+        # 大表分批模式: 只读指定 row range, 跳过 11 万行全表分页
+        # 多读 20% buffer 防止 limit 范围内全是已审/skipped 行不够 limit 个待审
+        end_row = args.start_row + int(args.limit * 1.5) - 1
+        rows = await asyncio.to_thread(
+            lark_client.read_row_range, SPREADSHEET_TOKEN, SHEET_ID,
+            args.start_row, end_row, "H", 200,
+        )
+        log.info("读 row %d-%d, 实际拿到 %d 行", args.start_row, end_row, len(rows))
+        # 把表头位置补一个 dummy header (scan_pending 跳第 1 行), 然后 row_num 偏移修正
+        # 让 enumerate(rows) 的 row_num 对应真实 sheet 的 row_num
+        # 即: 第 0 个 chunk 元素 = sheet row args.start_row
+        # 用一个新版 scan 直接给 base_row
+        pending = scan_pending_range(rows, base_row=args.start_row, limit=args.limit,
+                                      force_rescan=args.force_rescan)
+    else:
+        # 全表模式 (兼容旧逻辑, 4326 ASIN 可用)
+        rows = await asyncio.to_thread(
+            lark_client.read_paginated, SPREADSHEET_TOKEN, SHEET_ID, "H", 200,
+        )
+        log.info("读到 %d 行 (含表头)", len(rows))
+        pending = scan_pending(rows, limit=args.limit, offset=args.offset)
     if not pending:
-        log.info("无待审行 (全表 D 列都已 pass/reject)")
+        log.info("无待审行 (offset=%d 之后全是已审 pass/reject)", args.offset)
         return 0
-    log.info("待审 %d 行: %s%s",
-             len(pending),
+    log.info("待审 %d 行 (起始 row_num=%d, 终止 row_num=%d): %s%s",
+             len(pending), pending[0].row_num, pending[-1].row_num,
              ", ".join(p.asin for p in pending[:5]),
              " ..." if len(pending) > 5 else "")
 
-    # 阶段 1: 一次 batch 拉所有 ASIN 的 DMIT 数据 (缺失的统一一次 upload, 不每条单独触发)
+    # 阶段 1: 一次 batch 拉所有 ASIN 的 DMIT 数据
     asins = [p.asin for p in pending]
-    log.info("批量 DMIT fetch %d 条 (concurrency=%d, fresh_sec=%d)...",
-             len(asins), args.concurrency, args.fresh_sec)
+    log.info("批量 DMIT fetch %d 条 (concurrency=%d, fresh_sec=%d, skip_missing=%s)...",
+             len(asins), args.concurrency, args.fresh_sec, args.skip_missing_dmit)
     present, missing = await fetch_product_infos_batch(
         asins, fresh_sec=args.fresh_sec, concurrency=args.concurrency,
     )
-    log.info("DMIT 命中 %d / 缺失 %d (缺失部分已统一一次 upload 触发采集)",
-             len(present), len(missing))
+    log.info("DMIT 命中 %d / 缺失 %d", len(present), len(missing))
 
-    # 阶段 2: ProcessPoolExecutor 多进程审核 (实测比单进程 asyncio 快 2.6×)
-    # 架构原因 (深度分析见 README/PROCESSPOOL.md):
-    #   - 单进程 asyncio 50 worker 受 GIL + httpx connection-pool 锁限制
-    #   - 多进程各自独立 GIL/pool, deepseek server 看 N 个独立 connection
-    #   - 实测 50 ASIN: asyncio 181s vs ProcessPool(20) 68.7s = 2.63× 提速
+    # 阶段 2: ProcessPoolExecutor 多进程审核
     pending_results: list[RowResult] = []
-    audit_args: list[tuple[PendingRow, ProductInfo]] = []
+    audit_args: list[tuple[PendingRow, ProductInfo, bool]] = []
+    run_l4 = not args.no_l4
     for p in pending:
         info = present.get(p.asin)
         if info is None:
-            pending_results.append(RowResult(
-                row=p, pt="", verdict="pending",
-                reason="DMIT 采集中, 下次自动重试",
-            ))
+            if args.skip_missing_dmit:
+                # 跳过 DMIT 缺数据, 直接标 skipped (verdict 不在 RETRY_STATES, 下次扫描自动忽略)
+                pending_results.append(RowResult(
+                    row=p, pt="", verdict="skipped",
+                    reason="DMIT 无数据, 已跳过",
+                ))
+            else:
+                pending_results.append(RowResult(
+                    row=p, pt="", verdict="pending",
+                    reason="DMIT 采集中, 下次自动重试",
+                ))
         else:
-            audit_args.append((p, info))
+            audit_args.append((p, info, run_l4))
 
     audited: list[RowResult] = []
-    n_processes = min(args.processes, len(audit_args)) if audit_args else 0
-    if n_processes > 0:
-        log.info("启动 ProcessPoolExecutor: %d 进程, %d 待审产品",
-                 n_processes, len(audit_args))
-        # macOS 必须 spawn (fork 在 macOS 不安全, 会引起 ObjC runtime 问题)
+    # 增量飞书写回缓冲区 (用户 2026-04-27 反馈: kill 重启不丢进度)
+    # 每 N chunks 完成 → 立刻 write_back 到飞书, 而不是等所有完成
+    write_flush_threshold = args.write_flush_chunks  # 默认 5 chunks (500 ASIN)
+    write_buffer: list[RowResult] = []
+    write_lock = asyncio.Lock()  # 防止两个 chunk 同时触发 flush
+    if audit_args:
+        # 混合架构: ProcessPool(N 进程, N=物理核数) × asyncio(M 协程/进程)
+        # 总并发 = N × M, 但 CPU 只用 N 核 (不超载)
+        chunk_size = args.chunk_size
+        async_concurrency = args.async_concurrency
+        n_processes = min(args.processes, max(1, (len(audit_args) + chunk_size - 1) // chunk_size))
+        chunks = [audit_args[i:i+chunk_size] for i in range(0, len(audit_args), chunk_size)]
+        log.info("混合架构: %d 进程 × %d 协程, 拆 %d chunks (每 chunk %d ASIN), 总 %d 待审",
+                 n_processes, async_concurrency, len(chunks), chunk_size, len(audit_args))
+        log.info("增量飞书写: 每 %d chunks 完成立刻写一批 (防止 kill 丢进度)",
+                 write_flush_threshold)
+        # macOS 必须 spawn (fork 在 macOS 不安全)
         ctx = mp.get_context("spawn")
         loop = asyncio.get_running_loop()
         with ProcessPoolExecutor(max_workers=n_processes, mp_context=ctx) as pool:
             futures = [
-                loop.run_in_executor(pool, _process_pool_worker, a)
-                for a in audit_args
+                loop.run_in_executor(pool, _process_pool_chunk_worker, c, async_concurrency)
+                for c in chunks
             ]
-            done = 0
+            done_chunks = 0
             for fut in asyncio.as_completed(futures):
                 try:
-                    res = await fut
-                    audited.append(res)
+                    chunk_results = await fut
+                    audited.extend(chunk_results)
+                    write_buffer.extend(chunk_results)
                 except Exception as e:  # noqa: BLE001
-                    log.error("子进程异常: %s", e)
-                done += 1
-                if done % 50 == 0 or done == len(audit_args):
-                    log.info("进度: %d/%d", done, len(audit_args))
+                    log.error("chunk 异常: %s", e)
+                done_chunks += 1
+                log.info("chunk 进度: %d/%d (~%d ASIN 完成, buffer=%d)",
+                         done_chunks, len(chunks), len(audited), len(write_buffer))
+                # 增量 flush: 每 N chunks 写一次飞书
+                if not args.dry_run and (done_chunks % write_flush_threshold == 0):
+                    async with write_lock:
+                        if write_buffer:
+                            buf = write_buffer.copy()
+                            write_buffer.clear()
+                            log.info("增量写飞书: %d 行 (累积已审 %d/%d)",
+                                     len(buf), len(audited), len(audit_args))
+                            await asyncio.to_thread(
+                                write_back, buf, dry_run=False, batch_size=500
+                            )
     results = sorted(audited + pending_results, key=lambda r: r.row.row_num)
 
     # 汇总
@@ -463,24 +627,53 @@ async def run(args: argparse.Namespace) -> int:
         by_v[r.verdict] = by_v.get(r.verdict, 0) + 1
     log.info("审核完成: %s", by_v)
 
-    log.info("写回飞书...")
-    n_ok = write_back(results, dry_run=args.dry_run)
-    if args.dry_run:
-        log.info("--dry-run: 未实际写回")
-    else:
-        log.info("已写回 %d/%d 行", n_ok, len(results))
+    # 写剩余 buffer + pending_results (增量已经写过的 audited 不重写)
+    final_to_write: list[RowResult] = list(write_buffer) + pending_results
+    if final_to_write:
+        log.info("最后一批写回飞书: %d 行 (buffer 剩 %d + pending %d)",
+                 len(final_to_write), len(write_buffer), len(pending_results))
+        n_ok = write_back(final_to_write, dry_run=args.dry_run)
+        if args.dry_run:
+            log.info("--dry-run: 未实际写回")
+        else:
+            log.info("最终写回 %d/%d 行", n_ok, len(final_to_write))
     return 0
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="飞书上架表 → 审核 → 回填")
+    parser.add_argument("--spreadsheet-token", default=None,
+                        help=f"飞书 sheet token (默认 {SPREADSHEET_TOKEN}, 即新表'在线产品')")
+    parser.add_argument("--sheet-id", default=None,
+                        help=f"飞书 sheet ID (默认 {SHEET_ID})")
+    parser.add_argument("--start-row", type=int, default=None,
+                        help="从指定 sheet row_num 开始读 (大表分批用, 跳过全表读取). "
+                             "比如 batch 1 跑 row 2-10001: --start-row 2 --limit 10000. "
+                             "batch 2 跑 row 10002-20001: --start-row 10002 --limit 10000.")
+    parser.add_argument("--offset", type=int, default=0,
+                        help="(全表模式用) 跳过前 N 个待审行. 大表请用 --start-row 替代 (快 10×)")
     parser.add_argument("--limit", type=int, default=500,
-                        help="单次最多处理多少条待审 (默认 500, 防止表突然冒出几千行被全跑)")
+                        help="单次最多处理多少条待审 (默认 500)")
+    parser.add_argument("--no-l4", action="store_true",
+                        help="关闭 L4 视觉 (省视觉成本, 速度快 30%%, 但漏 logo 检测)")
+    parser.add_argument("--skip-missing-dmit", action="store_true",
+                        help="DMIT 缺数据的产品标 'skipped' 跳过 (默认标 'pending' 下次重跑)")
     parser.add_argument("--concurrency", type=int, default=10,
                         help="DMIT 抓取并发 (默认 10) — 不再控审核, 审核改用 --processes")
-    parser.add_argument("--processes", type=int, default=50,
-                        help="审核子进程数 (默认 50, 上限取决于 PostgreSQL max_connections=100; "
-                             "实测 50 ASIN 用 20 进程 68s, 推算 100 进程 4326 ASIN ~40 分钟)")
+    parser.add_argument("--processes", type=int, default=14,
+                        help="审核子进程数 (默认 14 = 物理核数, 混合架构下 14 进程 × 50 协程 = 700 并发, "
+                             "CPU 占用健康, 内存省 7×; 旧版 100 进程会让 14 核 CPU 严重 over-subscribe)")
+    parser.add_argument("--chunk-size", type=int, default=100,
+                        help="每个 worker 处理的 ASIN 批量大小 (默认 100). "
+                             "10000 ASIN / chunk_size 100 = 100 chunks, 14 进程跑 ~7 轮)")
+    parser.add_argument("--async-concurrency", type=int, default=50,
+                        help="每个 worker 内部 asyncio 协程并发数 (默认 50)")
+    parser.add_argument("--write-flush-chunks", type=int, default=5,
+                        help="每 N chunks 完成后立刻 flush 写飞书 (默认 5 = 500 ASIN). "
+                             "防止 kill 重启丢进度")
+    parser.add_argument("--force-rescan", action="store_true",
+                        help="强制重审 (忽略 verdict 已写, 用于规则更新后整批重跑). "
+                             "(只对 --start-row 模式生效)")
     parser.add_argument("--ramp-step-ms", type=int, default=0,
                         help="(已弃用) 旧 worker pool 的 task 启动错开间隔; ProcessPool 模式下无效")
     parser.add_argument("--fresh-sec", type=int, default=86400,

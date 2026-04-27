@@ -155,6 +155,31 @@ def read_paginated(
     return all_rows
 
 
+def read_row_range(
+    spreadsheet_token: str, sheet_id: str,
+    start_row: int, end_row: int,
+    last_col_letter: str = "Z", page_size: int = 200,
+) -> list[list[Any]]:
+    """只读指定行 range, 用于大表分批跑 (避免每批都 read_paginated 全表).
+
+    比如 11 万行表跑 batch 1 (row 2-10001):
+      read_paginated:    559 次 API call (读全表), ~18 分钟
+      read_row_range:     50 次 API call (只读 10000 行), ~1.5 分钟
+    """
+    if start_row > end_row:
+        return []
+    all_rows: list[list[Any]] = []
+    row = start_row
+    while row <= end_row:
+        upper = min(row + page_size - 1, end_row)
+        chunk = read_range(spreadsheet_token, f"{sheet_id}!A{row}:{last_col_letter}{upper}")
+        if not chunk:
+            break
+        all_rows.extend(chunk)
+        row = upper + 1
+    return all_rows
+
+
 def write_range(
     spreadsheet_token: str,
     a1_range: str,

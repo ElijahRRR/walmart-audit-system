@@ -656,7 +656,18 @@ def _build_user_prompt(
     reason_cat_candidates = routed_cats + ["brand_misuse", "none"]
     cat_candidates_txt = "\n".join(f"  - {c}" for c in reason_cat_candidates)
 
-    return f"""# 产品信息
+    # ⚠️ 顺序优化 (2026-04-27): DeepSeek cache 是 prefix exact match.
+    # 把"按 PT 半固定"内容放最前, "按产品变化"放最后, 让同 PT 不同产品共享 ~600 tokens cache.
+    # 实测: 旧顺序 cache 命中 41%, 新顺序预期 75%+
+    return f"""# 沃尔玛相关禁售政策 (这些是 LLM 训练数据外的内部规则, 命中任一 → reason_category 填对应 category_en)
+
+{policy_txt}
+
+# 候选 reason_category (verdict=reject 时必须从此列表选一)
+
+{cat_candidates_txt}
+
+# 产品信息
 
 ASIN: {product.asin}
 标题: {product.title}
@@ -679,14 +690,6 @@ Amazon 类目: {product.amazon_category_path or '(空)'}
 # 待评估的品牌/商标词 (来自 L2 R4+R5, 前 10 个, 综合上下文判 is_real_brand)
 
 {brand_list}
-
-# 沃尔玛相关禁售政策 (这些是 LLM 训练数据外的内部规则, 命中任一 → reason_category 填对应 category_en)
-
-{policy_txt}
-
-# 候选 reason_category (verdict=reject 时必须从此列表选一)
-
-{cat_candidates_txt}
 """
 
 
