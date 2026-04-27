@@ -91,14 +91,17 @@ class PendingRow:
 def scan_pending_range(rows: list[list[Any]], *,
                         base_row: int,
                         limit: int | None = None,
-                        force_rescan: bool = False) -> list[PendingRow]:
+                        force_rescan: bool = False,
+                        filter_stage: str | None = None) -> list[PendingRow]:
     """从指定 row_num 开始的 chunk 里扫待审行 (大表分批模式).
 
     Args:
         rows: read_row_range 返回的二维数组 (rows[0] 对应 sheet 的 base_row).
         base_row: rows[0] 对应的真实 sheet row_num (1-based).
         limit: 取前 N 条 (None 不限).
-        force_rescan: True 时忽略已有 verdict, 强制重审 (用于规则更新后整批重跑).
+        force_rescan: True 时忽略已有 verdict, 强制重审.
+        filter_stage: 只扫 F 列 (阻拦层) == 此值的行 (例 'L2' / 'L3').
+                      用于"重跑某层 reject"场景, 自动开 force_rescan.
     """
     pending: list[PendingRow] = []
     for idx, row in enumerate(rows):
@@ -106,7 +109,12 @@ def scan_pending_range(rows: list[list[Any]], *,
         verdict = _cell(row, COL_VERDICT)
         if not asin:
             continue
-        if not force_rescan:
+        # filter_stage 模式: 只取 F 列匹配的行 (强制 force_rescan)
+        if filter_stage:
+            stage = _cell(row, COL_STAGE)
+            if stage != filter_stage:
+                continue
+        elif not force_rescan:
             if verdict and verdict not in RETRY_STATES:
                 continue
         pending.append(PendingRow(row_num=base_row + idx, asin=asin))
@@ -526,7 +534,8 @@ async def run(args: argparse.Namespace) -> int:
         # 即: 第 0 个 chunk 元素 = sheet row args.start_row
         # 用一个新版 scan 直接给 base_row
         pending = scan_pending_range(rows, base_row=args.start_row, limit=args.limit,
-                                      force_rescan=args.force_rescan)
+                                      force_rescan=args.force_rescan,
+                                      filter_stage=args.filter_stage)
     else:
         # 全表模式 (兼容旧逻辑, 4326 ASIN 可用)
         rows = await asyncio.to_thread(
@@ -673,6 +682,10 @@ def main() -> int:
                              "防止 kill 重启丢进度")
     parser.add_argument("--force-rescan", action="store_true",
                         help="强制重审 (忽略 verdict 已写, 用于规则更新后整批重跑). "
+                             "(只对 --start-row 模式生效)")
+    parser.add_argument("--filter-stage", default=None,
+                        help="只跑 F 列 (阻拦层) 匹配此值的行 (例 'L2' / 'L3'). "
+                             "用于'重跑某层 reject'场景, 自动开 force_rescan. "
                              "(只对 --start-row 模式生效)")
     parser.add_argument("--ramp-step-ms", type=int, default=0,
                         help="(已弃用) 旧 worker pool 的 task 启动错开间隔; ProcessPool 模式下无效")
