@@ -3,7 +3,9 @@
 起始 100 分, 累扣, score_final < 60 → reject。
 
 八条规则 (2026-04 最新, R6 已删除):
-  R1 中国卖家禁售            cat_forbid_zh_seller     -100   (映射表 zh_can_do=否)
+  R1 类目准入 gate           cat_access_blocked / cat_zh_blocked  -100
+                             (双字段白名单: access_state ∈ {普通商品, 附条件允许}
+                              AND zh_can_do = 是 OR 需评估*; 任一不满足都 reject)
   R2 禁售大类               forbidden_mega_cat       -100   (17 大类: 12 原 + 5 新 religious/cartoon/adult/chemicals/spy/live)
   R3 类目需证书 — 三档细分:
       - cat_requires_cert_hard       -100   (FDA/UL/NRTL/CPSIA/EPA 等硬认证, 搬运做不了)
@@ -96,22 +98,39 @@ def _compile_blacklist_patterns() -> list[tuple[str, re.Pattern]]:
 
 
 # =============================================================
-# R1: 中国卖家真禁 (仅映射表 zh_can_do 明确标"否"才触发)
+# R1: 类目准入 gate — 双字段白名单 (access_state + zh_can_do)
+# =============================================================
+# 业务规则 (用户 2026-04-27 更新):
+#   一个 PT 必须**同时满足**两条才允许进入后续审核:
+#     1. access_state ∈ {'普通商品', '附条件允许'}      ← 白名单
+#     2. zh_can_do = '是' OR zh_can_do LIKE '需评估%'  ← 白名单
+#   任一不满足 → 类目层直接 reject (-100, stage=L2, 不进 L3/L4)
+#
+# 实测 5785/7008 PT (82.5%) 通过 gate, 1223 PT 被拒.
+# 拒的细分:
+#   - access_state='需Walmart审批' (839)
+#   - access_state='禁售'           (292)
+#   - access_state='v5已废弃'       (66)
+#   - zh_can_do 含 '否' (37 种自由文本变体, 含 '否（上架记录回测,BIZ-CN触发X次）')
 # =============================================================
 
 
-_ZH_HARD_BLOCK_KEYWORDS = ("否", "不可做", "进不去", "禁售")
+_ACCESS_WHITELIST = {"普通商品", "附条件允许"}
 
 
-def _rule_zh_seller_forbidden(l1: L1Result) -> list[RuleHit]:
-    """R1: 中国卖家真禁 — 查 walmart_pt_meta.zh_seller_forbidden 字段 (PT 级权威, O(1))。
+def _rule_category_gate(l1: L1Result) -> list[RuleHit]:
+    """R1: 类目准入 gate — 双字段白名单检查 (用户 2026-04-27 规则).
 
-    pt_meta 里的 zh_seller_forbidden 已由 sync 阶段基于 zh_can_do 精确派生:
-      - zh_can_do 含 '否/不可做/进不去/禁售' → True
-      - (zh_can_do 空 且 access_state='禁售') → True
-      - 其他 → False
+    数据源: walmart_pt_meta.access_state + walmart_pt_meta.zh_can_do (飞书业务维护).
+    通过条件 (双白名单, 任一不满足都 reject):
+      access_state ∈ {普通商品, 附条件允许}
+      AND
+      zh_can_do = '是' OR zh_can_do LIKE '需评估%'
 
-    "需评估 (要合规投入)" 不算真禁 (交 L2 R3 证书规则评估细节).
+    输出 rule_code 二选一:
+      cat_access_blocked  - access_state 不在白名单 (需审批/禁售/已废弃)
+      cat_zh_blocked      - zh_can_do 含 '否' (中国卖家进不去/Walmart禁售/v5移除/上架回测拒)
+    若两个都拒, 优先报 cat_access_blocked (更上游).
     """
     pt = (l1.walmart_product_type or "").strip()
     if not pt or pt in {"unknown", "(unknown)"}:
@@ -124,32 +143,60 @@ def _rule_zh_seller_forbidden(l1: L1Result) -> list[RuleHit]:
         with c.cursor() as cur:
             cur.execute(
                 """
-                SELECT walmart_category, walmart_ptg, access_state,
-                       zh_can_do, zh_seller_forbidden
+                SELECT walmart_category, walmart_ptg, access_state, zh_can_do
                 FROM walmart_pt_meta WHERE walmart_product_type = %s
                 """,
                 (pt,),
             )
             row = cur.fetchone()
 
-    if not row or not row.get("zh_seller_forbidden"):
+    if not row:
+        # PT 不在 meta 表 → 不拒 (L1 已经判出来一个不存在的 PT 才会到这, 让其他规则处理)
         return []
 
-    return [
-        RuleHit(
-            stage="L2",
-            rule_code="cat_forbid_zh_seller",
-            penalty=-100,
-            detail={
-                "walmart_pt": pt,
-                "walmart_category": row.get("walmart_category"),
-                "walmart_policy": "Restricted/Illegal",   # 中国卖家禁售, 映射 Walmart 政策
-                "zh_can_do": row.get("zh_can_do"),
-                "access_state": row.get("access_state"),
-                "source": "walmart_pt_meta.zh_seller_forbidden",
-            },
-        )
-    ]
+    access = (row.get("access_state") or "").strip()
+    zh = (row.get("zh_can_do") or "").strip()
+
+    # 1. access_state 白名单检查 (优先报)
+    if access not in _ACCESS_WHITELIST:
+        return [
+            RuleHit(
+                stage="L2",
+                rule_code="cat_access_blocked",
+                penalty=-100,
+                detail={
+                    "walmart_pt": pt,
+                    "walmart_category": row.get("walmart_category"),
+                    "walmart_policy": "Restricted/Illegal",
+                    "access_state": access or "(空)",
+                    "zh_can_do": zh or "(空)",
+                    "rule": "access_state 不在白名单 {普通商品, 附条件允许}",
+                    "source": "walmart_pt_meta.access_state",
+                },
+            )
+        ]
+
+    # 2. zh_can_do 白名单检查
+    zh_ok = (zh == "是") or zh.startswith("需评估")
+    if not zh_ok:
+        return [
+            RuleHit(
+                stage="L2",
+                rule_code="cat_zh_blocked",
+                penalty=-100,
+                detail={
+                    "walmart_pt": pt,
+                    "walmart_category": row.get("walmart_category"),
+                    "walmart_policy": "Restricted/Illegal",
+                    "access_state": access,
+                    "zh_can_do": zh or "(空)",
+                    "rule": "zh_can_do 不在白名单 {是, 需评估*}",
+                    "source": "walmart_pt_meta.zh_can_do",
+                },
+            )
+        ]
+
+    return []
 
 
 # =============================================================
@@ -1038,7 +1085,7 @@ def evaluate(product: ProductInfo, l1: L1Result) -> L2Result:
     # 2. 跑 L2 规则
     # 注: R6 "blacklist_compatible_for" 已删除, 改由 L3 LLM 判 (精度更高)
     rules = [
-        _rule_zh_seller_forbidden(l1),
+        _rule_category_gate(l1),
         _rule_forbidden_mega_cat(l1),
         _rule_cat_requires_cert(l1),
         _rule_title_desc_blacklist(product),

@@ -150,6 +150,12 @@ def _hit_descriptor(rule_code: str, detail: dict, outcome: AuditOutcome) -> str:
         bits = [d.get("reason") or "", d.get("pt") or ""]
         return f"{code}[{' / '.join(b for b in bits if b)}]"
 
+    # ---- L2 R1 类目准入 gate (双字段白名单) ----
+    if code == "cat_access_blocked":
+        return f"{code}[access_state={d.get('access_state','')!r}]"
+    if code == "cat_zh_blocked":
+        return f"{code}[zh_can_do={d.get('zh_can_do','')!r}]"
+
     # ---- L2 R3 类目证书 ----
     if code in ("cat_requires_cert_hard", "cat_requires_cert_soft"):
         kws = d.get("matched_hard_kws") or d.get("matched_soft_kws") or []
