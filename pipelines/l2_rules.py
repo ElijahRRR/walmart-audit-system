@@ -1,22 +1,30 @@
-"""L2 硬规则打分引擎 (v2 新架构)。
+"""L2 硬规则打分引擎 (v3 — 用户 2026-04-27 重构原则).
 
-起始 100 分, 累扣, score_final < 60 → reject。
+设计原则 (用户反馈):
+  L2 主要作用:
+    1. **硬拒** — 类目级 / 认证级明确不可救的产品 (-100)
+    2. **证据收集** — 把命中信息塞 detail 传给 L3 LLM 做精细判断
+  L2 **不负责** 通过累积扣分自己 reject (那样会绕过 L3 LLM 的语义判断, 误伤率高)
 
-八条规则 (2026-04 最新, R6 已删除):
-  R1 类目准入 gate           cat_access_blocked / cat_zh_blocked  -100
-                             (双字段白名单: access_state ∈ {普通商品, 附条件允许}
-                              AND zh_can_do = 是 OR 需评估*; 任一不满足都 reject)
-  R2 禁售大类               forbidden_mega_cat       -100   (17 大类: 12 原 + 5 新 religious/cartoon/adult/chemicals/spy/live)
-  R3 类目需证书 — 三档细分:
-      - cat_requires_cert_hard       -100   (FDA/UL/NRTL/CPSIA/EPA 等硬认证, 搬运做不了)
-      - cat_requires_cert_small_part -10    (电气小件 NRTL, 可下游人工审)
-      - cat_requires_cert_soft       -10    (SDS/ASTM/ISO/RoHS/Prop65 等软合规)
-  R4 标题命中黑名单品牌       title_desc_blacklist     -15    (交 L3 LLM 判真品牌/通用词)
-  R5 标题命中 USPTO LIVE     trademark_live           -10    (交 L3 LLM 判)
-  R6 (已删除) — "Compatible for <Brand>" 规则误伤率高, 改 L3 LLM 判
-  R7 促销/宣称性内容          content_promotional      -20    (Walmart Content Standards 禁 promotional claims)
-  R8 Walmart 严格合规敏感词    walmart_strict_sensitive -30    (文化/宗教/政治/武器/成人 7 子类)
-  R9 (已迁移到 Phase0) — title 含 ®/™/℠/© 提前在 L0 拦截, rule_code=phase0_trademark_symbol
+起始 100 分, score_final < 60 → reject (但累积扣分逻辑只对硬拒规则生效).
+
+规则分类 (v3):
+  ━━━ 硬拒 (-100, 任一触发即 L2 reject, 不进 L3) ━━━
+  R1  cat_access_blocked / cat_zh_blocked      -100  (PT 准入双字段白名单)
+  R2  forbidden_mega_cat                       -100  (17 大禁售类目)
+  R3a cat_requires_cert_hard                   -100  (FDA/UL/NRTL/CPSIA/EPA 硬认证)
+  + Phase0 已经处理: phase0_brand_blacklist / phase0_trademark_symbol / phase0_forbidden_category
+  + L1 已经处理: excluded_category
+
+  ━━━ 软证据 (0 扣分, 只标记到 detail 传 L3 综合判断) ━━━
+  R3b cat_requires_cert_small_part   0  (电气小件 NRTL, 给 L3 看 PT 决定)
+  R3c cat_requires_cert_soft         0  (SDS/ASTM/ISO/RoHS/Prop65 软合规)
+  R4  title_desc_blacklist           0  (Aho-Corasick 命中, 交 L3 判真品牌/通用词)
+  R5  trademark_live                 0  (USPTO LIVE 命中, 交 L3 判)
+  R6  (已删除) — Compatible for <Brand> 改由 L3 判
+  R7  content_promotional            0  (promotional claims, 交 L3 判是否真违规)
+  R8  walmart_strict_sensitive       0  (文化/宗教/政治/武器/成人 7 子类, 交 L3)
+  R9  (已迁 L0)                       phase0_trademark_symbol
 
 **注意**:
   - 原 R1 (brand 完全等匹配黑名单) 已移出 L2, 由 Phase0 前置处理 (rule_code=phase0_brand_blacklist)
@@ -426,7 +434,7 @@ def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
                 RuleHit(
                     stage="L2",
                     rule_code="cat_requires_cert_small_part",
-                    penalty=-10,
+                    penalty=0,   # v3: 软证据不扣分, 交 L3 看 PT 上下文判
                     detail={
                         "walmart_pt": pt,
                         "hard_cert_fields": spec_real,
@@ -451,13 +459,13 @@ def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
             )
         ]
 
-    # C. meta 仅软合规命中 → -10
+    # C. meta 仅软合规命中 → 0 (v3: 软证据不扣分, 交 L3 综合判)
     if soft_matches:
         return [
             RuleHit(
                 stage="L2",
                 rule_code="cat_requires_cert_soft",
-                penalty=-10,
+                penalty=0,
                 detail={
                     "walmart_pt": pt,
                     "meta_requirements": meta_req,
@@ -468,13 +476,13 @@ def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
             )
         ]
 
-    # D. walmart_pt_spec 软合规 (smallParts/state_chemical/ingredients) → -10
+    # D. walmart_pt_spec 软合规 (smallParts/state_chemical/ingredients) → 0
     if spec_has_soft:
         return [
             RuleHit(
                 stage="L2",
                 rule_code="cat_requires_cert_soft",
-                penalty=-10,
+                penalty=0,
                 detail={
                     "walmart_pt": pt,
                     "soft_cert_fields": spec_soft,
@@ -500,7 +508,7 @@ def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
 # =============================================================
 
 
-R4_PENALTY = -15
+R4_PENALTY = 0   # v3 用户 2026-04-27: 软证据不扣分, 只标记 detail 传 L3 判通用词/真品牌
 
 
 def _rule_title_desc_blacklist(product: ProductInfo) -> list[RuleHit]:
@@ -558,7 +566,7 @@ def _rule_title_desc_blacklist(product: ProductInfo) -> list[RuleHit]:
 # =============================================================
 
 
-R5_PENALTY = -10
+R5_PENALTY = 0   # v3: 软证据不扣分, 只标记 USPTO 命中传 L3
 # 长度 >= 4: 提取 "疑似商标" 的大写开头词; 避免 3 字母缩写 "USB/DMX/FCC" 被误判
 _WORD_TOKEN_RE = re.compile(r"\b([A-Z][A-Za-z0-9]{3,})\b")
 
@@ -713,7 +721,7 @@ def _rule_trademark_live(product: ProductInfo, l1: L1Result) -> list[RuleHit]:
 # =============================================================
 
 
-R7_PENALTY = -20
+R7_PENALTY = 0   # v3: promotional 词不扣分, 交 L3 LLM 判是否真违规
 
 # 促销宣称短语 — Walmart Content Standards 明确禁用
 # 分类:
@@ -934,7 +942,7 @@ def _rule_trademark_symbol_in_title(product: ProductInfo) -> list[RuleHit]:
 # 单独 -30 不够杀 (score=70), 但叠加 R3/R4/R5/R7 能让多数产品过线 reject.
 # walmart_policy = "Offensive Content" (对齐 Walmart 判决)
 
-R8_PENALTY = -30
+R8_PENALTY = 0   # v3: 敏感词不扣分, 交 L3 LLM 综合上下文判 (硬性禁词由 L0 phase0 处理)
 
 # 分类词典. 按子类记录便于 detail 调试
 _R8_SENSITIVE_PATTERNS = {
