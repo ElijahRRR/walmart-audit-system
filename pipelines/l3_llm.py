@@ -228,6 +228,16 @@ def _build_system_prompt(include_sticker: bool, include_weapons: bool) -> str:
 - 任何"授权声明"都视为虚假宣称, 一律按侵权判 (无豁免).
 - 默认 pass — 只有清晰证据才 reject.
 
+# 严格证据原则 (重要)
+判 reject 前必须严格 verify 产品文本是否真的命中政策具体禁售点, 不能因为 PT 类目接近就套用:
+  - 例 1: Home Goods 禁 "corded window blinds" → 必须 title/bullets 含 "corded" 才算违规;
+          含 "cordless" / "无绳" 反而是合规产品 (CPSC 推荐)
+  - 例 2: Children's Products 需 CPC → 必须确认是 ≤12 岁儿童用品;
+          标 "for adult" / 工具配件 不算
+  - 例 3: Hazardous Items 含 EPA → 必须含真化学品/农药;
+          仅命名"clean"/"clear" 不算
+reason_text 必须直接引用产品文本的原句作为证据, 否则视为越权判决, 应 verdict=pass.
+
 # 你的判定职责 (4 个维度)
 
 ## 1. 品牌真伪 (针对 user prompt 列出的"L2 命中词")
