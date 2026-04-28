@@ -27,8 +27,24 @@ from . import usage_logger
 log = logging.getLogger(__name__)
 
 _SEM: asyncio.Semaphore | None = None
-_CLIENT: AsyncOpenAI | None = None
+# 多 key 路由: 'l1'/'l3'/'default' 各持独立 client (不同 api_key + 独立连接池)
+_CLIENTS: dict[str, AsyncOpenAI] = {}
 _RETRIABLE = (RateLimitError, APITimeoutError)
+
+
+def _resolve_api_key(purpose: str) -> str:
+    """按 purpose 路由 api_key (用户 2026-04-28: L1/L3 分别独立 key 隔离余额).
+
+    purpose='l1' → DEEPSEEK_API_KEY_L1 (空时回落 DEEPSEEK_API_KEY)
+    purpose='l3' → DEEPSEEK_API_KEY_L3 (空时回落 DEEPSEEK_API_KEY)
+    其他          → DEEPSEEK_API_KEY (默认)
+    """
+    s = get_settings()
+    if purpose == "l1" and getattr(s, "deepseek_api_key_l1", ""):
+        return s.deepseek_api_key_l1
+    if purpose == "l3" and getattr(s, "deepseek_api_key_l3", ""):
+        return s.deepseek_api_key_l3
+    return s.deepseek_api_key
 
 
 # =============================================================
@@ -137,41 +153,44 @@ def _limiter() -> _DynamicLimiter:
     return _LIMITER
 
 
-def _client() -> AsyncOpenAI:
-    """创建 AsyncOpenAI client (lazy init).
+def _client(purpose: str = "default") -> AsyncOpenAI:
+    """创建 AsyncOpenAI client (lazy init, 按 purpose 缓存).
 
     重要 (用户 2026-04-27 反馈):
       - 必须在子进程内 lazy init, 不要把主进程 client fork/pickle 给子进程
         否则 socket/连接池状态异常, 导致请求卡死/泄漏
       - 我们用 spawn 模式 (mp.get_context('spawn')), 子进程 fresh import,
-        _CLIENT 初值 None, 第一次调用此函数时才在子进程内构建, 天然安全
+        _CLIENTS 初值 {}, 第一次调用此函数时才在子进程内构建, 天然安全
 
-    显式配置 httpx Limits (跟 OpenAI SDK 默认不同):
-      - max_connections=100: 单进程最大并发 HTTP 连接 (我们 50 协程 + buffer)
-      - max_keepalive_connections=50: 保持 50 个长连接给协程复用
-      - keepalive_expiry=30s: 30s 不用就关闭, 避免连接泄漏
+    多 key 隔离 (2026-04-28):
+      - purpose='l1' / 'l3' / 'default' 各持一个 client, 独立 api_key + 独立 httpx 连接池
+      - 这样一个 key 余额不足不会影响另一个 purpose 的调用
+
+    显式配置 httpx Limits:
+      - max_connections=100, max_keepalive_connections=50, keepalive_expiry=30s
     """
-    global _CLIENT
-    if _CLIENT is None:
-        import httpx
-        s = get_settings()
-        if not s.deepseek_api_key:
-            raise RuntimeError("DEEPSEEK_API_KEY 未配置 (检查 .env)")
-        # 显式 httpx 连接池, 避免默认值 (max_connections=1000 太宽松)
-        http_client = httpx.AsyncClient(
-            limits=httpx.Limits(
-                max_connections=100,
-                max_keepalive_connections=50,
-                keepalive_expiry=30,
-            ),
-            timeout=httpx.Timeout(120.0, connect=10.0),
-        )
-        _CLIENT = AsyncOpenAI(
-            api_key=s.deepseek_api_key,
-            base_url=s.deepseek_base_url,
-            http_client=http_client,
-        )
-    return _CLIENT
+    if purpose in _CLIENTS:
+        return _CLIENTS[purpose]
+    import httpx
+    s = get_settings()
+    api_key = _resolve_api_key(purpose)
+    if not api_key:
+        raise RuntimeError(f"DEEPSEEK_API_KEY (purpose={purpose}) 未配置 (检查 .env)")
+    http_client = httpx.AsyncClient(
+        limits=httpx.Limits(
+            max_connections=100,
+            max_keepalive_connections=50,
+            keepalive_expiry=30,
+        ),
+        timeout=httpx.Timeout(120.0, connect=10.0),
+    )
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url=s.deepseek_base_url,
+        http_client=http_client,
+    )
+    _CLIENTS[purpose] = client
+    return client
 
 
 def _sem() -> asyncio.Semaphore:
@@ -195,10 +214,12 @@ async def chat_json(
     max_tokens: int = 1500,
     thinking: bool = False,
     reasoning_effort: str = "high",
+    purpose: str = "default",
 ) -> dict[str, Any]:
     """调 DeepSeek 文本 LLM, 强制 JSON 输出. messages 同 OpenAI chat completions.
 
     Args:
+        purpose: 'l1' / 'l3' / 'default' — 路由到对应 api_key (2026-04-28 用户要求 L1/L3 隔离余额)
         thinking: deepseek-v4-flash 默认开 thinking (官方默认), 我们这里默认禁用以减速并节省成本.
                   仅对真正需要深度推理的场景 (如 L3 aggressive offensive) 显式传 True.
         reasoning_effort: thinking=True 时生效. "low" / "medium" / "high" / "max".
@@ -244,7 +265,7 @@ async def chat_json(
             await limiter.acquire()
             try:
                 try:
-                    resp = await _client().chat.completions.create(**create_kwargs)
+                    resp = await _client(purpose).chat.completions.create(**create_kwargs)
                 except RateLimitError:
                     limiter.record_429()
                     raise
@@ -255,7 +276,7 @@ async def chat_json(
                     if "response_format" in str(e):
                         log.warning("deepseek %s 不支持 json_object, 回落普通文本", m)
                         create_kwargs.pop("response_format", None)
-                        resp = await _client().chat.completions.create(**create_kwargs)
+                        resp = await _client(purpose).chat.completions.create(**create_kwargs)
                     else:
                         raise
             finally:

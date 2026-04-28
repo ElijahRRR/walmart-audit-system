@@ -205,20 +205,93 @@ def _blocks_for(
     return (True, True)
 
 
+# =============================================================
+# 沃尔玛 37 条 Prohibited Products Policy 全清单 (system prompt 用)
+#
+# 设计原则 (2026-04-28):
+#   - 整段放 system prompt 末尾, 利用 DeepSeek prefix cache 命中 (~5500 字 ≈ 4-5K token)
+#   - 所有产品共享同一份, 比按 PT 路由动态拼接的旧方案 cache 命中率从 ~63% → ~95%+
+#   - 模块加载后第一次调用时 query DB, 结果缓存为 module-level 常量
+# =============================================================
+
+
+def _format_full_policy_block() -> str:
+    """从 walmart_prohibited_policy 拉 37 条压缩成 system prompt 用文本.
+
+    每条目标 < 150 字: header + status + 中国卖家风险 + 禁售摘要 + 关键 zh_seller_notes
+    """
+    with db_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, category_en, category_zh, overall_status,
+                       prohibited_items, zh_seller_risk, zh_seller_notes
+                FROM walmart_prohibited_policy ORDER BY id
+                """
+            )
+            rows = cur.fetchall()
+
+    parts: list[str] = []
+    for r in rows:
+        cat_en = (r.get("category_en") or "").strip()
+        cat_zh = (r.get("category_zh") or "").strip()
+        status = (r.get("overall_status") or "").strip().replace("\n", " ")[:50]
+        risk = (r.get("zh_seller_risk") or "").strip().replace("\n", " ")[:30]
+        prohib = (r.get("prohibited_items") or "").replace("\n", " ").replace("•", "/").strip()[:240]
+        notes = (r.get("zh_seller_notes") or "").replace("\n", " ").strip()[:80]
+
+        line = f"## {r['id']}. {cat_en} ({cat_zh})"
+        if status:
+            line += f"\n状态: {status}"
+            if risk:
+                line += f" | 中国卖家:{risk}"
+        if prohib:
+            line += f"\n禁: {prohib}"
+        if notes and "红" in risk:  # 仅高风险政策保留卖家备注 (节省 token)
+            line += f"\n备注: {notes}"
+        parts.append(line)
+
+    return "\n\n".join(parts)
+
+
+# 模块级懒加载: 第一次访问时 query DB, 之后是常量
+_FULL_POLICY_BLOCK: str | None = None
+
+
+def _get_full_policy_block() -> str:
+    global _FULL_POLICY_BLOCK
+    if _FULL_POLICY_BLOCK is None:
+        _FULL_POLICY_BLOCK = _format_full_policy_block()
+    return _FULL_POLICY_BLOCK
+
+
+_FULL_REASON_CATEGORIES: str | None = None
+
+
+def _get_full_reason_categories() -> str:
+    """37 个官方 category_en + brand_misuse + none, 作为 reason_category 候选."""
+    global _FULL_REASON_CATEGORIES
+    if _FULL_REASON_CATEGORIES is None:
+        cats = l3_policy_router.all_policy_categories() + ["brand_misuse", "none"]
+        _FULL_REASON_CATEGORIES = "\n".join(f"  - {c}" for c in cats)
+    return _FULL_REASON_CATEGORIES
+
+
 @lru_cache(maxsize=8)
 def _build_system_prompt(include_sticker: bool, include_weapons: bool) -> str:
     """精简版 system prompt — 把 LLM 自己懂的细则全砍掉, 只留必要业务约束 + 输出规范.
 
-    设计原则 (2026-04-26 重写):
-      - LLM (deepseek-chat / v4-flash) 自己已经知道贴纸/武器/IP/名人/卡通角色等常识.
-        无需在 prompt 里塞 B.1/B.2 详细规则, 也无需 C.2/C.6 的具体名单.
-      - 沃尔玛具体禁售政策 LLM 不知道 → 由 user prompt 按 PT 路由后给.
+    设计原则 (2026-04-28 更新):
+      - LLM (deepseek-v4-flash) 自己已经知道贴纸/武器/IP/名人/卡通角色等常识.
+      - **沃尔玛 37 条 Prohibited Policy 全清单放 system prompt 末尾静态段** (DeepSeek cache 命中)
+        旧方案按 PT 路由 5-6 条放 user prompt → cache miss; 新方案全 37 条静态 → cache hit
+      - user prompt 不再重复 policy_txt, 仅给"路由提示"一行节省 token
       - 品牌真假让 LLM 用上下文综合判, 不喂 4 个语境信号 + 示例.
       - 唯一保留: 业务核心约束 (中国搬运卖家无授权) + 特殊语法铁证 (compatible for X 等).
 
     签名 include_sticker/include_weapons 保留以兼容旧调用, 函数体不再使用.
     """
-    return """你是沃尔玛 Marketplace 合规审核 AI (站在沃尔玛官方立场)。
+    base = """你是沃尔玛 Marketplace 合规审核 AI (站在沃尔玛官方立场)。
 卖家是中国搬运模式、无任何证书/认证、每日数万产品。
 你只输出严格 JSON, 不要任何解释文字或 markdown 前后缀。
 
@@ -228,15 +301,31 @@ def _build_system_prompt(include_sticker: bool, include_weapons: bool) -> str:
 - 任何"授权声明"都视为虚假宣称, 一律按侵权判 (无豁免).
 - 默认 pass — 只有清晰证据才 reject.
 
-# 严格证据原则 (重要)
-判 reject 前必须严格 verify 产品文本是否真的命中政策具体禁售点, 不能因为 PT 类目接近就套用:
-  - 例 1: Home Goods 禁 "corded window blinds" → 必须 title/bullets 含 "corded" 才算违规;
-          含 "cordless" / "无绳" 反而是合规产品 (CPSC 推荐)
-  - 例 2: Children's Products 需 CPC → 必须确认是 ≤12 岁儿童用品;
-          标 "for adult" / 工具配件 不算
-  - 例 3: Hazardous Items 含 EPA → 必须含真化学品/农药;
-          仅命名"clean"/"clear" 不算
-reason_text 必须直接引用产品文本的原句作为证据, 否则视为越权判决, 应 verdict=pass.
+# 政策匹配的两类 (重要)
+
+判 reject 时, 与下方"沃尔玛 37 条 Prohibited Products Policy 全清单"做语义匹配,
+按下面两类来判 — **不要把"严格证据"误读为"标题必须明示违规用途"**:
+
+## A. 品类/设备/物料整体禁售 (政策直接禁该物本身, 不论用途)
+当政策 prohibited_items 列出**具体产品品类/设备名/物料名** → 产品本质就是这类东西即 reject:
+  - 例: Policy 1 Alcohol 禁"蒸馏设备" → 产品 = Distillation Apparatus 直接 reject
+        (即使标题写 "for essential oil / water purifier", 设备本身就是禁的)
+  - 例: Policy 17 Hazmat 禁"烟花/灭火器/18650 锂电" → 产品 = 这些即 reject
+  - 例: Policy 37 Tobacco 禁"vape pen/hookah pen" → 产品 = 这些即 reject
+  - 例: Policy 5 Auto 禁"DPF/SCR/EGR delete kit" → 产品 = delete kit 即 reject
+  - 例: Policy 23 Military 禁"防弹衣/战术头盔/手铐/警徽" → 产品 = 这些即 reject
+
+## B. 用途/特征敏感 (政策禁的是子类型/特征, 需文本佐证)
+当政策禁的是产品的**特定属性/用途/年龄段** (而非整个品类), 必须文本里有该属性证据:
+  - 例: Home Goods 禁"有绳窗帘 (corded window blinds)" → 必须含 "corded";
+        "cordless" 反而合规 (CPSC 推荐)
+  - 例: Children's Products 需 CPC → 必须 ≤12 岁儿童用品 (标 "for adult" 不算)
+  - 例: Hazardous 含"EPA-regulated" → 必须真化学品/农药; 命名 "clean" 不算
+
+## 证据要求
+- 类型 A: reason_text 写"产品本质是 [禁售品类], 政策 [Policy N] 直接禁此类"
+- 类型 B: reason_text 必须引用产品原文证据 (title/bullets 原句)
+- 不命中: verdict=pass (默认保守)
 
 # 你的判定职责 (4 个维度)
 
@@ -293,11 +382,21 @@ brand 填 Unbranded/Generic/小品牌, 但 title/描述暗示某大牌
 
 # 约束
 - 默认 verdict=pass, 只有清晰证据才 reject
-- reason_category 必须是 user prompt "候选 reason_category" 列表里的一项
+- reason_category 必须从下方"候选 reason_category 列表"里选一项
 - verdict=pass 时 reason_category 必须是 "none"
 - blacklist_brand_verdict: 对 L2 R4/R5 命中词每个都要 verdict (最多 10 个)
 - 不凭空添加未列出的品牌
+
+# 候选 reason_category (verdict=reject 时必选其一)
 """
+    return base + _get_full_reason_categories() + """
+
+# 沃尔玛 37 条 Prohibited Products Policy 全清单 (LLM 训练数据外的内部规则)
+
+判产品是否违规时与下面清单做语义匹配, 命中任一 → reason_category 填对应 category_en.
+不命中 → 默认 verdict=pass.
+
+""" + _get_full_policy_block()
 
 
 def get_system_prompt(
@@ -639,13 +738,17 @@ def _build_user_prompt(
     product: ProductInfo, l1: L1Result, l2: L2Result,
     policies: list[dict[str, Any]],
 ) -> str:
+    """User prompt - 静态政策清单已在 system prompt, 这里只放产品信息 + L2 hit + PT 提示.
+
+    设计 (2026-04-28): system prompt 含全 37 条政策 + 候选 reason_category (cache 命中),
+    user prompt 不再重复政策, 只给"按 PT 路由的最相关政策提示" (1 行) 帮 LLM 聚焦.
+    """
     bullets_txt = "\n".join(f"  - {b}" for b in product.bullet_points[:5]) or "  (无)"
     desc = (product.long_description or "").strip()
     if len(desc) > 600:
         desc = desc[:600] + "...(已截断)"
 
     l2_txt, r4_brands = _summarize_l2_hits(l2)
-    policy_txt = l3_policy_router.format_for_prompt(policies)
 
     brand_list = (
         "\n".join(f"  - {b}" for b in r4_brands)
@@ -661,23 +764,15 @@ def _build_user_prompt(
         else ""
     )
 
-    # reason_category 候选 = 路由到的政策 category_en + brand_misuse + none
+    # PT 路由提示 - 1 行简短列出最相关的几条政策 category_en (帮 LLM 聚焦, 不重复政策正文)
     routed_cats = [p["category_en"] for p in policies if p.get("category_en")]
-    reason_cat_candidates = routed_cats + ["brand_misuse", "none"]
-    cat_candidates_txt = "\n".join(f"  - {c}" for c in reason_cat_candidates)
+    hint_line = (
+        f"# 政策路由提示 (本产品 PT/category 最相关的政策, 优先核对): {', '.join(routed_cats[:5])}\n\n"
+        if routed_cats
+        else ""
+    )
 
-    # ⚠️ 顺序优化 (2026-04-27): DeepSeek cache 是 prefix exact match.
-    # 把"按 PT 半固定"内容放最前, "按产品变化"放最后, 让同 PT 不同产品共享 ~600 tokens cache.
-    # 实测: 旧顺序 cache 命中 41%, 新顺序预期 75%+
-    return f"""# 沃尔玛相关禁售政策 (这些是 LLM 训练数据外的内部规则, 命中任一 → reason_category 填对应 category_en)
-
-{policy_txt}
-
-# 候选 reason_category (verdict=reject 时必须从此列表选一)
-
-{cat_candidates_txt}
-
-# 产品信息
+    return f"""{hint_line}# 产品信息
 
 ASIN: {product.asin}
 标题: {product.title}
@@ -791,15 +886,15 @@ _VALID_VERDICTS = {"pass", "reject"}
 
 
 def _valid_reason_categories(routed_policies: list[dict[str, Any]] | None = None) -> set[str]:
-    """返回此 L3 会话可接受的 reason_category 白名单 (小写)。
+    """返回此 L3 会话可接受的 reason_category 白名单 (小写).
 
-    路由政策的 category_en + brand_misuse + none。
-    未传 policies 时退化为 37 条全集 (兼容调用方未知 category)。
+    设计 (2026-04-28): system prompt 现给 LLM 全 37 条政策清单,
+    所以校验也用全 37 条 (不再按 routed_policies 限制),
+    避免 LLM 输出"非路由但合法"的 category 被错误降级.
+
+    routed_policies 参数保留向后兼容, 但实际不再使用.
     """
-    if routed_policies:
-        cats = {p["category_en"].lower() for p in routed_policies if p.get("category_en")}
-    else:
-        cats = {c.lower() for c in l3_policy_router.all_policy_categories()}
+    cats = {c.lower() for c in l3_policy_router.all_policy_categories()}
     cats.update({"brand_misuse", "none"})
     return cats
 
@@ -966,6 +1061,7 @@ async def judge(product: ProductInfo, l1: L1Result, l2: L2Result) -> L3Result:
             cache=True,
             thinking=_enable_thinking,   # deepseek 路径下生效
             reasoning_effort="high",
+            purpose="l3",                # 路由到 DEEPSEEK_API_KEY_L3
         )
     except Exception as e:  # noqa: BLE001
         log.error("L3 LLM call failed for %s: %s", product.asin, e)

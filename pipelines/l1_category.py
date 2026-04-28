@@ -819,6 +819,7 @@ async def classify(product: ProductInfo, *, skip_llm: bool = False) -> L1Result:
             # 500 太小会让 content JSON 被截断 (实测 9.4% 失败率)
             # 2048 给 thinking ~1500 + content ~500 留够空间
             max_tokens=2048,
+            purpose="l1",  # 路由到 DEEPSEEK_API_KEY_L1
         )
     except Exception as e:  # noqa: BLE001
         log.warning("L1 LLM failed for %s: %s - 回落 DB-only 判定", product.asin, e)

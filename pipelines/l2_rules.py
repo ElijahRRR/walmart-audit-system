@@ -160,6 +160,80 @@ def _is_word_boundary_char(c: str) -> bool:
 _ACCESS_WHITELIST = {"普通商品", "附条件允许"}
 
 
+# =============================================================
+# R0: 中国搬运卖家全类目硬禁 (2026-04-28 用户指定)
+#
+# 业务规则: 中国搬运卖家完全做不了下面这些大类目, 不论 PT 是否在 walmart_pt_meta
+# 标"普通商品", 都直接挡:
+#
+#   - Vehicles / Automotive  → DOT/SAE 认证, 安全件责任 (Walmart Policy 5)
+#   - Electronics            → UL/FCC 普遍要求 (Walmart Policy 13)
+#   - Fashion                → 尺码/SKU/退货管理, 仿大牌高发 (Walmart Policy 36)
+#   - Food & Beverage        → FDA Food Facility Registration (Walmart Policy 14)
+#   - Health & Personal Care → FDA + AML vetting + MoCRA (Walmart Policy 9/10/12/21)
+#   - Beauty                 → MoCRA 化妆品合规 (Walmart Policy 9)
+#   - Baby                   → CPSIA + Safe Sleep Act (Walmart Policy 7)
+#
+# 与 phase0 区别:
+#   - phase0 按 Amazon 顶级类目硬禁 (amazon_category_path 是 "Automotive" 等)
+#   - R0 按 Walmart 类目硬禁 (l1.walmart_category — L1 判出来的真实 walmart 端归类)
+#   兜底逻辑: 商家把汽配挂 Home & Kitchen 路径 phase0 漏了, R0 看 walmart_category 兜住
+# =============================================================
+
+# walmart_category → (禁售原因, walmart_policy)
+_FORBIDDEN_WALMART_MEGA_CATEGORIES: dict[str, tuple[str, str]] = {
+    "Vehicles":               ("汽配/汽车整车: DOT/SAE 认证 + 安全件责任 + CARB 排放合规, 中国搬运做不了",
+                               "Auto & Motor Vehicles"),
+    "Automotive":             ("汽车: 整车类目禁",
+                               "Auto & Motor Vehicles"),
+    "Electronics":            ("3C 电子: UL/ETL/CSA/FCC 必备认证, 中国搬运做不了",
+                               "Electronics & RF"),
+    "Fashion":                ("服饰/鞋/包: 尺码/SKU/退货管理 + 仿大牌高发, 中国搬运做不了",
+                               "Textiles & Apparel"),
+    "Food & Beverage":        ("食品: FDA Food Facility Registration + 美国代理人 + 设施实地审, 中国搬运做不了",
+                               "Food Products"),
+    "Health & Personal Care": ("药品/医疗器械/护理: FDA + AML vetting + MoCRA, 中国搬运做不了",
+                               "Drugs & Paraphernalia"),
+    "Beauty":                 ("化妆品: MoCRA 2024 + FDA, 中国搬运做不了",
+                               "Cosmetic Products"),
+    "Baby":                   ("婴儿用品: CPSIA + Safe Sleep Act + CPC, 中国搬运做不了",
+                               "Baby Products"),
+}
+
+
+def _rule_zh_seller_mega_category_forbidden(l1: L1Result) -> list[RuleHit]:
+    """R0: 中国搬运卖家全类目硬禁 (在 R1 之前执行).
+
+    数据源: l1.walmart_category (L1 判定输出, 精度高于 Amazon 顶级类目)
+    判定: walmart_category ∈ 用户指定大类 → -100 reject
+    """
+    cat = (l1.walmart_category or "").strip()
+    if not cat:
+        return []
+    if l1.excluded_category_reason:  # L1 已扣过 → 不重复
+        return []
+
+    entry = _FORBIDDEN_WALMART_MEGA_CATEGORIES.get(cat)
+    if not entry:
+        return []
+
+    reason, walmart_policy = entry
+    return [
+        RuleHit(
+            stage="L2",
+            rule_code="zh_seller_mega_cat_forbidden",
+            penalty=-100,
+            detail={
+                "walmart_pt": l1.walmart_product_type,
+                "walmart_category": cat,
+                "walmart_policy": walmart_policy,
+                "reason": reason,
+                "source": "用户指定: 中国搬运卖家全类目硬禁",
+            },
+        )
+    ]
+
+
 def _rule_category_gate(l1: L1Result) -> list[RuleHit]:
     """R1: 类目准入 gate — 双字段白名单检查 (用户 2026-04-27 规则).
 
@@ -308,6 +382,151 @@ HARD_CERT_FIELDS = frozenset({
 })
 
 
+# =============================================================
+# walmart_policy 推导 (用 walmart_category + PT 名 + cert 关键词三重信号)
+#
+# 修复 2026-04-28: 旧版纯靠 cert 关键字反推 walmart_policy 太粗暴, 例如:
+#   - Chicken Coop Accessories (cat=Animals, requirements 含 FDA) → 错归 Cosmetic Products
+#   - Drawing Boards (cat=Arts & Crafts, requirements 含 UL) → 错归 Electronics & RF
+#   - Pool Heater Parts (cat=Garden & Patio, 含 EPA ENERGY STAR 自愿能效) → 错归 Hazmat
+# 新逻辑: 优先 walmart_category (飞书原生大类) → policy, cert 关键字只在 cat 没对应时 fallback.
+# =============================================================
+
+# walmart_category → walmart_prohibited_policy.category_en
+# (粗映射, 仅在 cat 与 policy 强相关时直接映射, 不强相关用 cert/PT 名补)
+_CATEGORY_TO_POLICY = {
+    "vehicles": "Auto & Motor Vehicles",
+    "automotive": "Auto & Motor Vehicles",
+    "electronics": "Electronics & RF",
+    "fashion": "Textiles & Apparel",
+    "beauty": "Cosmetic Products",
+    "baby": "Baby Products",
+    "toys": "Children's Products",
+    "media": "Software",
+}
+
+# walmart_category 默认是普通商品的大类 (PT 不含电子关键字时强制 General-Use, 防止 cert 字串误归 RF)
+_GENERAL_USE_CATEGORIES = {
+    "arts & crafts", "home improvement", "sporting goods", "office",
+    "musical instruments", "business & industrial", "furniture", "household",
+    "occasion & seasonal", "everything else", "safety & emergency", "photography",
+}
+
+# 真正"电子产品"PT 的关键字 (在 General-Use 大类下命中这些才升级到 Electronics & RF)
+_ELECTRONIC_PT_KEYWORDS = (
+    "led", "lamp", "lantern", "light", "lighting", "electric", "electronic",
+    "wireless", "bluetooth", "wifi", "battery-powered", "rechargeable", "usb",
+    "speaker", "amplifier", "fan", "heater", "cooler", "freezer", "refrigerator",
+    "monitor ", "display ", "screen", "projector", "appliance", "flashlight",
+)
+
+# PT 名关键字 → policy (覆盖 cat_map 走不通的强信号 PT)
+# 顺序敏感: 先匹配的优先
+_PT_KEYWORD_TO_POLICY: list[tuple[tuple[str, ...], str]] = [
+    (("vape", "e-cigar", "hookah", "tobacco", "cigarette"), "Tobacco & Vaping"),
+    (("alcohol", "distillation apparatus", "still ", "moonshine", "wine kit"), "Alcohol"),
+    (("vitamin", "supplement", "protein powder"), "Dietary Supplements"),
+    (("medical device", "stethoscope", "blood pressure monitor", "thermometer"), "Medical Devices"),
+    (("pesticide", "herbicide", "insecticide", "fertilizer", "rodenticide", "pest"), "Hazardous Items"),
+    (("seed", "live plant", "live tree", "sapling"), "Plants & Seeds"),
+    (("firearm", "ammunition", "bullet ", "bulletproof", "tactical vest", "body armor", "police badge"), "Military & Law Enforcement"),
+    (("helmet", "bicycle helmet"), "General-Use Products"),  # ASTM/CPSC, 不归 RF
+    (("chicken coop", "pet bowl", "pet food", "dog food", "cat food", "bird seed"), "Pet Products"),
+    (("scooter", "e-bike", "hoverboard", "ebike", "balance bike"), "Ride-Ons & Micromobility"),
+]
+
+
+def _infer_walmart_policy(walmart_category: str, hard_matches: list[str], walmart_pt: str) -> str:
+    """三重信号推 walmart_policy (准确度: walmart_category > PT 关键字 > cert 关键字).
+
+    - walmart_category 强相关大类 (Vehicles/Toys/Beauty 等) → 直接映射
+    - PT 名包含强信号关键字 (vape/distillation/firearm 等) → 直接映射
+    - cert 关键字 fallback (FDA → Cosmetic 仅当无前两个信号时)
+    """
+    cat_low = (walmart_category or "").lower().strip()
+    pt_low = (walmart_pt or "").lower().strip()
+    cert_str = " ".join(hard_matches).lower()
+
+    # 1. PT 名关键字 (最具体的信号, 优先)
+    for kws, policy in _PT_KEYWORD_TO_POLICY:
+        if any(k in pt_low for k in kws):
+            return policy
+
+    # 2. walmart_category 直映射 (粗大类)
+    if cat_low in _CATEGORY_TO_POLICY:
+        return _CATEGORY_TO_POLICY[cat_low]
+
+    # 3. Animals 大类 - 区分 Pet Products (家禽/家宠) vs Animals (野生)
+    if cat_low == "animals":
+        if any(k in pt_low for k in ("live ", "wild ", "exotic")):
+            return "Animals"
+        return "Pet Products"
+
+    # 4. Garden & Patio - 区分 Hazmat (化学/农药) vs General
+    if cat_low == "garden & patio":
+        if any(k in pt_low for k in ("fertilizer", "pesticide", "herbicide", "insecticide", "soil", "weed")):
+            return "Hazardous Items"
+        if any(k in pt_low for k in ("seed", "plant", "tree", "bulb")):
+            return "Plants & Seeds"
+        return "General-Use Products"
+
+    # 5. Food & Beverage
+    if cat_low in ("food & beverage", "food and beverage"):
+        if any(k in cert_str for k in ("alcohol", "beer", "wine", "spirit")):
+            return "Alcohol"
+        return "Food Products"
+
+    # 6. Health & Personal Care - 区分 cosmetic / medical / supplement
+    if cat_low == "health & personal care":
+        if any(k in cert_str for k in ("510(k)", "medical")):
+            return "Medical Devices"
+        if any(k in pt_low for k in ("supplement", "vitamin", "protein")):
+            return "Dietary Supplements"
+        return "Cosmetic Products"
+
+    # 7. General-Use 大类 (Arts & Crafts / Home Improvement / Sporting Goods 等):
+    #    仅当 PT 名含真"电子产品"关键字时才归 RF, 否则普通商品 (修 Drawing Boards/Pressure Regulators/Boat Brackets 误归 RF)
+    if cat_low in _GENERAL_USE_CATEGORIES:
+        if any(k in pt_low for k in _ELECTRONIC_PT_KEYWORDS):
+            return "Electronics & RF"
+        return "General-Use Products"
+
+    # 8. Home 大类 (Lava Lamps/Floor Lamps 等带电家居 → RF, 其他 → Home Goods)
+    if cat_low == "home":
+        if any(k in pt_low for k in _ELECTRONIC_PT_KEYWORDS):
+            return "Electronics & RF"
+        return "Home Goods"
+
+    # 9. cert 关键字 fallback (粗粒度, 不准但覆盖兜底)
+    if any(k in cert_str for k in ('cpsia', 'cpc', 'gcc')):
+        return "Children's Products"
+    if any(k in cert_str for k in ('fda', 'mocra')):
+        if 'medical' in cert_str:
+            return "Medical Devices"
+        if 'food' in cert_str or '食品' in cert_str:
+            return "Food Products"
+        if 'pet' in cert_str or '宠物' in cert_str or 'animal' in cert_str:
+            return "Pet Products"
+        if 'drug' in cert_str or '药品' in cert_str:
+            return "Drugs & Paraphernalia"
+        return "Cosmetic Products"
+    if 'aafco' in cert_str:
+        return "Pet Products"
+    if any(k in cert_str for k in ('atf', 'dea')):
+        return "Drugs & Paraphernalia"
+    if any(k in cert_str for k in ('ul', 'etl', 'csa', 'nrtl', 'fcc')):
+        return "Electronics & RF"
+    if 'epa' in cert_str:
+        # EPA ENERGY STAR 是自愿能效, 不是 Hazmat; 真 Hazmat 看 FIFRA/TSCA/化学
+        if any(k in cert_str for k in ('fifra', 'tsca', 'pesticide', '危险', 'hazmat')):
+            return "Hazardous Items"
+        if 'energy star' in cert_str:
+            return "General-Use Products"
+        return "Hazardous Items"  # 默认 EPA → Hazmat (旧逻辑保留, 多数 EPA 注册都是危品)
+
+    return "General-Use Products"
+
+
 def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
     """R3: 证书要求判定 - 3 层数据源叠加。
 
@@ -334,7 +553,7 @@ def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
     with db_conn() as c:
         with c.cursor() as cur:
             cur.execute(
-                """SELECT requirements, notes FROM walmart_pt_meta
+                """SELECT requirements, notes, walmart_category FROM walmart_pt_meta
                    WHERE walmart_product_type = %s""",
                 (pt,),
             )
@@ -342,6 +561,7 @@ def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
 
     meta_req = (meta.get("requirements") if meta else "") or ""
     meta_notes = (meta.get("notes") if meta else "") or ""
+    meta_cat = (meta.get("walmart_category") if meta else "") or ""
 
     # 扫描关键词 (忽略大小写)
     req_low = meta_req.lower()
@@ -391,22 +611,9 @@ def _rule_cat_requires_cert(l1: L1Result) -> list[RuleHit]:
 
     # A. meta 硬性认证命中 → -100
     if hard_matches:
-        # 按 cert 类型推 walmart_policy (直接对齐 Walmart 政策, 不需要 L3)
-        _cert_str = " ".join(hard_matches).lower()
-        if any(k in _cert_str for k in ['cpsia', 'cpc', 'gcc']):
-            _policy = "Children's Products"
-        elif any(k in _cert_str for k in ['fda', 'mocra']):
-            _policy = "Medical Devices" if 'medical' in _cert_str else "Cosmetic Products"
-        elif 'aafco' in _cert_str:
-            _policy = "Pet Products"
-        elif any(k in _cert_str for k in ['ul', 'etl', 'csa', 'nrtl', 'fcc']):
-            _policy = "Electronics & RF"
-        elif 'epa' in _cert_str:
-            _policy = "Hazardous Items"
-        elif any(k in _cert_str for k in ['atf', 'dea']):
-            _policy = "Drugs & Paraphernalia"
-        else:
-            _policy = "General-Use Products"
+        # 推 walmart_policy: 优先 walmart_category (飞书原生大类, 准),
+        # cert 关键词只做辅助/fallback (修 2026-04-28: 旧逻辑纯靠 cert 字符串误归 Chicken Coop→Cosmetic, Drawing Boards→RF)
+        _policy = _infer_walmart_policy(meta_cat, hard_matches, pt)
         return [
             RuleHit(
                 stage="L2",
@@ -1160,6 +1367,7 @@ def evaluate(product: ProductInfo, l1: L1Result) -> L2Result:
     # 2. 跑 L2 规则
     # 注: R6 "blacklist_compatible_for" 已删除, 改由 L3 LLM 判 (精度更高)
     rules = [
+        _rule_zh_seller_mega_category_forbidden(l1),  # R0: walmart_category 全类目硬禁 (用户 2026-04-28)
         _rule_category_gate(l1),
         _rule_forbidden_mega_cat(l1),
         _rule_cat_requires_cert(l1),

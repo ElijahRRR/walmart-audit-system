@@ -50,7 +50,9 @@ class Settings:
     gemini_text_model: str
 
     # --- DeepSeek (文本 LLM, OpenAI 兼容) ---
-    deepseek_api_key: str
+    deepseek_api_key: str           # 默认/兜底
+    deepseek_api_key_l1: str        # L1 类目判定专用 (可空, 空时用默认)
+    deepseek_api_key_l3: str        # L3 内容审核专用 (可空, 空时用默认)
     deepseek_base_url: str
     deepseek_model: str
 
@@ -111,7 +113,9 @@ def get_settings() -> Settings:
         gemini_vision_model=_get("GEMINI_VISION_MODEL", "gemini-2.5-flash-lite"),
         gemini_text_model=_get("GEMINI_TEXT_MODEL", "gemini-2.5-flash-lite"),
         # DeepSeek (api.deepseek.com OpenAI 兼容)
-        deepseek_api_key=_get("DEEPSEEK_API_KEY", ""),  # 必须从 .env 读
+        deepseek_api_key=_get("DEEPSEEK_API_KEY", ""),                # 默认/兜底
+        deepseek_api_key_l1=_get("DEEPSEEK_API_KEY_L1", ""),          # L1 类目判定 (可空 → 用默认)
+        deepseek_api_key_l3=_get("DEEPSEEK_API_KEY_L3", ""),          # L3 内容审核 (可空 → 用默认)
         deepseek_base_url=_get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
         deepseek_model=_get("DEEPSEEK_MODEL", "deepseek-v4-flash"),
         lark_wiki_blacklist=_get("LARK_WIKI_BLACKLIST", "UhZJw3EtsiFN9skbG0Ac24Dgn4b"),

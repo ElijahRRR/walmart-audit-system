@@ -96,6 +96,7 @@ async def chat_json(
     cache: bool = False,
     thinking: bool = False,
     reasoning_effort: str = "high",
+    purpose: str = "default",
 ) -> dict[str, Any]:
     """调文本 LLM, 强制 JSON 输出。messages 格式同 OpenAI chat completions。
 
@@ -139,6 +140,7 @@ async def chat_json(
         result = await deepseek_client.chat_json(
             messages, model=m, temperature=temperature, max_tokens=max_tokens,
             thinking=thinking, reasoning_effort=reasoning_effort,
+            purpose=purpose,
         )
         if cache_key and result and "_raw" not in result:
             await llm_cache.cache_put(
