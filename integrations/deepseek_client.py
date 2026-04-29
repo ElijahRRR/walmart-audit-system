@@ -17,7 +17,14 @@ import logging
 import time
 from typing import Any
 
-from openai import APIError, APITimeoutError, AsyncOpenAI, RateLimitError
+from openai import (
+    APIConnectionError,
+    APIError,
+    APITimeoutError,
+    AsyncOpenAI,
+    InternalServerError,
+    RateLimitError,
+)
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from config import get_settings
@@ -29,7 +36,13 @@ log = logging.getLogger(__name__)
 _SEM: asyncio.Semaphore | None = None
 # 多 key 路由: 'l1'/'l3'/'default' 各持独立 client (不同 api_key + 独立连接池)
 _CLIENTS: dict[str, AsyncOpenAI] = {}
-_RETRIABLE = (RateLimitError, APITimeoutError)
+# 重试白名单 (官方 2026-04 文档推荐):
+#   - RateLimitError (429): 限流, 指数退避
+#   - APITimeoutError: 客户端超时
+#   - InternalServerError (500/503): 服务端故障/负载过高, 官方建议重试 5-30s
+#   - APIConnectionError: 网络抖动 (TLS 握手风暴常见)
+# 不重试: 400 (格式错) / 401 (key 错) / 402 (余额) / 422 (参数)
+_RETRIABLE = (RateLimitError, APITimeoutError, InternalServerError, APIConnectionError)
 
 
 def _resolve_api_key(purpose: str) -> str:
@@ -182,7 +195,9 @@ def _client(purpose: str = "default") -> AsyncOpenAI:
             max_keepalive_connections=50,
             keepalive_expiry=30,
         ),
-        timeout=httpx.Timeout(120.0, connect=10.0),
+        # 官方文档: thinking 模式推理可达 10min, 服务端 keep-alive 期间会发空行/SSE 注释
+        # 设 600s 兜住 thinking, connect 仍 10s 快速失败
+        timeout=httpx.Timeout(600.0, connect=10.0),
     )
     client = AsyncOpenAI(
         api_key=api_key,
@@ -284,8 +299,15 @@ async def chat_json(
             duration_ms = int((time.monotonic() - t0) * 1000)
             limiter.record_ok(duration_ms)
             usage_logger.log_usage_from_response(m, resp, duration_ms=duration_ms)
-            text = (resp.choices[0].message.content or "").strip()
-            return _json_from_text(text)
+            msg = resp.choices[0].message
+            text = (msg.content or "").strip()
+            # thinking 模式: 把 reasoning_content 也保存到结果 (官方文档: 与 content 同级返回)
+            # 非 thinking 不返回此字段, 不影响
+            reasoning = getattr(msg, "reasoning_content", None)
+            result = _json_from_text(text)
+            if reasoning and isinstance(result, dict):
+                result["_reasoning"] = reasoning   # debug 用, 不参与 JSON schema
+            return result
     raise RuntimeError("unreachable")  # pragma: no cover
 
 

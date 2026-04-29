@@ -116,7 +116,7 @@ def get_settings() -> Settings:
         deepseek_api_key=_get("DEEPSEEK_API_KEY", ""),                # 默认/兜底
         deepseek_api_key_l1=_get("DEEPSEEK_API_KEY_L1", ""),          # L1 类目判定 (可空 → 用默认)
         deepseek_api_key_l3=_get("DEEPSEEK_API_KEY_L3", ""),          # L3 内容审核 (可空 → 用默认)
-        deepseek_base_url=_get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+        deepseek_base_url=_get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),  # 官方主页推荐 (不带 /v1)
         deepseek_model=_get("DEEPSEEK_MODEL", "deepseek-v4-flash"),
         lark_wiki_blacklist=_get("LARK_WIKI_BLACKLIST", "UhZJw3EtsiFN9skbG0Ac24Dgn4b"),
         lark_wiki_category_map=_get("LARK_WIKI_CATEGORY_MAP", "UKdZwr7JqiO6UckjSnPcwTCgnvd"),
