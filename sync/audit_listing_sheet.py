@@ -163,10 +163,14 @@ def write_back(results: list[RowResult], *, dry_run: bool = False, batch_size: i
 
 
 async def main_async(args: argparse.Namespace) -> int:
-    # 1. 读飞书表
-    log.info("读上架表: %s / %s", SPREADSHEET_TOKEN, SHEET_ID)
-    rows = lark_client.read_range(SPREADSHEET_TOKEN, f"{SHEET_ID}!A2:F4500")
-    log.info("读到 %d 行 (含空行)", len(rows))
+    # 1. 全表分页读 (lark-cli +read truncate 200 行, read_paginated 自动分页)
+    log.info("分页读上架表: %s / %s", SPREADSHEET_TOKEN, SHEET_ID)
+    rows = await asyncio.to_thread(
+        lark_client.read_paginated, SPREADSHEET_TOKEN, SHEET_ID, "F", 200,
+    )
+    # read_paginated 从 row 1 开始读, 我们的 DATA_START_ROW=2, 跳第 1 行表头
+    rows = rows[DATA_START_ROW - 1:]
+    log.info("读到 %d 数据行 (跳过表头)", len(rows))
 
     # 2. 扫待审
     pending = scan_pending(rows, limit=args.limit)
@@ -177,23 +181,52 @@ async def main_async(args: argparse.Namespace) -> int:
     if args.limit:
         log.info("限制 --limit=%d, 实际跑 %d", args.limit, len(pending))
 
-    # 3. 批量 DMIT 拉数据 (内部对 missing 自动 upload 触发采集)
+    # 3. DMIT fetch + 等待重试循环 (用户 2026-04-30: DMIT 采集 ~1500/min, 缺失自动等待)
     asins = [p.asin for p in pending]
-    log.info("批量 DMIT fetch %d 条 ...", len(asins))
-    present, missing = await fetch_product_infos_batch(
-        asins, fresh_sec=args.fresh_sec, concurrency=10,
-    )
-    log.info("DMIT 命中: %d / 缺失(已推采集): %d", len(present), len(missing))
+    pending_by_asin = {p.asin: p for p in pending}
+    DMIT_RATE_PER_MIN = 1500
+    MAX_DMIT_RETRY = 3
+    BUFFER_SEC = 30  # 缓冲一点排队时间
 
-    # missing 的 ASIN 标 skipped (DMIT 没数据)
+    present: dict[str, ProductInfo] = {}
+    todo_asins = list(asins)
+
+    for attempt in range(MAX_DMIT_RETRY + 1):
+        log.info("[DMIT 第 %d 轮] fetch %d 条 ...", attempt + 1, len(todo_asins))
+        new_present, new_missing = await fetch_product_infos_batch(
+            todo_asins, fresh_sec=args.fresh_sec, concurrency=50,
+        )
+        for a, info in new_present.items():
+            present[a] = info
+        log.info(
+            "[DMIT 第 %d 轮] 命中 %d / 缺失 %d (累计命中 %d / %d)",
+            attempt + 1, len(new_present), len(new_missing),
+            len(present), len(asins),
+        )
+
+        if not new_missing:
+            break
+        if attempt >= MAX_DMIT_RETRY:
+            log.warning("[DMIT] 达到最大重试次数, 剩余 %d 个仍缺数据 → skipped", len(new_missing))
+            break
+
+        # 估算等待时间: missing/1500 分钟 + 30s buffer
+        wait_sec = max(60, int(len(new_missing) / DMIT_RATE_PER_MIN * 60) + BUFFER_SEC)
+        log.info(
+            "[DMIT 第 %d 轮] 缺 %d 个已推采集 → 等 %ds (按 %d/min) 后重试",
+            attempt + 1, len(new_missing), wait_sec, DMIT_RATE_PER_MIN,
+        )
+        await asyncio.sleep(wait_sec)
+        todo_asins = list(new_missing)
+
+    # 没拉到数据的 ASIN 标 skipped
     missing_results: list[RowResult] = []
-    missing_set = set(missing)
-    for p in pending:
-        if p.asin in missing_set:
-            missing_results.append(RowResult(
-                row=p, pt="", verdict="skipped",
-                reason="DMIT 缺数据 (已推采集, 5-10 分钟后重跑)",
-            ))
+    missing_set = set(asins) - set(present.keys())
+    for a in missing_set:
+        missing_results.append(RowResult(
+            row=pending_by_asin[a], pt="", verdict="skipped",
+            reason=f"DMIT 缺数据 ({MAX_DMIT_RETRY+1} 轮后仍未采集到, 已再次推采集队列)",
+        ))
 
     # 4. 准备 chunk (复用 audit_from_lark_sheet 的 _process_pool_chunk_worker)
     audit_items: list[tuple[Any, ProductInfo, bool]] = []
