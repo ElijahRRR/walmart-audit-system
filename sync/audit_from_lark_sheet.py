@@ -125,14 +125,17 @@ def scan_pending_range(rows: list[list[Any]], *,
 
 def scan_pending(rows: list[list[Any]], *,
                  limit: int | None = None,
-                 offset: int = 0) -> list[PendingRow]:
+                 offset: int = 0,
+                 retry_skipped: bool = False) -> list[PendingRow]:
     """扫全表找待审行.
 
     Args:
         rows: read_paginated 返回的二维数组, 第 0 行是表头.
         limit: 取前 N 条 (None 不限).
         offset: 跳过前 N 个数据行 (用于分批跑大表, 不算表头).
+        retry_skipped: True 时把 verdict='skipped' 也算待审 (DMIT 采集后捡漏用).
     """
+    retry_states = RETRY_STATES + (("skipped",) if retry_skipped else ())
     pending: list[PendingRow] = []
     skipped = 0
     for idx, row in enumerate(rows):
@@ -143,7 +146,7 @@ def scan_pending(rows: list[list[Any]], *,
         verdict = _cell(row, COL_VERDICT)
         if not asin:
             continue
-        if verdict and verdict not in RETRY_STATES:
+        if verdict and verdict not in retry_states:
             continue
         # offset: 跳过前 N 个有效数据行
         if skipped < offset:
@@ -542,7 +545,8 @@ async def run(args: argparse.Namespace) -> int:
             lark_client.read_paginated, SPREADSHEET_TOKEN, SHEET_ID, "H", 200,
         )
         log.info("读到 %d 行 (含表头)", len(rows))
-        pending = scan_pending(rows, limit=args.limit, offset=args.offset)
+        pending = scan_pending(rows, limit=args.limit, offset=args.offset,
+                                retry_skipped=args.retry_skipped)
     if not pending:
         log.info("无待审行 (offset=%d 之后全是已审 pass/reject)", args.offset)
         return 0
@@ -551,14 +555,39 @@ async def run(args: argparse.Namespace) -> int:
              ", ".join(p.asin for p in pending[:5]),
              " ..." if len(pending) > 5 else "")
 
-    # 阶段 1: 一次 batch 拉所有 ASIN 的 DMIT 数据
+    # 阶段 1: DMIT 拉数据 + 缺失自动等待重试 (用户 2026-04-30: DMIT ~1500/min)
     asins = [p.asin for p in pending]
     log.info("批量 DMIT fetch %d 条 (concurrency=%d, fresh_sec=%d, skip_missing=%s)...",
              len(asins), args.concurrency, args.fresh_sec, args.skip_missing_dmit)
-    present, missing = await fetch_product_infos_batch(
-        asins, fresh_sec=args.fresh_sec, concurrency=args.concurrency,
-    )
-    log.info("DMIT 命中 %d / 缺失 %d", len(present), len(missing))
+    DMIT_RATE_PER_MIN = 1500
+    MAX_DMIT_RETRY = 3  # 共 4 轮 (第 1 次 + 3 次重试)
+    BUFFER_SEC = 30
+    present: dict[str, ProductInfo] = {}
+    todo_asins = list(asins)
+    for attempt in range(MAX_DMIT_RETRY + 1):
+        new_present, new_missing = await fetch_product_infos_batch(
+            todo_asins, fresh_sec=args.fresh_sec, concurrency=args.concurrency,
+        )
+        for a, info in new_present.items():
+            present[a] = info
+        log.info(
+            "[DMIT 第 %d 轮] 命中 %d / 缺失 %d (累计 %d / %d)",
+            attempt + 1, len(new_present), len(new_missing),
+            len(present), len(asins),
+        )
+        if not new_missing:
+            break
+        if attempt >= MAX_DMIT_RETRY:
+            log.warning("[DMIT] %d 轮后仍缺 %d 个, 标 skipped", attempt + 1, len(new_missing))
+            break
+        wait_sec = max(60, int(len(new_missing) / DMIT_RATE_PER_MIN * 60) + BUFFER_SEC)
+        log.info(
+            "[DMIT 第 %d 轮] 缺 %d 个已推采集 → 等 %ds (按 %d/min) 后重试",
+            attempt + 1, len(new_missing), wait_sec, DMIT_RATE_PER_MIN,
+        )
+        await asyncio.sleep(wait_sec)
+        todo_asins = list(new_missing)
+    missing = list(set(asins) - set(present.keys()))
 
     # 阶段 2: ProcessPoolExecutor 多进程审核
     pending_results: list[RowResult] = []
@@ -691,6 +720,8 @@ def main() -> int:
                         help="(已弃用) 旧 worker pool 的 task 启动错开间隔; ProcessPool 模式下无效")
     parser.add_argument("--fresh-sec", type=int, default=86400,
                         help="DMIT 新鲜度阈值, 秒 (默认 86400=24h)")
+    parser.add_argument("--retry-skipped", action="store_true",
+                        help="把 D 列='skipped' 的行也当待审重跑 (DMIT 采集完成后捡漏用)")
     parser.add_argument("--dry-run", action="store_true", help="不回写, 只打印")
     parser.add_argument("--quiet", action="store_true", help="只打 WARN 以上日志 (cron 用)")
     args = parser.parse_args()

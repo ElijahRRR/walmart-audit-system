@@ -92,7 +92,7 @@ def resolve_wiki_node(wiki_token: str) -> dict[str, Any]:
 
 def list_sheets(spreadsheet_token: str) -> tuple[str, list[SheetInfo]]:
     """返回 (spreadsheet_title, [SheetInfo...])。"""
-    payload = _run(["sheets", "+info", "--spreadsheet-token", spreadsheet_token])
+    payload = _run(["sheets", "+info", "--spreadsheet-token", spreadsheet_token, "--as", "user"])
     data = payload.get("data", {})
     sheets_raw = (data.get("sheets") or {}).get("sheets") or []
     ss_title = (data.get("spreadsheet") or {}).get("spreadsheet", {}).get("title") or ""
@@ -109,7 +109,11 @@ def list_sheets(spreadsheet_token: str) -> tuple[str, list[SheetInfo]]:
 
 
 def read_range(spreadsheet_token: str, a1_range: str) -> list[list[Any]]:
-    """A1 范围读取。例: "eGjQRX!A1:K60"。返回二维数组。"""
+    """A1 范围读取。例: "eGjQRX!A1:K60"。返回二维数组。
+
+    走 user 身份 (lark-cli 默认 bot 在大表上易触发 1663 internal error,
+    user 身份更稳定 — 用户 2026-05-06 反馈)
+    """
     payload = _run(
         [
             "sheets",
@@ -118,6 +122,8 @@ def read_range(spreadsheet_token: str, a1_range: str) -> list[list[Any]]:
             spreadsheet_token,
             "--range",
             a1_range,
+            "--as",
+            "user",
         ]
     )
     vr = (payload.get("data") or {}).get("valueRange") or {}
@@ -135,9 +141,13 @@ def read_full_sheet(spreadsheet_token: str, sheet_id: str, max_col_letter: str =
 
 
 def read_paginated(
-    spreadsheet_token: str, sheet_id: str, last_col_letter: str = "Z", page_size: int = 200
+    spreadsheet_token: str, sheet_id: str, last_col_letter: str = "Z", page_size: int = 5000
 ) -> list[list[Any]]:
-    """lark-cli +read 会 truncate 到 200 行。分页把整张 sheet 读完。"""
+    """分页全表读. lark-cli 1.0.21+ 单次 +read 可拉 5000 行 (旧版 truncate 200).
+
+    11 万行表: 旧 200/页 × 558 次 ~10min → 新 5000/页 × 22 次 ~25s.
+    用户 2026-05-06 反馈"逐行读太慢"后实测优化.
+    """
     _, sheets = list_sheets(spreadsheet_token)
     target = next((s for s in sheets if s.sheet_id == sheet_id), None)
     if target is None:
@@ -158,13 +168,12 @@ def read_paginated(
 def read_row_range(
     spreadsheet_token: str, sheet_id: str,
     start_row: int, end_row: int,
-    last_col_letter: str = "Z", page_size: int = 200,
+    last_col_letter: str = "Z", page_size: int = 5000,
 ) -> list[list[Any]]:
-    """只读指定行 range, 用于大表分批跑 (避免每批都 read_paginated 全表).
+    """只读指定行 range, 用于大表分批跑.
 
-    比如 11 万行表跑 batch 1 (row 2-10001):
-      read_paginated:    559 次 API call (读全表), ~18 分钟
-      read_row_range:     50 次 API call (只读 10000 行), ~1.5 分钟
+    优化 (2026-05-06): page_size 200 → 5000 (lark-cli 1.0.21+ 单次能拉 5000 行).
+    11 万行表: 旧 558 次 API call ~10min → 新 22 次 ~22s.
     """
     if start_row > end_row:
         return []
