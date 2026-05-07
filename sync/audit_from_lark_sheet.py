@@ -529,7 +529,7 @@ async def run(args: argparse.Namespace) -> int:
         end_row = args.start_row + int(args.limit * 1.5) - 1
         rows = await asyncio.to_thread(
             lark_client.read_row_range, SPREADSHEET_TOKEN, SHEET_ID,
-            args.start_row, end_row, "H", 200,
+            args.start_row, end_row, "H", 5000,   # 单次读 5000 行 (lark-cli 1.0.21+ 支持)
         )
         log.info("读 row %d-%d, 实际拿到 %d 行", args.start_row, end_row, len(rows))
         # 把表头位置补一个 dummy header (scan_pending 跳第 1 行), 然后 row_num 偏移修正
@@ -542,7 +542,7 @@ async def run(args: argparse.Namespace) -> int:
     else:
         # 全表模式 (兼容旧逻辑, 4326 ASIN 可用)
         rows = await asyncio.to_thread(
-            lark_client.read_paginated, SPREADSHEET_TOKEN, SHEET_ID, "H", 200,
+            lark_client.read_paginated, SPREADSHEET_TOKEN, SHEET_ID, "H", 5000,
         )
         log.info("读到 %d 行 (含表头)", len(rows))
         pending = scan_pending(rows, limit=args.limit, offset=args.offset,
