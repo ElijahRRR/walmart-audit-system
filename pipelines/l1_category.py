@@ -273,17 +273,32 @@ async def _fetch_candidates_hybrid(product: ProductInfo, *, embed_k: int = 40, k
     embed_cands = await _fetch_embedding_candidates(product, top_k=embed_k)
     kw_cands = _fetch_candidates(product, limit=kw_k)
 
+    # 修复 (2026-05-08): walmart_category_map 精确 amazon_category 匹配 (exact / prefix / leaf)
+    # 必须排到 embedding 之前. 否则 prompt[:20] 截断会把精确答案丢掉.
+    # 例: B0FDW1J3NZ "Gate Openers" → exact match "Other Decking & Fencing Hardware"
+    # 旧排序里被 40 个无关 embedding PT 挤到第 41 位, 截断后 LLM 看不到 → 输 unknown
+    HIGH_PRIORITY_TYPES = {"exact", "prefix", "leaf"}
+    high_pri = [c for c in kw_cands if c.get("match_type") in HIGH_PRIORITY_TYPES]
+    rest_kw = [c for c in kw_cands if c.get("match_type") not in HIGH_PRIORITY_TYPES]
+
     merged: list[dict[str, Any]] = []
     seen: set[str] = set()
-    # embedding 优先
+    # 1. 高优先级: walmart_category_map 精确/前缀/叶子匹配
+    for c in high_pri:
+        key = c["walmart_product_type"]
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(c)
+    # 2. embedding 语义召回
     for c in embed_cands:
         key = c["walmart_product_type"]
         if key in seen:
             continue
         seen.add(key)
         merged.append(c)
-    # 关键词补充
-    for c in kw_cands:
+    # 3. 关键词补充 (title_keyword 等)
+    for c in rest_kw:
         key = c["walmart_product_type"]
         if key in seen:
             continue
