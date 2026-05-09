@@ -191,17 +191,21 @@ def _fetch_candidates(product: ProductInfo, limit: int = 10) -> list[dict[str, A
             r["match_type"] = match_type
             candidates.append(r)
 
+    # 修复 2026-05-09: 所有候选必须是 walmart_pt_meta 真实可用 PT,
+    # 过滤掉 walmart_category_map 中残留的废弃 PT 名 (e.g. "Office Chairs",
+    # 实际 walmart 改名 "Desk Chairs", 但 map 表还存着旧名导致 LLM 误用)
     with db_conn() as c:
         with c.cursor() as cur:
             # 1. 精确路径
             if path:
                 cur.execute(
                     """
-                    SELECT amazon_category, walmart_product_type, confidence,
-                           requires_certificate, zh_seller_forbidden, requirements, notes
-                    FROM walmart_category_map
-                    WHERE amazon_category = %s
-                    ORDER BY CASE confidence WHEN '高' THEN 0 WHEN '中' THEN 1 WHEN '低' THEN 2 ELSE 3 END
+                    SELECT m.amazon_category, m.walmart_product_type, m.confidence,
+                           m.requires_certificate, m.zh_seller_forbidden, m.requirements, m.notes
+                    FROM walmart_category_map m
+                    INNER JOIN walmart_pt_meta meta ON meta.walmart_product_type = m.walmart_product_type
+                    WHERE m.amazon_category = %s
+                    ORDER BY CASE m.confidence WHEN '高' THEN 0 WHEN '中' THEN 1 WHEN '低' THEN 2 ELSE 3 END
                     LIMIT 3
                     """,
                     (path,),
@@ -212,12 +216,13 @@ def _fetch_candidates(product: ProductInfo, limit: int = 10) -> list[dict[str, A
             if path and len(candidates) < limit:
                 cur.execute(
                     """
-                    SELECT amazon_category, walmart_product_type, confidence,
-                           requires_certificate, zh_seller_forbidden, requirements, notes
-                    FROM walmart_category_map
-                    WHERE %s LIKE amazon_category || '%%' OR amazon_category LIKE %s || '%%'
-                    ORDER BY LENGTH(amazon_category) DESC,
-                             CASE confidence WHEN '高' THEN 0 WHEN '中' THEN 1 WHEN '低' THEN 2 ELSE 3 END
+                    SELECT m.amazon_category, m.walmart_product_type, m.confidence,
+                           m.requires_certificate, m.zh_seller_forbidden, m.requirements, m.notes
+                    FROM walmart_category_map m
+                    INNER JOIN walmart_pt_meta meta ON meta.walmart_product_type = m.walmart_product_type
+                    WHERE %s LIKE m.amazon_category || '%%' OR m.amazon_category LIKE %s || '%%'
+                    ORDER BY LENGTH(m.amazon_category) DESC,
+                             CASE m.confidence WHEN '高' THEN 0 WHEN '中' THEN 1 WHEN '低' THEN 2 ELSE 3 END
                     LIMIT 5
                     """,
                     (path, path),
@@ -228,11 +233,12 @@ def _fetch_candidates(product: ProductInfo, limit: int = 10) -> list[dict[str, A
             if leaf and len(candidates) < limit:
                 cur.execute(
                     """
-                    SELECT amazon_category, walmart_product_type, confidence,
-                           requires_certificate, zh_seller_forbidden, requirements, notes
-                    FROM walmart_category_map
-                    WHERE raw->>'amazon_leaf' ILIKE %s
-                    ORDER BY CASE confidence WHEN '高' THEN 0 WHEN '中' THEN 1 WHEN '低' THEN 2 ELSE 3 END
+                    SELECT m.amazon_category, m.walmart_product_type, m.confidence,
+                           m.requires_certificate, m.zh_seller_forbidden, m.requirements, m.notes
+                    FROM walmart_category_map m
+                    INNER JOIN walmart_pt_meta meta ON meta.walmart_product_type = m.walmart_product_type
+                    WHERE m.raw->>'amazon_leaf' ILIKE %s
+                    ORDER BY CASE m.confidence WHEN '高' THEN 0 WHEN '中' THEN 1 WHEN '低' THEN 2 ELSE 3 END
                     LIMIT 5
                     """,
                     (leaf,),
@@ -245,16 +251,17 @@ def _fetch_candidates(product: ProductInfo, limit: int = 10) -> list[dict[str, A
                 patterns = [f"%{kw}%" for kw in title_keywords]
                 cur.execute(
                     """
-                    SELECT amazon_category, walmart_product_type, confidence,
-                           requires_certificate, zh_seller_forbidden, requirements, notes,
+                    SELECT m.amazon_category, m.walmart_product_type, m.confidence,
+                           m.requires_certificate, m.zh_seller_forbidden, m.requirements, m.notes,
                            (
                              SELECT COUNT(*) FROM unnest(%s::text[]) AS kw
-                             WHERE walmart_product_type ILIKE kw
+                             WHERE m.walmart_product_type ILIKE kw
                            ) AS score
-                    FROM walmart_category_map
-                    WHERE walmart_product_type ILIKE ANY(%s)
+                    FROM walmart_category_map m
+                    INNER JOIN walmart_pt_meta meta ON meta.walmart_product_type = m.walmart_product_type
+                    WHERE m.walmart_product_type ILIKE ANY(%s)
                     ORDER BY score DESC,
-                             CASE confidence WHEN '高' THEN 0 WHEN '中' THEN 1 WHEN '低' THEN 2 ELSE 3 END
+                             CASE m.confidence WHEN '高' THEN 0 WHEN '中' THEN 1 WHEN '低' THEN 2 ELSE 3 END
                     LIMIT 8
                     """,
                     (patterns, patterns),
@@ -320,13 +327,14 @@ async def _fetch_candidates_hybrid(product: ProductInfo, *, embed_k: int = 40, k
                     SELECT walmart_product_type, confidence,
                            requires_certificate, zh_seller_forbidden, requirements, notes
                     FROM (
-                        SELECT DISTINCT ON (walmart_product_type)
-                               walmart_product_type, confidence,
-                               requires_certificate, zh_seller_forbidden, requirements, notes,
-                               CASE confidence WHEN '高' THEN 0 WHEN '中' THEN 1 WHEN '低' THEN 2 ELSE 3 END AS _rank
-                        FROM walmart_category_map
-                        WHERE walmart_product_type ILIKE ANY(%s)
-                        ORDER BY walmart_product_type, _rank
+                        SELECT DISTINCT ON (m.walmart_product_type)
+                               m.walmart_product_type, m.confidence,
+                               m.requires_certificate, m.zh_seller_forbidden, m.requirements, m.notes,
+                               CASE m.confidence WHEN '高' THEN 0 WHEN '中' THEN 1 WHEN '低' THEN 2 ELSE 3 END AS _rank
+                        FROM walmart_category_map m
+                        INNER JOIN walmart_pt_meta meta ON meta.walmart_product_type = m.walmart_product_type
+                        WHERE m.walmart_product_type ILIKE ANY(%s)
+                        ORDER BY m.walmart_product_type, _rank
                     ) t
                     ORDER BY _rank
                     LIMIT 10
@@ -603,7 +611,9 @@ def _try_direct_high_confidence(product: ProductInfo) -> L1Result | None:
                            meta.requirements,
                            meta.access_state
                     FROM walmart_category_map m
-                    LEFT JOIN walmart_pt_meta meta ON meta.walmart_product_type = m.walmart_product_type
+                    INNER JOIN walmart_pt_meta meta ON meta.walmart_product_type = m.walmart_product_type
+                    -- 快速通道必须 INNER JOIN: 只有当 PT 在 walmart_pt_meta 真实可用时才直出
+                    -- 否则会把 walmart_category_map 中残留的废弃 PT (如"Office Chairs") 直接放过
                     WHERE m.amazon_category = %s
                       AND m.confidence = '高'
                       AND m.walmart_product_type != '无对应Walmart PT'
@@ -886,9 +896,14 @@ def _classify_db_only(
 
 
 def _is_pt_in_dictionary(pt: str) -> bool:
-    """PT 是否存在于 Walmart 官方字典 (walmart_pt_spec) 或映射表 (walmart_category_map)。
+    """PT 是否存在于 Walmart 真实可上架字典 (walmart_pt_meta).
 
-    两张表任一命中即认为字典有效; 仅用于判字典外的 llm_direct PT 是否需回落。
+    修复 2026-05-09 (用户反馈上架报"PT 不存在 spec"):
+      - 旧逻辑用 walmart_category_map 校验, 但该表含废弃 PT 名 (如"Office Chairs"
+        实际叫"Desk Chairs", "Christmas Ornaments"实际叫"Ornaments")
+      - LLM 从 walmart_category_map 候选选了废弃 PT, 上架失败
+      - 改用 walmart_pt_meta (5786 真实可用 PT) + walmart_pt_spec 双校验
+        都不命中才认为是 LLM 编造的废弃 PT, 走 fallback
     """
     p = (pt or "").strip()
     if not p or p in {"unknown", "(unknown)"}:
@@ -897,9 +912,9 @@ def _is_pt_in_dictionary(pt: str) -> bool:
         with c.cursor() as cur:
             cur.execute(
                 """
-                SELECT 1 FROM walmart_pt_spec WHERE walmart_product_type = %s
+                SELECT 1 FROM walmart_pt_meta WHERE walmart_product_type = %s
                 UNION ALL
-                SELECT 1 FROM walmart_category_map WHERE walmart_product_type = %s
+                SELECT 1 FROM walmart_pt_spec WHERE walmart_product_type = %s
                 LIMIT 1
                 """,
                 (p, p),
