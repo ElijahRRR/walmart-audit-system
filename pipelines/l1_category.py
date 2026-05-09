@@ -941,18 +941,24 @@ def _coerce_llm(
     if source not in {"map_verified", "llm_direct", "excluded"}:
         source = "llm_direct"
 
-    # 字典外 PT 回落: LLM 造了不在字典的 PT, 取候选首条 (embedding 最近)
+    # 字典外 PT 回落: LLM 造了不在字典的 PT, 取候选里第一个真实可用 PT
+    # (修 2026-05-09: 旧版 candidates[0] 不校验首条, 若首条也是废弃 PT 仍传播错误)
     fallback_from: str | None = None
     if pt != "unknown" and not _is_pt_in_dictionary(pt):
+        fallback_from = pt
+        chosen = None
         if candidates:
-            fallback_from = pt
-            top = candidates[0]
-            pt = str(top.get("walmart_product_type") or "unknown")
+            for c in candidates:
+                cand_pt = str(c.get("walmart_product_type") or "").strip()
+                if cand_pt and _is_pt_in_dictionary(cand_pt):
+                    chosen = c
+                    break
+        if chosen:
+            pt = str(chosen["walmart_product_type"])
             source = "map_fallback"    # 标记这是回落
-            conf = str(top.get("confidence") or "低")
+            conf = str(chosen.get("confidence") or "低")
         else:
-            # 无候选兜底, 保留 unknown 语义
-            fallback_from = pt
+            # 候选里没一个真实可用 → unknown
             pt = "unknown"
             conf = "低"
             source = "none"
