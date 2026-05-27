@@ -1,0 +1,1035 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>沃尔玛预审工作台</title>
+  <style>
+    :root {
+      --bg: #f7f8fa;
+      --card: #ffffff;
+      --border: #e5e7eb;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --primary: #2563eb;
+      --success: #16a34a;
+      --warning: #d97706;
+      --danger:  #dc2626;
+      --pill-bg: #f3f4f6;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+      background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5;
+    }
+    a { color: var(--primary); text-decoration: none; }
+    code, .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace; }
+
+    /* ----------- Header ----------- */
+    header {
+      background: var(--card);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 28px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    header .brand { display: flex; align-items: center; gap: 12px; }
+    header .brand-icon {
+      font-size: 28px; line-height: 1;
+    }
+    header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+    header .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    header .status {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 13px; color: var(--text);
+    }
+    header .status .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--success); box-shadow: 0 0 6px var(--success);
+    }
+    header .status .dot.idle { background: var(--muted); box-shadow: none; }
+
+    /* ----------- Main ----------- */
+    main {
+      max-width: 1280px; margin: 0 auto;
+      padding: 24px 28px 64px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      margin-bottom: 20px;
+    }
+    .card-title {
+      padding: 14px 20px;
+      font-weight: 600; font-size: 14px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .card-title .right { font-size: 12px; color: var(--muted); font-weight: 400; }
+    .card-body { padding: 6px 20px 20px; }
+
+    /* ----------- Upload ----------- */
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 14px; }
+    label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    label .req { color: var(--danger); }
+    input[type=text], input[type=email] {
+      width: 100%; padding: 9px 12px;
+      border: 1px solid var(--border); border-radius: 6px;
+      font-size: 14px; background: var(--card); color: var(--text);
+    }
+    input:focus { outline: none; border-color: var(--primary); }
+
+    .dropzone {
+      border: 2px dashed #d1d5db; border-radius: 10px;
+      padding: 36px 20px; text-align: center;
+      background: #fafbfc; cursor: pointer; transition: all .15s;
+    }
+    .dropzone:hover, .dropzone.over { border-color: var(--primary); background: #eff6ff; }
+    .dropzone .dz-icon { font-size: 36px; line-height: 1; margin-bottom: 8px; }
+    .dropzone .dz-title { font-size: 14px; color: var(--text); margin-bottom: 4px; }
+    .dropzone .dz-hint { font-size: 12px; color: var(--muted); }
+    .dropzone.has-file .dz-title { color: var(--primary); font-weight: 500; }
+    .dropzone input[type=file] { display: none; }
+
+    .submit-row {
+      display: flex; justify-content: flex-end; align-items: center; gap: 12px;
+      margin-top: 16px;
+    }
+    .chunk-input { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+    .chunk-input input { width: 80px; padding: 6px 8px; }
+
+    .btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 8px 18px; border-radius: 7px;
+      border: 1px solid var(--border); background: var(--card); color: var(--text);
+      font-size: 13px; cursor: pointer; transition: all .12s;
+    }
+    .btn:hover { background: #f9fafb; }
+    .btn-primary {
+      background: var(--primary); color: white; border-color: var(--primary);
+    }
+    .btn-primary:hover { background: #1d4ed8; }
+    .btn-primary:disabled { opacity: .55; cursor: not-allowed; background: var(--primary); }
+    .btn-icon { padding: 4px 8px; font-size: 12px; }
+    .btn-icon-only { padding: 4px 6px; }
+    .btn-danger { color: var(--danger); }
+
+    /* ----------- Job list ----------- */
+    .job-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 12px; position: relative; }
+    .job-head {
+      display: grid;
+      grid-template-columns: 24px 1fr auto 220px 28px;
+      align-items: center; gap: 16px;
+      padding: 14px 20px; cursor: pointer; user-select: none;
+    }
+    .job-head:hover { background: #f9fafb; }
+    .job-delete {
+      width: 28px; height: 28px; border-radius: 6px;
+      border: none; background: transparent; color: var(--muted);
+      font-size: 16px; cursor: pointer; line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+      transition: all .12s;
+    }
+    .job-delete:hover { background: #fee2e2; color: var(--danger); }
+    .arrow {
+      width: 0; height: 0;
+      border-left: 5px solid transparent; border-right: 5px solid transparent;
+      border-top: 6px solid var(--muted);
+      transition: transform .15s; margin-left: 4px;
+    }
+    .job-card.open .arrow { transform: rotate(-90deg); }
+    .job-info .title { font-size: 15px; font-weight: 600; }
+    .job-info .meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .progress-cell { display: flex; align-items: center; gap: 8px; }
+    .progress-bar {
+      flex: 1; height: 6px; background: #e5e7eb; border-radius: 3px; overflow: hidden;
+    }
+    .progress-bar > div { height: 100%; background: var(--success); transition: width .3s; }
+    .progress-bar.warn > div { background: var(--warning); }
+    .progress-bar.danger > div { background: var(--danger); }
+    .progress-text { font-size: 12px; color: var(--muted); white-space: nowrap; min-width: 56px; text-align: right; }
+    .pass-pill {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 3px 10px; border-radius: 12px;
+      background: #dcfce7; color: #15803d; font-size: 12px; font-weight: 500;
+    }
+    .reject-pill {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 3px 10px; border-radius: 12px;
+      background: #fee2e2; color: var(--danger); font-size: 12px; font-weight: 500;
+    }
+
+    .job-body {
+      display: none; border-top: 1px solid var(--border); padding: 0 20px 12px;
+    }
+    .job-card.open .job-body { display: block; }
+    table.subs {
+      width: 100%; border-collapse: collapse; margin-top: 8px;
+    }
+    table.subs th, table.subs td {
+      padding: 9px 10px; text-align: left;
+      border-bottom: 1px solid #f3f4f6; font-size: 13px;
+    }
+    table.subs th {
+      font-weight: 500; color: var(--muted); font-size: 12px;
+      background: #fafbfc;
+    }
+    table.subs tr:last-child td { border-bottom: none; }
+    table.subs tr.clickable { cursor: pointer; }
+    table.subs tr.clickable:hover { background: #f9fafb; }
+    .pill {
+      display: inline-block; padding: 2px 9px; border-radius: 11px; font-size: 11px;
+    }
+    .pill-pending  { background: var(--pill-bg); color: var(--muted); }
+    .pill-running  { background: #dbeafe; color: var(--primary); }
+    .pill-done     { background: #dcfce7; color: var(--success); }
+    .pill-failed   { background: #fee2e2; color: var(--danger); }
+    .pill-cancelled{ background: #fef3c7; color: var(--warning); }
+    .pill-splitting, .pill-merging { background: #ede9fe; color: #7c3aed; }
+
+    .empty { text-align: center; color: var(--muted); padding: 60px 20px; }
+
+    /* ----------- Drawer ----------- */
+    .drawer-mask {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.18);
+      opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 99;
+    }
+    .drawer-mask.open { opacity: 1; pointer-events: auto; }
+
+    .drawer {
+      position: fixed; top: 0; right: 0; bottom: 0;
+      width: 720px; max-width: 96vw;
+      background: var(--card); border-left: 1px solid var(--border);
+      box-shadow: -8px 0 32px rgba(0,0,0,0.06);
+      transform: translateX(100%); transition: transform .25s ease-out;
+      z-index: 100; display: flex; flex-direction: column;
+    }
+    .drawer.open { transform: translateX(0); }
+    .drawer-head {
+      padding: 16px 22px 14px; border-bottom: 1px solid var(--border);
+      display: flex; justify-content: space-between; align-items: flex-start;
+    }
+    .drawer-head .ds-title { font-size: 16px; font-weight: 600; margin: 0; }
+    .drawer-head .ds-sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .drawer-close {
+      background: transparent; border: none; font-size: 22px;
+      color: var(--muted); cursor: pointer; line-height: 1; padding: 4px;
+    }
+    .drawer-close:hover { color: var(--text); }
+    .drawer-body { padding: 16px 22px; overflow-y: auto; flex: 1; }
+
+    .stat-grid {
+      display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 16px;
+    }
+    .stat-cell {
+      padding: 12px; border-radius: 8px; background: #fafbfc; border: 1px solid #f3f4f6;
+    }
+    .stat-cell .lbl { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+    .stat-cell .val { font-size: 20px; font-weight: 600; }
+    .stat-cell.pass .val { color: var(--success); }
+    .stat-cell.fail .val { color: var(--danger); }
+    .stat-cell.skip .val { color: var(--warning); }
+
+    .info-row {
+      display: flex; gap: 8px; padding: 6px 0; font-size: 13px;
+      border-bottom: 1px solid #f3f4f6;
+    }
+    .info-row .k { color: var(--muted); min-width: 80px; }
+    .info-row .v { flex: 1; word-break: break-all; }
+    .info-row:last-child { border-bottom: none; }
+
+    .log-toolbar {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 10px 0 6px; gap: 12px; font-size: 12px; color: var(--muted);
+    }
+    .log-toolbar .left { display: flex; align-items: center; gap: 14px; }
+    .log-toolbar a { font-size: 12px; }
+    .log-toolbar .download-link { color: var(--primary); cursor: pointer; }
+
+    .log-box {
+      background: #1e293b; color: #e2e8f0;
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+      font-size: 11px; line-height: 1.55;
+      padding: 12px; border-radius: 6px;
+      max-height: 50vh; overflow-y: auto;
+      white-space: pre-wrap; word-break: break-all;
+    }
+    .log-box .log-line { padding: 1px 0; }
+    .log-box .log-line.warn  { color: #fbbf24; }
+    .log-box .log-line.error { color: #f87171; }
+    .log-box .log-line .ts { color: #94a3b8; }
+
+    @media (max-width: 720px) {
+      main { padding: 16px; }
+      .form-row { grid-template-columns: 1fr; }
+      .job-head { grid-template-columns: 16px 1fr 180px; gap: 8px; }
+      .job-head .pass-cell { display: none; }
+      .drawer { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <div class="brand-icon">📦</div>
+    <div>
+      <h1>沃尔玛预审工作台</h1>
+      <div class="sub">L0 · L1 · L2 · L3 · L4 全自动审核</div>
+    </div>
+  </div>
+  <div class="status" id="worker-status">
+    <span class="dot idle"></span>
+    <span id="worker-count">— 个 worker 在线</span>
+  </div>
+</header>
+
+<main>
+  <!-- ============ 上传 ============ -->
+  <div class="card">
+    <div class="card-title">📤 上传新任务</div>
+    <div class="card-body">
+      <form id="submit-form">
+        <div class="form-row">
+          <div>
+            <label>提交人 <span class="req">*</span></label>
+            <input type="text" name="user_email" required placeholder="你的名字 / 工号 / 任意标识" autocomplete="name" maxlength="40">
+          </div>
+          <div>
+            <label>任务名称 <span style="color:#9ca3af">(可选)</span></label>
+            <input type="text" name="job_name" placeholder="自动从文件名提取">
+          </div>
+        </div>
+
+        <div class="dropzone" id="dropzone">
+          <div class="dz-icon">📁</div>
+          <div class="dz-title" id="dz-title">拖入文件，或点击选择</div>
+          <div class="dz-hint">支持 .csv / .xlsx / .txt — 自动识别 ASIN 列</div>
+          <input type="file" name="file" id="file-input" accept=".csv,.xlsx,.xls,.txt" required>
+        </div>
+
+        <div class="submit-row">
+          <div class="chunk-input" style="color:#9ca3af">
+            🤖 自动按在线 worker 数切分子任务
+          </div>
+          <button type="submit" class="btn btn-primary" id="submit-btn">提交任务</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ============ 任务列表 ============ -->
+  <div class="card">
+    <div class="card-title">
+      <span>📋 任务列表</span>
+      <span class="right">每 5s 自动刷新</span>
+    </div>
+    <div class="card-body" id="job-list">
+      <div class="empty">加载中…</div>
+    </div>
+  </div>
+</main>
+
+<!-- ============ Drawer ============ -->
+<div class="drawer-mask" id="drawer-mask"></div>
+<aside class="drawer" id="drawer">
+  <div class="drawer-head">
+    <div>
+      <h2 class="ds-title" id="drawer-title">—</h2>
+      <div class="ds-sub" id="drawer-sub">—</div>
+    </div>
+    <button class="drawer-close" id="drawer-close" aria-label="关闭">✕</button>
+  </div>
+  <!-- 上半: 信息/状态区, 每 3 秒刷新 (innerHTML 替换) -->
+  <div class="drawer-body" id="drawer-stats" style="flex:0 0 auto; max-height:55vh; overflow-y:auto;"></div>
+  <!-- 下半: 日志区, 只 append, 永不重建 -->
+  <div id="drawer-logs-wrap" style="flex:1 1 auto; display:flex; flex-direction:column; min-height:200px; border-top:1px solid var(--border);">
+    <div class="log-toolbar" style="padding:8px 22px;">
+      <div class="left">
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
+          <input type="checkbox" id="auto-scroll" checked> 自动滚动
+        </label>
+        <span id="log-count">0 行</span>
+      </div>
+      <div id="drawer-download"></div>
+    </div>
+    <div class="log-box" id="log-box" style="margin:0 22px 18px; flex:1 1 auto;"></div>
+  </div>
+</aside>
+
+<script>
+//==================================================================
+// 全局状态
+//==================================================================
+const state = {
+  jobs: [],            // 父任务列表
+  expanded: new Set(), // 展开的父任务 id
+  drawer: null,        // 当前打开的子任务 id
+  drawerLastLogId: 0,
+  drawerTimer: null,
+};
+
+//==================================================================
+// 小工具
+//==================================================================
+// 把后端返回的 UTC 时间字符串 (如 "2026-05-20 01:49:00") 解析成 Date 对象.
+// 加 'Z' 让 JS 知道这是 UTC, 否则会被当本地时间解析.
+function parseUTC(t) {
+  if (!t) return null;
+  const s = String(t).trim();
+  const has_tz = /[Zz]|[+-]\d{2}:?\d{2}$/.test(s);
+  return new Date(s.replace(" ", "T") + (has_tz ? "" : "Z"));
+}
+// 统一显示北京时间 (Asia/Shanghai), 不跟浏览器本地时区联动.
+const _BJ_FMT = new Intl.DateTimeFormat('zh-CN', {
+  timeZone: 'Asia/Shanghai',
+  year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', second: '2-digit',
+  hour12: false,
+});
+function fmt(t) {
+  const d = parseUTC(t);
+  if (!d || isNaN(d)) return t || "-";
+  // Intl 输出格式: "2026/05/20 09:49:00"
+  return _BJ_FMT.format(d);
+}
+function pad(n) { return n < 10 ? "0"+n : ""+n; }
+function dur(start, end) {
+  const a = parseUTC(start);
+  if (!a || isNaN(a)) return "-";
+  const b = end ? parseUTC(end) : new Date();
+  let s = Math.max(0, Math.floor((b.getTime() - a.getTime()) / 1000));
+  const m = Math.floor(s/60); s = s % 60;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+function statusZh(s) {
+  return ({
+    pending: "待审", splitting: "切分中", running: "审核中",
+    done: "完成", failed: "失败", cancelled: "已取消", merging: "合并中",
+  })[s] || s;
+}
+function escapeHtml(s) {
+  return String(s ?? "")
+    .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+}
+
+//==================================================================
+// 上传
+//==================================================================
+const dz = document.getElementById("dropzone");
+const fi = document.getElementById("file-input");
+const dzTitle = document.getElementById("dz-title");
+dz.addEventListener("click", () => fi.click());
+dz.addEventListener("dragover", e => { e.preventDefault(); dz.classList.add("over"); });
+dz.addEventListener("dragleave", () => dz.classList.remove("over"));
+dz.addEventListener("drop", e => {
+  e.preventDefault(); dz.classList.remove("over");
+  if (e.dataTransfer.files.length) {
+    fi.files = e.dataTransfer.files;
+    onFilePicked();
+  }
+});
+fi.addEventListener("change", onFilePicked);
+function onFilePicked() {
+  const f = fi.files[0];
+  if (!f) { dzTitle.textContent = "拖入文件，或点击选择"; dz.classList.remove("has-file"); return; }
+  const sizeMB = (f.size/1024/1024).toFixed(2);
+  dzTitle.textContent = `已选: ${f.name} (${sizeMB} MB)`;
+  dz.classList.add("has-file");
+  // 自动填任务名
+  const nameInput = document.querySelector('input[name="job_name"]');
+  if (!nameInput.value) {
+    nameInput.value = f.name.replace(/\.[^.]+$/, "");
+  }
+}
+
+// 记住上次的提交人 (省得每次都打)
+const submitterInput = document.querySelector('input[name="user_email"]');
+const lastSubmitter = localStorage.getItem("audit-submitter");
+if (lastSubmitter) submitterInput.value = lastSubmitter;
+
+document.getElementById("submit-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const btn = document.getElementById("submit-btn");
+  const fd = new FormData(e.target);
+  if (!fd.get("file") || !fd.get("file").name) { alert("请先选择文件"); return; }
+  btn.disabled = true; btn.textContent = "上传中…";
+  try {
+    const r = await fetch("/api/jobs", { method: "POST", body: fd });
+    const data = await r.json();
+    if (!r.ok) {
+      alert(`提交失败: ${data.error || r.statusText}`);
+      btn.disabled = false; btn.textContent = "提交任务";
+      return;
+    }
+    // 记住提交人
+    const submitter = fd.get("user_email");
+    if (submitter) localStorage.setItem("audit-submitter", submitter);
+    // 重置 (但保留提交人)
+    fi.value = ""; onFilePicked();
+    document.querySelector('input[name="job_name"]').value = "";
+    btn.disabled = false; btn.textContent = "提交任务";
+    state.expanded.add(data.job_id);
+    await refreshJobs();
+  } catch (err) {
+    alert(`网络错误: ${err.message}`);
+    btn.disabled = false; btn.textContent = "提交任务";
+  }
+});
+
+//==================================================================
+// 任务列表
+//==================================================================
+async function refreshJobs() {
+  try {
+    const r = await fetch("/api/jobs?limit=100");
+    const data = await r.json();
+    state.jobs = data.items || [];
+    renderJobs();
+  } catch (err) {
+    console.error("refresh jobs failed", err);
+  }
+}
+
+async function refreshWorkers() {
+  try {
+    // 用 server 端判断, 前端不解析时间 (避免时区 bug)
+    const r = await fetch("/api/workers/online");
+    const data = await r.json();
+    const n = data.online || 0;
+    document.getElementById("worker-count").textContent = `${n} 个 worker 在线`;
+    document.querySelector("#worker-status .dot").classList.toggle("idle", n === 0);
+  } catch (err) { /* ignore */ }
+}
+
+function renderJobs() {
+  const root = document.getElementById("job-list");
+  if (!state.jobs.length) {
+    root.innerHTML = `<div class="empty">还没有任务. 在上方上传文件提交第一个任务.</div>`;
+    return;
+  }
+
+  // patch 模式: 同一组 job_id + 同顺序时, 不重建 DOM, 只更新可变字段
+  const existing = [...root.querySelectorAll(".job-card")].map(el => +el.dataset.id);
+  const incoming = state.jobs.map(j => j.job_id);
+  const sameStructure = existing.length === incoming.length
+    && existing.every((id, i) => id === incoming[i]);
+
+  if (sameStructure) {
+    state.jobs.forEach(patchJobCard);
+  } else {
+    root.innerHTML = state.jobs.map(jobCardHtml).join("");
+    bindJobCardEvents(root);
+  }
+  // 已展开的子任务表格也 refresh (内部也用 patch)
+  state.expanded.forEach(id => loadSubs(id));
+}
+
+function patchJobCard(j) {
+  const card = document.querySelector(`.job-card[data-id="${j.job_id}"]`);
+  if (!card) return;
+  // 更新展开状态 (如果用户点了展开/收起)
+  card.classList.toggle("open", state.expanded.has(j.job_id));
+  card.querySelector(".job-head").dataset.active = state.expanded.has(j.job_id) ? "1" : "0";
+
+  // 进度条 + 进度文字
+  const total = j.total_asins || 0;
+  const done = j.asins_done || 0;
+  const pct = total > 0 ? Math.min(100, done * 100 / total) : 0;
+  const bar = card.querySelector(".progress-bar > div");
+  const txt = card.querySelector(".progress-text");
+  if (bar) bar.style.width = pct.toFixed(1) + "%";
+  if (txt) txt.textContent = `${done} / ${total}`;
+
+  // 进度条颜色 (失败/取消时变色)
+  const barWrap = card.querySelector(".progress-bar");
+  const isFail = j.parent_status === "failed" || j.parent_status === "cancelled";
+  if (barWrap) {
+    barWrap.classList.toggle("danger", isFail);
+  }
+
+  // pass/reject pill
+  const passN = j.pass_count || 0;
+  const rejectN = j.reject_count || 0;
+  const passCell = card.querySelector(".pass-cell");
+  if (passCell) {
+    passCell.innerHTML =
+      (passN ? `<span class="pass-pill">✓ ${passN}</span> ` : "") +
+      (rejectN ? `<span class="reject-pill">✗ ${rejectN}</span>` : "");
+  }
+}
+
+function bindJobCardEvents(root) {
+  root.querySelectorAll(".job-head").forEach(el => {
+    el.addEventListener("click", e => {
+      if (e.target.closest(".job-delete")) return;
+      const id = +el.dataset.id;
+      state.expanded.has(id) ? state.expanded.delete(id) : state.expanded.add(id);
+      // 不重建整列表, 只切自己的展开状态
+      const card = e.currentTarget.closest(".job-card");
+      if (card) card.classList.toggle("open", state.expanded.has(id));
+      if (state.expanded.has(id)) loadSubs(id);
+    });
+  });
+  root.querySelectorAll(".job-delete").forEach(btn => {
+    btn.addEventListener("click", async e => {
+      e.stopPropagation();
+      const id = +btn.dataset.delId;
+      const job = state.jobs.find(j => j.job_id === id);
+      const isRunning = job && ["pending", "splitting", "running"].includes(job.parent_status);
+      // UI 反馈: 立即把按钮变灰防重复点
+      btn.disabled = true;
+      btn.style.opacity = "0.4";
+      try {
+        if (isRunning) {
+          await fetch(`/api/jobs/${id}/cancel`, { method: "POST" });
+        }
+        const r = await fetch(`/api/jobs/${id}`, { method: "DELETE" });
+        if (!r.ok) {
+          const data = await r.json().catch(() => ({}));
+          alert(`删除失败: ${data.error || r.statusText}`);
+          btn.disabled = false; btn.style.opacity = "";
+          return;
+        }
+        if (state.drawer) closeDrawer();
+        state.expanded.delete(id);
+        await refreshJobs();
+      } catch (err) {
+        alert(`网络错误: ${err.message}`);
+        btn.disabled = false; btn.style.opacity = "";
+      }
+    });
+  });
+}
+
+function jobCardHtml(j) {
+  const isOpen = state.expanded.has(j.job_id);
+  const total = j.total_asins || 0;
+  const done = j.asins_done || 0;
+  const pct = total > 0 ? Math.min(100, done * 100 / total) : 0;
+  const passN = j.pass_count || 0;
+  const rejectN = j.reject_count || 0;
+  const finished = j.parent_status === "done" || j.parent_status === "failed" || j.parent_status === "cancelled";
+  const summary = j.result_summary || (j.parent_status === "done"
+    ? `${passN} pass / ${rejectN} reject`
+    : `${j.sub_done || 0}/${j.sub_total || 0} 子任务`);
+  const isFail = j.parent_status === "failed" || j.parent_status === "cancelled";
+  const barCls = isFail ? "danger" : (j.parent_status === "done" ? "" : "");
+
+  return `
+  <div class="job-card${isOpen ? " open" : ""}" data-id="${j.job_id}">
+    <div class="job-head" data-id="${j.job_id}">
+      <div class="arrow"></div>
+      <div class="job-info">
+        <div class="title">${escapeHtml(j.job_name || `任务 #${j.job_id}`)}</div>
+        <div class="meta">${fmt(j.created_at)} · ${j.total_asins || 0} ASIN · ${j.sub_total || 0} 个子任务 · ${escapeHtml(j.user_email || "")}</div>
+      </div>
+      <div class="pass-cell">
+        ${passN ? `<span class="pass-pill">✓ ${passN}</span> ` : ""}
+        ${rejectN ? `<span class="reject-pill">✗ ${rejectN}</span>` : ""}
+      </div>
+      <div class="progress-cell">
+        <div class="progress-bar ${barCls}"><div style="width:${pct.toFixed(1)}%"></div></div>
+        <div class="progress-text">${done} / ${total}</div>
+      </div>
+      <button class="job-delete" data-del-id="${j.job_id}" title="删除任务">🗑</button>
+    </div>
+    <div class="job-body" id="subs-${j.job_id}">
+      <div class="empty" style="padding: 24px">加载子任务中…</div>
+    </div>
+  </div>`;
+}
+
+async function loadSubs(parentId) {
+  try {
+    const r = await fetch(`/api/jobs/${parentId}`);
+    const data = await r.json();
+    const subs = data.subs || [];
+    const parent = data.job || {};
+    const root = document.getElementById(`subs-${parentId}`);
+    if (!root) return;
+    if (!subs.length) {
+      root.innerHTML = `<div class="empty" style="padding: 24px">无子任务</div>`;
+      return;
+    }
+
+    // patch 模式: 同一组 sub_ids 时只更新行数据, 不重建 table
+    const existingRows = [...root.querySelectorAll("tr[data-sub-id]")].map(tr => +tr.dataset.subId);
+    const incomingIds = subs.map(s => s.job_id);
+    const sameStruct = existingRows.length === incomingIds.length
+      && existingRows.every((id, i) => id === incomingIds[i]);
+
+    if (sameStruct) {
+      // 只 patch 每行
+      subs.forEach(s => patchSubRow(s));
+      // 更新底部按钮区
+      patchSubFooter(root, parentId, parent);
+      // 重试按钮可能新增 (如刚有 sub failed), 重新绑定
+      bindSubRowEvents(root);
+    } else {
+      // 重建
+      const downloadable = parent.parent_status === "done" && parent.result_file;
+      root.innerHTML = `
+        <table class="subs">
+          <thead>
+            <tr>
+              <th>分片</th><th>状态</th><th>进度</th><th>结果</th>
+              <th>耗时</th><th>Worker</th><th style="text-align:right">操作</th>
+            </tr>
+          </thead>
+          <tbody>${subs.map(subRowHtml).join("")}</tbody>
+        </table>
+        <div class="subs-footer" style="margin-top:12px; text-align:right"></div>
+      `;
+      patchSubFooter(root, parentId, parent);
+      bindSubRowEvents(root);
+    }
+  } catch (err) { console.error(err); }
+}
+
+function patchSubRow(s) {
+  const tr = document.querySelector(`tr[data-sub-id="${s.job_id}"]`);
+  if (!tr) return;
+  const cells = tr.children;
+  const total = s.asin_count || s.progress_total || 0;
+  const done = s.progress_done || 0;
+  // 状态 pill
+  cells[1].innerHTML = `<span class="pill pill-${s.status}">${statusZh(s.status)}</span>`;
+  // 进度
+  cells[2].textContent = `${done} / ${total}`;
+  // 结果列 (失败/取消文案/done 计数)
+  const pass = s.pass_count || 0;
+  const reject = s.reject_count || 0;
+  let resultCell;
+  if (s.status === "done") {
+    resultCell = `<span style="color:var(--success)">✓${pass}</span> <span style="color:var(--danger)">✗${reject}</span>`;
+  } else if (s.status === "failed") {
+    const err = s.error_msg ? escapeHtml(s.error_msg.slice(0, 60)) : "未知错误";
+    resultCell = `<span style="color:var(--danger)">⚠ ${err}</span>`;
+  } else if (s.status === "cancelled") {
+    resultCell = `<span style="color:var(--muted)">⊘ 已取消</span>`;
+  } else if (s.status === "running") {
+    resultCell = `<span style="color:var(--muted)">审核中…</span>`;
+  } else if (s.status === "pending") {
+    resultCell = `<span style="color:var(--muted)">等待 worker 拉取</span>`;
+  } else {
+    resultCell = `<span style="color:var(--muted)">-</span>`;
+  }
+  cells[3].innerHTML = resultCell;
+  // 耗时
+  cells[4].textContent = dur(s.claimed_at, s.finished_at);
+  // worker
+  cells[5].textContent = s.worker_id || "-";
+  // 操作列: failed/cancelled 显示重试按钮, 其他显示"详情 ›"
+  const canRetry = s.status === "failed" || s.status === "cancelled";
+  cells[6].innerHTML = canRetry
+    ? `<button class="btn btn-icon" data-retry-sub="${s.job_id}" style="padding:2px 8px; font-size:11px;">↻ 重试</button>`
+    : `<span style="color:var(--muted)">详情 ›</span>`;
+}
+
+function patchSubFooter(root, parentId, parent) {
+  const footer = root.querySelector(".subs-footer");
+  if (!footer) return;
+  const downloadable = parent.parent_status === "done" && parent.result_file;
+  const cancellable = parent.parent_status && !["done","failed","cancelled"].includes(parent.parent_status);
+  const hasFailed = (parent.sub_failed || 0) > 0;
+  // 取消有 cancelled 状态的子任务时也算"待重试"
+  const buttons = [];
+  if (downloadable) buttons.push(
+    `<a class="btn btn-primary btn-icon" href="/api/jobs/${parentId}/download">📥 下载合并结果 (XLSX)</a>`
+  );
+  if (hasFailed) buttons.push(
+    `<button class="btn btn-icon" data-retry-all="${parentId}" style="border-color:#fbbf24; color:#92400e;">↻ 重试所有失败 (${parent.sub_failed})</button>`
+  );
+  if (cancellable) buttons.push(
+    `<button class="btn btn-icon btn-danger" onclick="cancelJob(${parentId})">取消任务</button>`
+  );
+  footer.innerHTML = buttons.join(" ");
+  // 绑定 retry-all
+  const retryAllBtn = footer.querySelector("[data-retry-all]");
+  if (retryAllBtn) {
+    retryAllBtn.addEventListener("click", () => retryFailedAll(parentId, retryAllBtn));
+  }
+}
+
+function bindSubRowEvents(root) {
+  // 行点击 → drawer
+  root.querySelectorAll("tr.clickable").forEach(tr => {
+    tr.addEventListener("click", e => {
+      // 点重试按钮 不触发 drawer
+      if (e.target.closest("[data-retry-sub]")) return;
+      openDrawer(+tr.dataset.subId, +tr.dataset.parentId);
+    });
+  });
+  // 单个 sub 重试
+  root.querySelectorAll("[data-retry-sub]").forEach(btn => {
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
+      const id = +btn.dataset.retrySub;
+      retrySubjob(id, btn);
+    });
+  });
+}
+
+function subRowHtml(s) {
+  const total = s.asin_count || s.progress_total || 0;
+  const done = s.progress_done || 0;
+  const range = `[${s.asin_offset}-${(s.asin_offset||0)+total})`;
+  const pass = s.pass_count || 0;
+  const reject = s.reject_count || 0;
+  const status = s.status;
+
+  // 结果列: 不同状态显示不同内容
+  let resultCell;
+  if (status === "done") {
+    resultCell = `<span style="color:var(--success)">✓${pass}</span> <span style="color:var(--danger)">✗${reject}</span>`;
+  } else if (status === "failed") {
+    const err = s.error_msg ? escapeHtml(s.error_msg.slice(0, 60)) : "未知错误";
+    resultCell = `<span style="color:var(--danger)">⚠ ${err}</span>`;
+  } else if (status === "cancelled") {
+    resultCell = `<span style="color:var(--muted)">⊘ 已取消</span>`;
+  } else if (status === "running") {
+    resultCell = `<span style="color:var(--muted)">审核中…</span>`;
+  } else if (status === "pending") {
+    resultCell = `<span style="color:var(--muted)">等待 worker 拉取</span>`;
+  } else {
+    resultCell = `<span style="color:var(--muted)">-</span>`;
+  }
+
+  // 失败/取消时操作列加"重试"按钮
+  const canRetry = status === "failed" || status === "cancelled";
+  const opCell = canRetry
+    ? `<button class="btn btn-icon" data-retry-sub="${s.job_id}" style="padding:2px 8px; font-size:11px;">↻ 重试</button>`
+    : `<span style="color:var(--muted)">详情 ›</span>`;
+
+  return `
+    <tr class="clickable" data-sub-id="${s.job_id}" data-parent-id="${s.parent_id}">
+      <td><span class="mono">#${s.job_id}</span> ${range}</td>
+      <td><span class="pill pill-${status}">${statusZh(status)}</span></td>
+      <td>${done} / ${total}</td>
+      <td>${resultCell}</td>
+      <td class="mono">${dur(s.claimed_at, s.finished_at)}</td>
+      <td class="mono" style="color:var(--muted)">${escapeHtml(s.worker_id || "-")}</td>
+      <td style="text-align:right">${opCell}</td>
+    </tr>
+  `;
+}
+
+async function retrySubjob(subId, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = "重试中…"; }
+  try {
+    const r = await fetch(`/api/jobs/${subId}/retry`, { method: "POST" });
+    if (!r.ok) {
+      const data = await r.json().catch(() => ({}));
+      alert(`重试失败: ${data.error || r.statusText}`);
+      if (btn) { btn.disabled = false; btn.textContent = "↻ 重试"; }
+      return;
+    }
+    await refreshJobs();
+    if (state.drawer === subId) {
+      await refreshDrawerStats();
+    }
+  } catch (err) {
+    alert(`网络错误: ${err.message}`);
+    if (btn) { btn.disabled = false; btn.textContent = "↻ 重试"; }
+  }
+}
+
+async function retryFailedAll(parentId, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = "重试中…"; }
+  try {
+    const r = await fetch(`/api/jobs/${parentId}/retry-failed`, { method: "POST" });
+    const data = await r.json();
+    if (!r.ok) { alert(`重试失败: ${data.error || r.statusText}`); return; }
+    await refreshJobs();
+  } catch (err) {
+    alert(`网络错误: ${err.message}`);
+  } finally {
+    if (btn) { btn.disabled = false; }
+  }
+}
+
+async function cancelJob(id) {
+  if (!confirm(`取消任务 #${id} ?`)) return;
+  await fetch(`/api/jobs/${id}/cancel`, { method: "POST" });
+  await refreshJobs();
+}
+
+//==================================================================
+// Drawer (子任务详情 + 实时日志)
+//==================================================================
+const drawer = document.getElementById("drawer");
+const drawerMask = document.getElementById("drawer-mask");
+document.getElementById("drawer-close").addEventListener("click", closeDrawer);
+drawerMask.addEventListener("click", closeDrawer);
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeDrawer(); });
+
+async function openDrawer(subId, parentId) {
+  state.drawer = subId;
+  state.drawerLastLogId = 0;
+  drawer.classList.add("open");
+  drawerMask.classList.add("open");
+  // 清空日志区 (新任务从头开始)
+  document.getElementById("log-box").innerHTML = "";
+  document.getElementById("log-count").textContent = "0 行";
+  // 加载一次完整信息
+  await refreshDrawerStats();
+  await appendNewLogs(state.drawer);
+  // 信息区每 3s 刷新, 日志区每 2s append
+  if (state.drawerTimer) clearInterval(state.drawerTimer);
+  if (state.drawerLogTimer) clearInterval(state.drawerLogTimer);
+  state.drawerTimer = setInterval(refreshDrawerStats, 3000);
+  state.drawerLogTimer = setInterval(() => appendNewLogs(state.drawer), 2000);
+}
+
+function closeDrawer() {
+  drawer.classList.remove("open");
+  drawerMask.classList.remove("open");
+  if (state.drawerTimer) { clearInterval(state.drawerTimer); state.drawerTimer = null; }
+  if (state.drawerLogTimer) { clearInterval(state.drawerLogTimer); state.drawerLogTimer = null; }
+  state.drawer = null;
+}
+
+async function refreshDrawerStats() {
+  if (!state.drawer) return;
+  try {
+    const r = await fetch(`/api/jobs/${state.drawer}`);
+    const data = await r.json();
+    const sub = data.job || {};
+    const parent = sub.parent_id
+      ? await (await fetch(`/api/jobs/${sub.parent_id}`)).json()
+      : null;
+    renderDrawerStats(sub, parent ? parent.job : null);
+  } catch (err) { console.error(err); }
+}
+
+function renderDrawerStats(sub, parent) {
+  const total = sub.asin_count || sub.progress_total || 0;
+  const done = sub.progress_done || 0;
+  const pass = sub.pass_count || 0;
+  const reject = sub.reject_count || 0;
+  const skipped = Math.max(0, (sub.status === "done" ? total : done) - pass - reject);
+  const range = `[${sub.asin_offset}-${(sub.asin_offset||0)+total})`;
+
+  const parentName = parent ? parent.job_name || `#${parent.job_id}` : "";
+  document.getElementById("drawer-title").textContent =
+    `${parentName} · 分片 #${sub.job_id} (${total} ASIN)`;
+  document.getElementById("drawer-sub").innerHTML =
+    `范围 ${range} · 提交人 ${escapeHtml(sub.user_email || "-")} · 创建于 ${fmt(sub.created_at)}`;
+
+  // 下载链接放在日志工具栏右侧
+  const downloadEl = document.getElementById("drawer-download");
+  if (sub.status === "done" && parent && parent.result_file) {
+    downloadEl.innerHTML = `<a class="download-link" href="/api/jobs/${parent.job_id}/download">📥 下载合并结果</a>`;
+  } else {
+    downloadEl.innerHTML = "";
+  }
+
+  // 顶部错误/取消横幅 - 大字红/灰, 一眼可见 + 重试按钮
+  let banner = "";
+  if (sub.status === "failed") {
+    const err = sub.error_msg || "未知错误 (worker 没上报)";
+    banner = `
+      <div style="background:#fee2e2; border:1px solid #fecaca; color:var(--danger);
+                  padding:12px 14px; border-radius:8px; margin-bottom:14px;
+                  display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
+        <div style="flex:1; min-width:0;">
+          <strong style="font-size:13px">⚠ 审核失败</strong>
+          <div style="margin-top:6px; font-size:12px; word-break:break-all; white-space:pre-wrap;">
+            ${escapeHtml(err)}
+          </div>
+        </div>
+        <button class="btn btn-icon" onclick="retrySubjob(${sub.job_id}, this)"
+                style="border-color:var(--danger); color:var(--danger); flex:0 0 auto;">
+          ↻ 重试这片
+        </button>
+      </div>`;
+  } else if (sub.status === "cancelled") {
+    banner = `
+      <div style="background:#f3f4f6; border:1px solid #e5e7eb; color:var(--muted);
+                  padding:12px 14px; border-radius:8px; margin-bottom:14px;
+                  display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
+        <div style="flex:1; min-width:0;">
+          <strong style="font-size:13px">⊘ 已取消</strong>
+          <div style="margin-top:6px; font-size:12px;">
+            这个分片在 worker 处理前 / 处理过程中被取消, 没有产生审核结果
+          </div>
+        </div>
+        <button class="btn btn-icon" onclick="retrySubjob(${sub.job_id}, this)"
+                style="flex:0 0 auto;">
+          ↻ 重试这片
+        </button>
+      </div>`;
+  }
+
+  // 只渲染上半 stats 区, 不动下半 logs 区
+  document.getElementById("drawer-stats").innerHTML = `
+    ${banner}
+    <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 16px">
+      <div class="stat-cell">
+        <div class="lbl">状态</div>
+        <div class="val"><span class="pill pill-${sub.status}">${statusZh(sub.status)}</span></div>
+      </div>
+      <div class="stat-cell">
+        <div class="lbl">进度</div>
+        <div class="val">${done} / ${total}</div>
+      </div>
+      <div class="stat-cell">
+        <div class="lbl">Worker</div>
+        <div class="val mono" style="font-size:13px">${escapeHtml(sub.worker_id || "-")}</div>
+      </div>
+    </div>
+
+    <div class="stat-grid">
+      <div class="stat-cell pass">
+        <div class="lbl">成功</div><div class="val">${pass}</div>
+      </div>
+      <div class="stat-cell fail">
+        <div class="lbl">拒绝</div><div class="val">${reject}</div>
+      </div>
+      <div class="stat-cell skip">
+        <div class="lbl">跳过 (DMIT 缺数据)</div><div class="val">${skipped}</div>
+      </div>
+    </div>
+
+    <div class="info-row"><div class="k">分片范围</div><div class="v mono">${range}</div></div>
+    <div class="info-row"><div class="k">领取时间</div><div class="v">${fmt(sub.claimed_at)}</div></div>
+    <div class="info-row"><div class="k">完成时间</div><div class="v">${fmt(sub.finished_at)}</div></div>
+    <div class="info-row"><div class="k">耗时</div><div class="v mono">${dur(sub.claimed_at, sub.finished_at)}</div></div>
+  `;
+}
+
+async function appendNewLogs(subId) {
+  try {
+    const r = await fetch(`/api/jobs/${subId}/logs?since=${state.drawerLastLogId}`);
+    const data = await r.json();
+    const logs = data.items || [];
+    if (!logs.length) return;
+    const box = document.getElementById("log-box");
+    if (!box) return;
+    for (const log of logs) {
+      if (log.log_id > state.drawerLastLogId) state.drawerLastLogId = log.log_id;
+      const line = document.createElement("div");
+      line.className = `log-line ${log.level || "info"}`;
+      const w = log.worker_id ? `[${log.worker_id}] ` : "";
+      line.innerHTML = `<span class="ts">${escapeHtml(log.created_at)}</span> ${escapeHtml(w)}${escapeHtml(log.message)}`;
+      box.appendChild(line);
+    }
+    document.getElementById("log-count").textContent = `${box.children.length} 行`;
+    if (document.getElementById("auto-scroll")?.checked) {
+      box.scrollTop = box.scrollHeight;
+    }
+  } catch (err) { /* ignore */ }
+}
+
+//==================================================================
+// 启动 + 定时刷新
+//==================================================================
+refreshJobs();
+refreshWorkers();
+setInterval(refreshJobs, 8000);    // patch 模式不闪, 8s 够用
+setInterval(refreshWorkers, 10000);
+</script>
+</body>
+</html>
