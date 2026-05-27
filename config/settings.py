@@ -33,21 +33,15 @@ class Settings:
     llm_text_model: str
     llm_vision_model: str
 
-    # --- 文本 provider 切换 (dashscope | gemini) — 影响 L1 / L3 ---
+    # --- 文本 provider 切换 (dashscope | deepseek) — 影响 L1 / L3 ---
     llm_text_provider: str
 
-    # --- 视觉 provider 切换 (qwen | volcengine | gemini) ---
-    # volcengine (豆包视觉, 国内中文优势); qwen 走 DashScope; gemini 走 Google
+    # --- 视觉 provider 切换 (qwen | volcengine) ---
+    # volcengine (豆包视觉, 国内中文优势); qwen 走 DashScope
     vision_provider: str
     volcengine_api_key: str
     volcengine_base_url: str
     volcengine_vision_model: str
-
-    # --- Google Gemini (支持文本 + 多模态) ---
-    gemini_api_key: str
-    gemini_base_url: str
-    gemini_vision_model: str
-    gemini_text_model: str
 
     # --- DeepSeek (文本 LLM, OpenAI 兼容) ---
     deepseek_api_key: str           # 默认/兜底
@@ -95,7 +89,7 @@ def get_settings() -> Settings:
         dashscope_base_url=_get("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
         llm_text_model=_get("LLM_TEXT_MODEL", "qwen-turbo"),
         llm_vision_model=_get("LLM_VISION_MODEL", "qwen-vl-plus"),
-        # 文本 provider (dashscope 默认; gemini 走 Gemini API)
+        # 文本 provider (dashscope 默认 | deepseek)
         llm_text_provider=_get("LLM_TEXT_PROVIDER", "dashscope"),
         # 火山方舟 (豆包视觉) - 默认 provider (ce200 eval 证实优于 qwen-vl-plus, 独家救回 14 vs 3)
         vision_provider=_get("VISION_PROVIDER", "volcengine"),
@@ -106,12 +100,6 @@ def get_settings() -> Settings:
         #   doubao-seed-1-6-250615        (full, 更稳但贵)
         #   doubao-1.5-vision-pro-32k-250115
         volcengine_vision_model=_get("VOLCENGINE_VISION_MODEL", "doubao-seed-1-6-flash-250615"),
-        # Google Gemini (OpenAI-compatible endpoint: /v1beta/openai)
-        # AI Studio key (免费额度够用; 旧 Vertex key "AQ.Ab8RN..." 预付费耗尽)
-        gemini_api_key=_get("GEMINI_API_KEY", "AIzaSyC_aC0bm2uatri515mmEL5pKATmknDOkIY"),
-        gemini_base_url=_get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/"),
-        gemini_vision_model=_get("GEMINI_VISION_MODEL", "gemini-2.5-flash-lite"),
-        gemini_text_model=_get("GEMINI_TEXT_MODEL", "gemini-2.5-flash-lite"),
         # DeepSeek (api.deepseek.com OpenAI 兼容)
         deepseek_api_key=_get("DEEPSEEK_API_KEY", ""),                # 默认/兜底
         deepseek_api_key_l1=_get("DEEPSEEK_API_KEY_L1", ""),          # L1 类目判定 (可空 → 用默认)

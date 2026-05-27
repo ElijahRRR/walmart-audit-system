@@ -363,6 +363,45 @@ def _build_system_prompt(include_sticker: bool, include_weapons: bool) -> str:
 brand 填 Unbranded/Generic/小品牌, 但 title/描述暗示某大牌
 → reject, reason_category='brand_misuse'
 
+## 5. 儿童产品 / CPC 兜底 (重要 — 即便 L1 PT 没标 CPC 也要拦)
+背景: 美国 CPSIA 法规要求所有 ≤12 岁儿童产品必须有 CPC (Children's Product
+Certificate) + ASTM/CPSC 实验室测试报告. 沃尔玛会强制要求卖家提供, 无 CPC
+→ 上架被警告 / 下架 / 罚款.
+
+L1 类目映射经常因为亚马逊源头分类错误而漏判 (例如 "Baby Bodysuit Extender"
+被亚马逊放在 Sewing Fasteners 类目, L1 选了 Sewing Fasteners 这个非儿童 PT
+→ requirements 字段没 CPC → L2 不会触发软合规警告).
+
+判定步骤:
+1. 看 title / bullets / description 是否暗示 **≤12 岁儿童使用**:
+   - 显式年龄: "for kids", "for children", "ages 3+", "infant", "toddler",
+              "baby", "newborn", "婴儿", "儿童", "小孩"
+   - 儿童专用形态: "onesie", "bodysuit", "bib", "diaper", "stroller",
+              "crib", "high chair", "baby gate", "car seat", "pacifier",
+              "sippy cup", "training pants", "swaddle", "burp cloth"
+   - 玩具/教具: "squishy", "plush toy", "stuffed animal", "fidget toy",
+              "slime kit", "sticker book for kids", "kid's craft kit",
+              "play set", "playmat", "play tent", "kid's drawing"
+   - 儿童规格描述: "BPA-free baby bottle", "non-toxic for toddlers" 等
+2. 排除明确成人/兽用情形:
+   - "for adult", "adult onesie", "for pets", "dog onesie" → 不算儿童产品
+   - "Baby Pillow for Mom Comfort" (产品是给妈妈用的, 不是给婴儿) → 不算
+   - "Baby's Breath Flower" (婴儿之吻花卉) → 文字含 baby 但是植物 → 不算
+   - 修车工具 "infant car seat protector" 给汽车用 → 不算 (但接近边界, 谨慎)
+
+   **特别注意 — 这些情况打着 "DIY/craft/adult" 旗号但仍算儿童产品**:
+   - "DIY Squishy Kit" / "DIY Slime Kit" — 成品 squishy/slime 是 ≤12 岁儿童玩具,
+     即使 kit 是大人帮做, 沃尔玛仍判 needs_cpc.
+   - "Adult Putty Toy" — 沃尔玛把所有 putty/slime 类减压玩具判 children product,
+     因为流行儿童市场.
+   - "Plush Animal for Home Decor" — 即使描述是装饰品, 毛绒玩偶仍要 CPC.
+   - 规则: 成品形态是儿童典型玩具的 (squishy/slime/plush/fidget/play dough/stuffed
+     animal), **不管文案怎么写**, 一律判 reject + "Children's Products".
+3. 命中且无明确成人/兽用排除 → verdict='reject',
+   reason_category="Children's Products" (或 "Baby Products" 如果 < 3 岁专用),
+   reason_text 必须明确指出: "<产品类别>属于儿童用品, 需 CPC + ASTM 认证, 卖家
+   未提供 → 上架会被警告". 必须引用 title 原文证据.
+
 # 输出规范 (严格 JSON)
 
 {
@@ -416,262 +455,6 @@ def get_system_prompt(
 SYSTEM_PROMPT = _build_system_prompt(True, True)
 
 
-# =============================================================
-# English system prompt (for Gemini / cross-language LLMs)
-# =============================================================
-
-
-@lru_cache(maxsize=8)
-def _build_system_prompt_en(include_sticker: bool, include_weapons: bool) -> str:
-    """English L3 system prompt — same semantics as Chinese version.
-
-    Gemini handles instruction-following best in English.
-    """
-    parts: list[str] = [
-        """You are a Walmart Marketplace compliance AI reviewer, acting on behalf of Walmart.
-Sellers are Chinese drop-shippers with no certifications, processing tens of thousands of products daily.
-Output strict JSON only — no explanations, no markdown wrappers.
-
-# Task
-
-The preceding rule engine (L2) has already filtered obvious violations. Items sent to you are "rule-suspected but not blocked". You perform the **final semantic judgment**, mainly covering two areas:
-
-## A. Brand authenticity (for L2 R4/R5 matched terms) — STRICT decision flow
-
-### A.0 Task
-- R4/R5 pass you every "blacklisted brand hit" and "USPTO trademark" found in the text
-- For **each hit**, classify: real brand / generic word, then apply A.3
-- **Most hits are generic English words** (top/summer/must/chair/fire/escape/weather/mountain/deluxe)
-- BUT once classified as "real brand" + no authorization → **MUST reject** (no exceptions)
-
-### A.1 Syntactic proof — <X> in these positions is 100% a brand (CANNOT be generic):
-If the matched term appears in any of these title patterns, the term IS a brand:
-  - "compatible (for|with) <X>"
-  - "fits <X>" / "fits for <X>" / "fit to <X>"
-  - "replacement for <X>" / "replaces <X>"
-  - "works with <X>"
-  - "designed for <X>" / "made for <X>" / "intended for <X>"
-  - "aftermarket for <X>" / "OEM for <X>" / "OEM-style for <X>"
-  - "Compatible Model <X>" / "For <X> Model"
-  - Brand name directly followed by model number ("Dyson V6", "Apple iPhone 12", "Nike Air Jordan 1")
-
-Reason: <X> in these patterns must refer to a specific brand / product line;
-"Compatible for Summer" is ungrammatical, so X cannot be a generic word.
-
-### A.2 Authorization exemption — **NO exemption**, all "authorization claims" are distrusted
-
-**Business context (critical — determines decision logic)**:
-  Sellers we audit = **Chinese drop-shippers**, tens of thousands of products daily.
-  **No seller** can objectively be a major brand themselves, nor hold real Official/Licensed/
-  Authorized/OEM authorization. Any such claim is a **fraudulent statement** made to evade audit,
-  and should be treated as a stronger infringement signal.
-
-**All of the following → reject (no exemption)**:
-  ✗ brand field = <X> (claiming to BE the brand is not trusted — Chinese drop-shippers cannot truly be Nike/Dyson/Disney)
-  ✗ "Official <X>" / "<X> Official"
-  ✗ "Licensed by <X>" / "Authorized <X>"
-  ✗ "Genuine <X>" / "Authentic <X>"
-  ✗ "OEM for <X>"
-  ✗ ®/™/© after brand name (L2 R9 already hard-blocks; if it reached L3, still treat as infringement)
-  ✗ "Compatible for <X>" / "fits <X>" / "replacement for <X>" / "works with <X>"
-
-### A.3 Decision: per-term contextual judgment
-
-**Core principle**: Don't rely on "is famous / is in whitelist". Instead, use **full title/bullets context** to judge whether each matched term acts as a brand or as a generic word **in this specific product**.
-
-#### Step 1: Syntactic position first (hard proof)
-- Term appears in A.1 syntactic structure (compatible for X / fits X / replacement for X / works with X / designed for X / etc.) → **100% real brand** → reject
-- reason_text: '[Utility Patent] unauthorized replacement part' or '[Trade Dress] imitation design'
-
-#### Step 2: For terms in plain positions, judge per-term using 4 contextual signals
-Output is_real_brand=true|false based on:
-
-1. **Position signal**: where the term sits in title
-   - First 1-3 words + uppercase → strongly favors brand (English e-commerce titles 95% follow "Brand + Product Type + Description")
-   - Mid/late position + after a product type word → favors descriptor
-
-2. **Co-occurrence signal**: surrounding words
-   - Followed by product type ("Yaheetech Bathroom Cabinet" / "FOTOSOK Storage") → preceding word is brand
-   - Generic context ("apple cider" / "stanley tool" / "summer dress") → the term itself is generic
-   - Functional adjective context ("Modern Cabinet" / "Premium Quality") → descriptor
-
-3. **Morphology signal**: the word's spelling characteristics
-   - Made-up / non-standard English / brand-style capitalization → favors brand (Yaheetech / FOTOSOK / Sofslee / TaoHFE)
-   - Common English word in generic context → favors descriptor (bathroom / kitchen / modern / floor)
-
-4. **Brand-field signal** (corroborating evidence)
-   - Chinese drop-shippers' brand field is mostly Unbranded / N/A / made-up small brand — NOT a basis for exemption
-   - But if title's first word ≠ brand field → title word more likely to be the real brand (brand_misuse signal)
-
-#### Step 3: Output
-- **ANY** matched term judged is_real_brand=true → **whole product reject**
-  - reason_category='Intellectual Property'
-  - reason_text='[Trademark] unauthorized brand reference <X>'
-  - blacklist_brand_verdict[i] must give per-term evidence (briefly cite the 4 signals above)
-- All matched terms judged is_real_brand=false (with sound contextual evidence) → this part passes (other rules may still reject)
-
-#### A.3 examples (illustrate reasoning, NOT exhaustive lookup table)
-- title='Yaheetech Bathroom Wall Cabinet White'
-  - yaheetech: position=#1, co-occurs with Bathroom (product type), morphology=made-up → **real brand, reject**
-  - bathroom/wall/cabinet: position=mid, co-occurs in product-type context, morphology=common English → generic
-- title='Floor Storage Cabinet Modern Style'
-  - floor/storage/cabinet/modern: all signals point to descriptors → generic, pass (no real brand)
-- title='Compatible for Dyson V6 Battery'
-  - dyson: A.1 syntactic position (Compatible for X) → 100% real brand, reject (Step 1 hits directly)
-
-## B. Offensive content (Walmart Offensive Content Policy)
-Based on policy, judge from title/description/bullets:
-- Sexual/adult themes (adult toys/dolls/bondage/chastity devices/sexual innuendo/Couples/Intimacy/Sensual/Erotic)
-- Sexualization of minors
-- Racial slurs / stereotypes / racist symbols
-- Intolerance symbols (Nazi swastika outside religious context / Confederate flag / KKK)
-- Mocking/disparaging political candidates
-- Mocking/celebrating tragedies, disasters, animal abuse
-- Mocking protected characteristics (race/gender/sexual orientation/religion/disability/body/age)
-"""
-    ]
-
-    if include_sticker:
-        parts.append(f"""
-### B.1 Stickers / posters / patches / emblems / flags / T-shirts / decorative art / mug decals — special alert
-
-Violations for these products hide in the specific image/text. **If the text contains ANY of the sensitive theme words below (or combinations), lean toward REJECT (offensive):**
-
-{_fmt_sticker_themes()}
-
-- If the product is a **mixed pack of N items** (e.g. "400 Pcs stickers") and the description lists multiple themes including any sensitive theme → REJECT (even a few bad stickers violate policy).
-
-### B.1.1 Bulk sticker / patch / decal packs (≥20 pieces) — compliance threshold distinct from single items
-
-**This is a Walmart Marketplace explicit compliance rule**: for bulk mixed packs like "100 Pcs / 200 Pcs / 500 Pcs stickers", the seller **cannot certify every single piece is compliant**, so REJECT (reason_category='Offensive Content') if the title/bullets contain ANY of the following:
-  - Title contains "Funny" / "Humor" / "Prank" / "Joke" / "Crazy" / "Weird" / "Edgy" — implying non-mainstream humor
-  - Title states "Adults only" / targets "Men" (vs gender-neutral mass appeal)
-  - Description lists multiple occupational / subculture themes (e.g. "Blue Collar / Welder / Electrician / Construction") alongside "Funny" tonal words
-  - **Do NOT reject** the pack if: pure animals / nature / cartoon (e.g. "100 Pcs Cute Animal Stickers for Kids"), or purely educational ("Reward Stickers for Teachers")
-Note: regular ≤19-piece single items or gift sets are NOT subject to this rule — follow B.1 theme rules.
-""")
-
-    if include_weapons:
-        parts.append(f"""
-### B.2 Replica weapons / toy guns / military-police toy gear (Walmart Military & Law Enforcement + 15 U.S.C. § 5001)
-
-{_fmt_weapons_block()}
-
-**Decision flow** (in strict order):
-1. First check exemptions. If any exemption hits → **immediately pass**, do not continue.
-2. Else check standalone (single term triggers), or weapon-term + realistic-term co-occurrence → REJECT.
-
-**reason_category = "Offensive Content"**, and reason_text should clearly state "Replica weapons (Military & Law Enforcement)".
-""")
-
-    parts.append("""
-## C. Intellectual Property — detect 7 subtypes precisely
-
-Walmart Prohibited Products Policy: Intellectual Property covers these 7 infringement patterns.
-Any match → reason_category='Intellectual Property', AND reason_text MUST START WITH the subtype tag (e.g. '[Design Patent] ...'):
-
-### C.1 Trademark — most common, L2 R4/R5 pre-filters
-- Imitating Nike/Adidas/Disney/LEGO etc. logos or names
-- title contains brand name but brand_field ≠ that brand, with no ®/™/Licensed/Authorized/Genuine/OEM claim
-- Decision: follow §A brand authenticity logic; tag with '[Trademark] ...'
-
-### C.2 Copyright — IP characters / cartoons / franchises (HIGH PRIORITY)
-- Reprinted books/sheet music/comics (book PTs already hard-blocked; covers disguised PTs here)
-- Pirated music / video / games
-- **Cartoon / IP character likenesses or names without license** — STRICT IP infringement.
-
-#### Decision
-title/bullets contain ANY cartoon/movie/game/IP character name (Disney/Marvel/Pokemon/Sanrio/Nintendo/Anime/Star Wars/Harry Potter/kids shows IP) AND product is merch (sticker/plush/toy/costume/T-shirt/mug/poster/keychain/lunch box/backpack/birthday party supplies) → **REJECT '[Copyright] unauthorized use of <IP> on <product type>'**.
-"Style/inspired" wording ("Disney-style"/"Pokemon-style") also REJECT.
-Generic word collision with IP (e.g. "cross stitch kit" — stitch is sewing term) judged by context.
-Exception: brand field = official IP brand + Official/Licensed claim → pass (rare).
-
-### C.3 Design Patent — D-prefixed US patents; hard to automate but LLM can judge
-- Imitating popular product shapes (Stanley Cup tumbler / Yeti Tumbler / AirPods case for Apple / iPhone case design)
-- title explicitly says "Stanley Cup" / "Yeti style tumbler" / "AirPods case for Apple" while brand ≠ original
-- Decision: product description features **shape/form** as selling point + mentions a known big brand → '[Design Patent] ...'
-
-### C.4 Utility Patent
-- Unauthorized use of patented technology (Dyson cyclone motor / Roomba navigation / SodaStream gas canister interface)
-- title or bullets say "same technology as Dyson" / "patented design of <brand>"
-- **Hard to detect**, only judge when explicit in text → '[Utility Patent] ...'
-
-### C.5 Trade Dress
-- Imitating overall visual identity (Coca-Cola bottle shape + red-white / Tiffany blue box / Hermès orange packaging)
-- Product colors/layout/packaging closely resemble a brand's signature style → '[Trade Dress] ...'
-
-### C.6 Publicity Rights — observed frequently, strict identification
-
-#### Trigger conditions (any hit + no authorization → reject '[Publicity Rights] ...'):
-1. **Celebrity name + merchandise category**: title contains one of the below names **AND** the product is (T-shirt/mug/poster/pen/sticker/keychain/pillow/wall art/collectible/merch/etc.)
-   - **Politicians**: Trump / Biden / Obama / Harris / Putin / Xi Jinping / Modi / Zelensky
-   - **Athletes**: LeBron / Kobe / Michael Jordan / Tom Brady / Messi / Ronaldo / Babe Ruth
-                   NFL/NBA/MLB/NHL player names
-   - **Musicians**: Taylor Swift / Beyoncé / Ariana Grande / Billie Eilish / Adele / Lady Gaga
-                    Drake / Kanye / Kendrick Lamar / The Weeknd
-   - **Kpop / Jpop idols**: BTS / Blackpink / TWICE / NewJeans / Enhypen / KATSEYE / Stray Kids /
-                            TXT / Seventeen / Aespa / ITZY / IVE / LE SSERAFIM / Red Velvet /
-                            LISA / JENNIE / ROSÉ / JISOO / V / Jimin / Suga / Jungkook
-   - **Actors / movie stars**: Tom Cruise / Johnny Depp / Margot Robbie / Zendaya / Timothée Chalamet
-2. **Fan-merch keyword combo** (even without a specific celebrity name, text clearly signals fan merch → highly likely publicity rights infringement)
-   - title contains "Kpop" / "K-pop" / "K pop" + any merchandise category
-   - title contains "Merch" / "Merchandise" / "Fandom" / "Fans" / "Fan Gift"
-   - title contains "Autograph" / "Signed" / "Collectible" + celebrity / athlete name
-3. **Exemptions** (authorization signals → pass):
-   - brand field = artist's official brand (e.g. "BTS Official" / "Taylor Swift Eras")
-   - title explicitly states "Official" / "Licensed" / "Authorized"
-
-#### Decision
-- Any hit above + no authorization → **reject**, reason_category='Intellectual Property',
-  reason_text format: "[Publicity Rights] unauthorized use of <person> likeness/name on <product>"
-- Even if LLM doesn't recognize a specific Kpop group name, if title has "Kpop" + "Merch/Fans" + merch category, treat as fan merch and reject.
-
-### C.7 Counterfeit
-- Claiming to be genuine but priced significantly below market ("100% Authentic Louis Vuitton" at $29.99)
-- Cheap luxury items without verified licensing → '[Counterfeit] ...'
-
----
-
-## D. Brand-field impersonation (brand_misuse)
-- brand field says 'Unbranded' / 'Generic' / some fake name, but title/description clearly references/shows a real brand logo
-- → reason_category='brand_misuse', reason_text='[Brand impersonation] brand=X but description contains Y'
-
-# Output format (strict JSON)
-
-{
-  "verdict": "pass" | "reject",
-  "reason_category": "<must be one from the user prompt's candidate list; for verdict=pass use 'none'>",
-  "reason_text": "<short English reason, ≤80 chars; empty if verdict=pass>",
-  "signals": {
-    "has_trademark_symbol": true|false,
-    "has_authorization_claim": true|false,
-    "offensive_signals": ["<specific signal>",...]
-  },
-  "blacklist_brand_verdict": [
-    {"brand": "<matched term>", "is_real_brand": true|false, "evidence": "<brief reasoning>"}
-  ],
-  "llm_confidence": "high" | "medium" | "low"
-}
-
-**Constraints**:
-- Default verdict=pass unless evidence is clear.
-- reason_category MUST be from the candidate list in the user prompt (usually one of Walmart's 37 Prohibited Product Policy category_en values, or brand_misuse, or none).
-- When verdict=pass, reason_category MUST be "none".
-- blacklist_brand_verdict: evaluate every term L2 R4 matched (up to first 10).
-- Also evaluate L2 R5 USPTO marks in the same structure.
-- Do NOT invent brands that were not in the matched list.
-""")
-    return "".join(parts)
-
-
-def get_system_prompt_en(
-    walmart_category: str | None,
-    walmart_pt: str | None = None,
-    product_text_hint: str | None = None,
-) -> str:
-    """English version of get_system_prompt, for Gemini / cross-language LLMs."""
-    sticker, weapons = _blocks_for(walmart_category, walmart_pt, product_text_hint)
-    return _build_system_prompt_en(sticker, weapons)
 
 
 # =============================================================
@@ -797,84 +580,6 @@ Amazon 类目: {product.amazon_category_path or '(空)'}
 {brand_list}
 """
 
-
-def _build_user_prompt_en(
-    product: ProductInfo, l1: L1Result, l2: L2Result,
-    policies: list[dict[str, Any]],
-) -> str:
-    """English L3 user prompt (for Gemini / cross-language LLMs)."""
-    bullets_txt = "\n".join(f"  - {b}" for b in product.bullet_points[:5]) or "  (none)"
-    desc = (product.long_description or "").strip()
-    if len(desc) > 800:
-        desc = desc[:800] + "... (truncated)"
-
-    l2_txt, r4_brands = _summarize_l2_hits(l2)
-    policy_txt = l3_policy_router.format_for_prompt(policies)
-
-    brand_list = (
-        "\n".join(f"  - {b}" for b in r4_brands)
-        if r4_brands
-        else "  (no R4/R5 matches — skip brand-authenticity check)"
-    )
-
-    pt_notes = _get_pt_notes(l1.walmart_product_type or "")
-    notes_line = (
-        f"\nFeishu manual notes (pt_meta.notes): {pt_notes[:200]}"
-        if pt_notes
-        else ""
-    )
-
-    routed_cats = [p["category_en"] for p in policies if p.get("category_en")]
-    reason_cat_candidates = routed_cats + ["brand_misuse", "none"]
-    cat_candidates_txt = "\n".join(f"  - {c}" for c in reason_cat_candidates)
-
-    return f"""# Product info
-
-ASIN: {product.asin}
-Title: {product.title}
-Brand field (seller-declared): {product.brand or '(empty)'}
-Country of origin: {product.country_of_origin or '(empty)'}
-Amazon category: {product.amazon_category_path or '(empty)'}
-Walmart PT: {l1.walmart_product_type or '(empty)'} (confidence {l1.pt_confidence}, source {l1.pt_source})
-Walmart Category: {l1.walmart_category or '(empty)'}{notes_line}
-
-Bullet points:
-{bullets_txt}
-
-Long description:
-{desc or '(empty)'}
-
-# L2 rule-engine hits
-
-{l2_txt}
-
-# Terms awaiting brand/trademark judgment (from L2 R4/R5, up to 10 — decide real brand vs generic word)
-
-{brand_list}
-
-# Relevant Walmart prohibited-product policies (for reference — if matched, reason_category = corresponding category_en)
-
-{policy_txt}
-
-# Candidate reason_category (when verdict=reject, must pick from this list)
-
-{cat_candidates_txt}
-
-# Task reminders
-
-1. **Brand authenticity**: For each matched term, judge is_real_brand given title/description context.
-   - Generic English words (top/summer/must/chair/fire/escape/weather/mountain/deluxe/modern/classic/pro...) → false
-   - Only true if text contains ®/™/Official/Licensed/Authentic/OEM-for etc. authorization signals.
-2. **Offensive content**: Match against policies above; if clear violation → reason_category="Offensive Content".
-   - Couples/Intimacy/Sensual keywords + suggestive imagery → Offensive Content
-   - Stickers/posters/T-shirts possibly printed with race/political symbols → Offensive Content
-3. **Category compliance**: If the product matches a policy (PFAS Chemicals / Baby Products / Hazardous Items etc.), use that policy's category_en as reason_category.
-4. **Brand impersonation**: brand='Unbranded' but description implies a big brand → reason_category="brand_misuse".
-5. **Feishu manual notes**: If pt_meta.notes contains "⚠️ T&S audit / high risk" warnings, judge more strictly.
-6. **Default = pass** — reject ONLY with clear evidence. When verdict=pass, reason_category MUST be "none".
-
-Output strictly in the JSON format defined in the system prompt.
-"""
 
 
 # =============================================================
@@ -1021,17 +726,11 @@ async def judge(product: ProductInfo, l1: L1Result, l2: L2Result) -> L3Result:
         max_policies=5,
     )
     # system prompt 按 category + PT + title hint 分叉
-    # provider 是 gemini 时用英文 prompt (用户反馈 Gemini 对英文 prompt 更准)
     text_hint = (product.title or "") + " " + " ".join(product.bullet_points[:2])
     from config import get_settings
     _settings = get_settings()
-    _use_en = (_settings.llm_text_provider == "gemini")
-    if _use_en:
-        system_prompt = get_system_prompt_en(l1.walmart_category, l1.walmart_product_type, text_hint)
-        user_prompt = _build_user_prompt_en(product, l1, l2, routed_policies)
-    else:
-        system_prompt = get_system_prompt(l1.walmart_category, l1.walmart_product_type, text_hint)
-        user_prompt = _build_user_prompt(product, l1, l2, routed_policies)
+    system_prompt = get_system_prompt(l1.walmart_category, l1.walmart_product_type, text_hint)
+    user_prompt = _build_user_prompt(product, l1, l2, routed_policies)
 
     # === 混合路由: 高 offensive 语义风险产品启用 thinking 模式 (深度推理), 其他用快速非 thinking ===
     # dashscope: turbo (默认) → plus (升级)

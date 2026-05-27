@@ -106,23 +106,16 @@ async def chat_json(
     thinking / reasoning_effort: 仅 deepseek provider 生效, 透传到 deepseek_client.
         deepseek-v4-flash 默认开 thinking, 这里默认 False (禁用) 以走 chat 速度.
 
-    provider 路由 (settings.llm_text_provider): dashscope (默认) / deepseek / gemini
+    provider 路由 (settings.llm_text_provider): dashscope (默认) / deepseek
     """
     s = get_settings()
 
     # 按 provider 路由; 缓存在前面统一处理 (key 含 model 名, 不同 provider 不会混)
-    use_gemini = (s.llm_text_provider == "gemini" and model is None)
     use_deepseek = (s.llm_text_provider == "deepseek" and model is None)
-    if model:
-        # 显式传 model 时, 按 model 名前缀路由
-        if model.startswith("deepseek"):
-            use_deepseek = True
-        elif model.startswith("gemini"):
-            use_gemini = True
+    if model and model.startswith("deepseek"):
+        use_deepseek = True
     if use_deepseek:
         m = model or s.deepseek_model
-    elif use_gemini:
-        m = model or s.gemini_text_model
     else:
         m = model or s.llm_text_model
 
@@ -147,19 +140,6 @@ async def chat_json(
                 cache_key, m,
                 {"messages": messages, "temperature": temperature,
                  "max_tokens": max_tokens, "thinking": thinking},
-                result,
-            )
-        return result
-
-    if use_gemini:
-        from . import gemini_client
-        result = await gemini_client.chat_json(
-            messages, model=m, temperature=temperature, max_tokens=max_tokens,
-        )
-        if cache_key and result and "_raw" not in result:
-            await llm_cache.cache_put(
-                cache_key, m,
-                {"messages": messages, "temperature": temperature, "max_tokens": max_tokens},
                 result,
             )
         return result

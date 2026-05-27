@@ -179,11 +179,9 @@ async def run(run_l3: bool, refresh_dmit: bool, gt_file: Path = DEFAULT_GT_FILE,
     present = [s for s in samples if s["asin"] in dmit_map]
     log.warning("实际可跑 eval 样本: %d", len(present))
 
-    # 跑审核 - 外层并发按 vision provider 自适应
-    # Gemini free tier 限 ~15 RPM, sem=10 匹配
-    # 火山/qwen 没这限制, sem=50 最优
+    # 跑审核 - 火山/qwen 没限速, sem=50 最优
     vp = get_settings().vision_provider
-    sem_size = 10 if (vp == "gemini" and run_l4) else 50
+    sem_size = 50
     log.warning("外层 sem = %d (vision_provider=%s, run_l4=%s)", sem_size, vp, run_l4)
     sem = asyncio.Semaphore(sem_size)
 

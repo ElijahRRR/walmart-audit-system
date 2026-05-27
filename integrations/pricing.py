@@ -3,7 +3,7 @@
 价格按 2026-04 公开标价 (CNY per 1K tokens).
 - DashScope: https://help.aliyun.com/zh/dashscope/developer-reference/billing-of-models
 - 火山方舟豆包: https://www.volcengine.com/docs/82379/1099320
-- Gemini (按汇率折算): https://ai.google.dev/pricing  (USD * 7.2 ≈ CNY)
+- DeepSeek: https://api-docs.deepseek.com/quick_start/pricing
 
 新模型加入这里即可, compute_cost 自动用.
 """
@@ -30,11 +30,6 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
     "doubao-1.5-vision-pro-32k-250115": {"in": 0.0030,  "out": 0.0090, "provider": "volcengine"},
     "doubao-pro-32k":                   {"in": 0.0008,  "out": 0.0020, "provider": "volcengine"},
 
-    # ----- Google Gemini (USD ×7.2 折算 CNY) -----
-    "gemini-2.5-flash-lite": {"in": 0.00073, "out": 0.0029, "provider": "gemini"},
-    "gemini-2.5-flash":      {"in": 0.00216, "out": 0.0086, "provider": "gemini"},
-    "gemini-2.5-pro":        {"in": 0.0090,  "out": 0.0360, "provider": "gemini"},
-
     # ----- DeepSeek (api.deepseek.com) -----
     # 官方价 (CNY/1K tokens): cache_hit 是 cache_miss 的 20% (deepseek-v4-flash) 或 8.3% (v4-pro)
     "deepseek-v4-flash":  {"in": 0.001,  "in_cached": 0.0002, "out": 0.002,  "provider": "deepseek"},
@@ -47,16 +42,12 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
 # 视觉模型: 一张图等价多少 token (各 provider 不同, 这是粗略估算)
 # qwen-vl: ~1280 tokens/image (默认 detail)
 # doubao-seed-1-6: ~580 tokens/image
-# gemini-flash-lite: ~258 tokens/image
 VISION_TOKENS_PER_IMAGE: dict[str, int] = {
     "qwen-vl-plus":                     1280,
     "qwen-vl-max":                      1280,
     "doubao-seed-1-6-250615":           580,
     "doubao-seed-1-6-flash-250615":     580,
     "doubao-1.5-vision-pro-32k-250115": 580,
-    "gemini-2.5-flash-lite":            258,
-    "gemini-2.5-flash":                 258,
-    "gemini-2.5-pro":                   258,
 }
 
 
