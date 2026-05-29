@@ -17,7 +17,7 @@ from typing import Any
 from integrations import usage_logger
 from sync._common import db_conn, to_jsonb
 
-from . import l1_category, l2_rules, l3_llm, l4_vision, phase0, reason_mapper
+from . import history_shortcut, l1_category, l2_rules, l3_llm, l4_vision, phase0, reason_mapper
 from .models import AuditOutcome, L1Result, L2Result, L3Result, Phase0Result, ProductInfo, RuleHit
 
 log = logging.getLogger(__name__)
@@ -236,10 +236,13 @@ async def audit_one(
     run_l3: bool = True,
     run_l4: bool = True,
     persist: bool = True,
+    force_rerun: bool = False,
 ) -> AuditOutcome:
     """对单个产品跑审核流水线。
 
     完整流程:
+      [历史短路] 默认查 audit_runs, 命中 reject 直接出 (跳过 L1-L4)
+        ↓ (没命中 / force_rerun=True 时绕过)
       Phase0: 品牌精准黑名单 → 命中直接 reject
         ↓
       L1: 类目判定 (qwen-plus 输出 PT + walmart_category + zh_can_do)
@@ -251,17 +254,51 @@ async def audit_one(
       L4: 视觉审核 (doubao-seed-1-6, 只在 L3 pass 才跑)
 
     flags:
-      - skip_l1_llm: True 时 L1 只查 DB 不调 LLM (测试/离线场景)
-      - run_l3:      默认 True (单测场景传 False 以省 LLM 配额)
-      - run_l4:      默认 True (单测场景传 False 以省 LLM 配额)
-      - persist:     落 audit_runs / audit_hits / products 表
+      - skip_l1_llm:  True 时 L1 只查 DB 不调 LLM (测试/离线场景)
+      - run_l3:       默认 True (单测场景传 False 以省 LLM 配额)
+      - run_l4:       默认 True (单测场景传 False 以省 LLM 配额)
+      - persist:      落 audit_runs / audit_hits / products 表
+      - force_rerun:  True 时跳过历史短路, 从头审核 (前端勾选"重新审核"时用)
     """
     # 设审核上下文 — LLM client 透此关联 asin/stage 入 llm_usage 表
     ctx = usage_logger.set_context(asin=product.asin, stage="L1")
     try:
-        return await _audit_pipeline(product, skip_l1_llm, run_l3, run_l4, persist)
+        return await _audit_pipeline(product, skip_l1_llm, run_l3, run_l4, persist, force_rerun)
     finally:
         usage_logger.reset_context(ctx)
+
+
+def _build_shortcut_outcome(product: ProductInfo, hit: history_shortcut.ShortcutHit) -> AuditOutcome:
+    """根据历史 reject snapshot 构造一个短路 AuditOutcome。
+
+    把 short-circuit hit 挂在 phase0 里 (而非 l1/l2), 因为:
+      1. AuditOutcome.all_hits 从 phase0.hits 取, 自动包含到 audit_hits 持久化
+      2. 语义上"短路"发生在审核流水线起点之前, 接近 L0 性质
+    """
+    l1_stub = L1Result(
+        walmart_product_type=hit.original_walmart_product_type or "(history_shortcut)",
+        pt_confidence=hit.original_pt_confidence or "低",
+        pt_source="shortcut",
+    )
+    shortcut_hit = RuleHit(
+        stage="L0",
+        rule_code="history_shortcut",
+        penalty=0,
+        detail=hit.as_detail(),
+    )
+    return AuditOutcome(
+        asin=product.asin,
+        verdict="reject",
+        score_final=0,
+        stage_stopped_at="SHORTCUT",
+        l1=l1_stub,
+        phase0=Phase0Result(blocked=True, hits=[shortcut_hit]),
+        l2=None,
+        l3=None,
+        l4=None,
+        # 沿用老 reason_category, 便于报表层一致 (没有则 'history_shortcut' 兜底)
+        final_reason_category=hit.original_reason_category or "history_shortcut",
+    )
 
 
 async def _audit_pipeline(
@@ -270,7 +307,22 @@ async def _audit_pipeline(
     run_l3: bool,
     run_l4: bool,
     persist: bool,
+    force_rerun: bool = False,
 ) -> AuditOutcome:
+    # 历史短路 — 在 Phase 0 之前查, 命中老 reject 直接出 (零 LLM 调用)
+    # force_rerun=True 时跳过此层, 让用户重新审核
+    if not force_rerun:
+        shortcut_hit = history_shortcut.lookup_latest_reject(product.asin)
+        if shortcut_hit is not None:
+            outcome = _build_shortcut_outcome(product, shortcut_hit)
+            if persist:
+                try:
+                    await asyncio.to_thread(upsert_product, product)
+                    await asyncio.to_thread(_persist_run, outcome)
+                except Exception as e:  # noqa: BLE001
+                    log.error("persist shortcut failed for %s: %s", product.asin, e)
+            return outcome
+
     # Phase 0 - 精准前置过滤 (类目禁售 + 品牌黑名单)
     phase0_result = phase0.check(product)
     if phase0_result.blocked:
@@ -354,6 +406,7 @@ async def audit_batch(
     run_l3: bool = True,
     run_l4: bool = True,
     persist: bool = True,
+    force_rerun: bool = False,
 ) -> list[AuditOutcome]:
     """批量审核 — worker pool 模式 (持续分散打 LLM, 避免 gather 瞬间洪峰).
 
@@ -398,6 +451,7 @@ async def audit_batch(
                     run_l3=run_l3,
                     run_l4=run_l4,
                     persist=persist,
+                    force_rerun=force_rerun,
                 )
                 results[idx] = outcome
             except Exception as e:  # noqa: BLE001

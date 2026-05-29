@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 
 Verdict = Literal["pass", "reject", "pending"]
-Stage = Literal["L0", "L1", "L2", "L3", "L4"]
+Stage = Literal["L0", "L1", "L2", "L3", "L4", "SHORTCUT"]
 
 
 @dataclass
