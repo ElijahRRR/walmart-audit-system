@@ -171,6 +171,7 @@ async def submit_job(
     file: UploadFile = File(...),
     user_email: str = Form(...),
     job_name: str | None = Form(None),
+    force_rerun: bool = Form(False),
 ) -> dict[str, Any]:
     """同事提交 ASIN 文件. 返回父任务 id 和子任务数.
 
@@ -211,6 +212,9 @@ async def submit_job(
     # options 仅存"调度相关"元数据 (未来可扩展 priority / submitter_note 等).
     # LLM 模型 / L4 开关 / API key 不放这里 — 由 Worker 自行决定.
     options: dict[str, Any] = {}
+    if force_rerun:
+        # 勾选"重新审核": worker 调 audit_one 时透传 force_rerun=True, 跳过历史 reject 短路
+        options["force_rerun"] = True
 
     # 查当前在线 (90 秒内有心跳) worker 数, 用于自动切片
     n_alive = await run_in_threadpool(_count_alive_workers)

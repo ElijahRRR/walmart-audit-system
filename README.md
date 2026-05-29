@@ -85,6 +85,11 @@
 ```
 L0  数据准备（每日同步黑名单 / 类目映射 / 违规回测；USPTO LIVE 商标；飞书 Phase 0 黑名单）
     ↓
+**历史短路**  audit_runs 最近一次 verdict=reject → 直接出 reject (跳过 L1-L4)
+              policy 假设: 只新增不削减 → 老 reject 永远成立
+              短路时仍写一条新 audit_run stage_stopped_at='SHORTCUT', detail 含 referenced_run_id
+              前端勾选"重新审核" / CLI --force-rerun 可绕过这一层
+    ↓
 Phase0  硬过滤（任一命中 -100 直接 reject，不进 L1/L2）：
     0a 飞书黑名单 — seller_id / ASIN / amazon 类目（每日同步约 25k 条目）
     0b Amazon 顶级 8 大禁售类目（Books/Kindle/Clothing/Automotive/Beauty/Health×2/Grocery）
@@ -264,6 +269,7 @@ python3 -m cli.audit_asin_list --input failed.csv --filter-stage L3   # 只重�
 
 ## ⚠️ 注意事项
 
+- **历史短路**：[pipelines/history_shortcut.py](pipelines/history_shortcut.py) 默认对所有 verdict=reject 短路（D 策略，永久），假设政策只增不减。如果删除/放宽了某条规则需要重审历史 ASIN，前端勾选"重新审核"或 CLI `--force-rerun`。
 - **Phase 0 飞书黑名单 fail-soft**：[pipelines/phase0_lark_blacklist.py](pipelines/phase0_lark_blacklist.py) 加载失败时等同空 set（跳过这一项），让旧表数据继续工作；要靠 `sync_runs.status` 监控同步本身是否失败。
 - **类目归一化必须双向对齐**：飞书表用 `Beauty&PersonalCare->Fragrance->Men's->Sets`（无空格 + `->`），DMIT 用 `Beauty & Personal Care > Fragrance > Men's > Sets`（含空格 + `>`）；`normalize_amazon_category()` 是唯一真理，sync 入库 + 审核查询都必须用它。
 - **lark-cli 是硬依赖**：`integrations/lark_client.py` 走 `subprocess` 调系统 `lark-cli`，未登录会全部同步任务失败。
@@ -283,6 +289,7 @@ python3 -m cli.audit_asin_list --input failed.csv --filter-stage L3   # 只重�
 
 最近的重要变更（按时间倒序）：
 
+- **feat(shortcut)** 新增历史 reject 短路：`pipelines/history_shortcut.py` + `orchestrator.audit_one(force_rerun=...)` + 前端 checkbox + CLI `--force-rerun`。命中老 reject 时直接出 verdict=reject stage='SHORTCUT'，零 LLM 调用；新 audit_run 仍写库便于审计
 - **revert(scripts)** 移除 phase0 launchd plist，回退 `install_sync_cron.sh`：phase0 同步统一由 Claude Code `scheduled-tasks` 调度（`sync-blacklist-brands-daily` 已合并 brand + phase0），避免双跑
 - **feat(phase0)** 新增飞书黑名单过滤：`pipelines/phase0_lark_blacklist.py` + `sync/sync_phase0_blacklist.py` + 3 张新表（sellers/asins/amazon_cats）；`ProductInfo` / DMIT converter 加 `seller_id` / `seller_name` 字段并回填 50.6 万历史数据
 - **refactor** 移除 Gemini provider 集成（8 个文件，-466 行）

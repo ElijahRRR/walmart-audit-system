@@ -308,8 +308,12 @@
         </div>
 
         <div class="submit-row">
-          <div class="chunk-input" style="color:#9ca3af">
-            🤖 自动按在线 worker 数切分子任务
+          <div class="chunk-input" style="color:#9ca3af; display: flex; flex-direction: column; gap: 4px;">
+            <div>🤖 自动按在线 worker 数切分子任务</div>
+            <label style="display: flex; align-items: center; gap: 6px; color: #6b7280; cursor: pointer;">
+              <input type="checkbox" name="force_rerun" value="true" style="width: auto; margin: 0;">
+              <span>♻️ 重新审核（忽略历史 reject，全部 ASIN 从头审一遍）</span>
+            </label>
           </div>
           <button type="submit" class="btn btn-primary" id="submit-btn">提交任务</button>
         </div>

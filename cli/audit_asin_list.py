@@ -129,6 +129,8 @@ def main() -> int:
     parser.add_argument("--no-l4", action="store_true",
                         help="关掉 L4 视觉 (默认启用; 只省视觉成本, L3 仍跑)")
     parser.add_argument("--no-persist", action="store_true", help="不落 audit_runs/audit_hits 表")
+    parser.add_argument("--force-rerun", action="store_true",
+                        help="跳过历史 reject 短路, 强制每个 ASIN 走完整 L1-L4 流程")
     parser.add_argument("--concurrency", type=int, default=20)
     parser.add_argument("--ramp-step-ms", type=int, default=0,
                         help="task 启动错开间隔 ms (默认 0 关闭; 拥塞场景设 200 可能 3.6× 提速)")
@@ -153,6 +155,7 @@ def main() -> int:
             run_l3=not args.no_l3,
             run_l4=not args.no_l4,
             persist=not args.no_persist,
+            force_rerun=args.force_rerun,
         )
     )
 

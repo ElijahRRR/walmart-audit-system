@@ -67,9 +67,19 @@ async def run_audit_job(
     日志: 通过 BufferedLogHandler + LogStreamer 推送到 server, 前端 drawer 实时显示.
     进度: 每完成 N 个 ASIN 节流上报一次.
     """
+    import json as _json
     job_id = int(job["job_id"])
     asin_offset = int(job.get("asin_offset") or 0)
     asin_count = int(job.get("asin_count") or 0)
+    # 解析 options JSON (server submit_job 时塞入, e.g. {"force_rerun": True})
+    raw_options = job.get("options") or "{}"
+    try:
+        opts: dict[str, Any] = _json.loads(raw_options) if isinstance(raw_options, str) else (raw_options or {})
+    except Exception:
+        opts = {}
+    force_rerun = bool(opts.get("force_rerun", False))
+    if force_rerun:
+        log.info("[#%d] 用户勾选 重新审核 — 跳过历史 reject 短路", job_id)
 
     # 装一个临时 logging handler, 把这次任务的所有日志推回 server
     log_handler = BufferedLogHandler()
@@ -115,6 +125,7 @@ async def run_audit_job(
                 run_l4=run_l4,
                 concurrency=async_concurrency,
                 server=server, job_id=job_id,
+                force_rerun=force_rerun,
             )
 
             # 5. 写结果 CSV
@@ -214,6 +225,7 @@ async def _run_audit_pipeline(
     concurrency: int,
     server: ServerClient,
     job_id: int,
+    force_rerun: bool = False,
 ) -> list[dict[str, Any]]:
     """单进程 N 协程跑 audit pipeline.
 
@@ -284,7 +296,10 @@ async def _run_audit_pipeline(
         info = present.get(asin)
         try:
             async with sem:
-                outcome = await audit_one(info, run_l3=True, run_l4=run_l4, persist=False)
+                outcome = await audit_one(
+                    info, run_l3=True, run_l4=run_l4, persist=False,
+                    force_rerun=force_rerun,
+                )
             row = _outcome_to_row(outcome, brand=info.brand)
             async with persist_lock:
                 persist_items.append((info, outcome))
