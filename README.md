@@ -158,7 +158,7 @@ python3 -m sync.sync_error_stats          # 错误商品日报全量
 python3 -m sync.build_pt_embeddings       # 重算 pt_embeddings.npz（~5 分钟）
 ```
 
-> macOS 上可用 `scripts/install_sync_cron.sh` 安装 `com.nextderboy.audit-sync-blacklist.plist` 守护任务。
+> **定时同步**：生产环境用 Claude Code MCP `scheduled-tasks` 维护，任务 `sync-blacklist-brands-daily` 每天 07:05 跑 `sync_blacklist_brands` + `sync_phase0_blacklist` + 自动重启 worker。本机演练备用：`scripts/install_sync_cron.sh` 安装 `com.nextderboy.audit-sync-blacklist.plist` launchd 守护任务（只覆盖 blacklist_brands；Phase 0 三表不在 launchd 调度内）。
 
 ### 单机批量审核
 
@@ -283,7 +283,8 @@ python3 -m cli.audit_asin_list --input failed.csv --filter-stage L3   # 只重�
 
 最近的重要变更（按时间倒序）：
 
-- **feat(phase0)** 新增飞书黑名单过滤：`pipelines/phase0_lark_blacklist.py` + `sync/sync_phase0_blacklist.py` + 3 张新表（sellers/asins/amazon_cats）+ launchd 日定时；`ProductInfo` / DMIT converter 加 `seller_id` / `seller_name` 字段并回填 50.6 万历史数据
+- **revert(scripts)** 移除 phase0 launchd plist，回退 `install_sync_cron.sh`：phase0 同步统一由 Claude Code `scheduled-tasks` 调度（`sync-blacklist-brands-daily` 已合并 brand + phase0），避免双跑
+- **feat(phase0)** 新增飞书黑名单过滤：`pipelines/phase0_lark_blacklist.py` + `sync/sync_phase0_blacklist.py` + 3 张新表（sellers/asins/amazon_cats）；`ProductInfo` / DMIT converter 加 `seller_id` / `seller_name` 字段并回填 50.6 万历史数据
 - **refactor** 移除 Gemini provider 集成（8 个文件，-466 行）
 
 - **a3a2f69** `fix(L1)` fallback 必须迭代候选找第一个真实可用 PT，不能盲取 `candidates[0]`
