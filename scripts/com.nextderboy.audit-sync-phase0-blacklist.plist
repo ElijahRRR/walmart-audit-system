@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nextderboy.audit-sync-phase0-blacklist</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/nextderboy/Projects/新审核系统/.venv/bin/python</string>
+        <string>-m</string>
+        <string>sync.sync_phase0_blacklist</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/nextderboy/Projects/新审核系统</string>
+
+    <!-- 每天早上 7:05 跑 (错开 7:00 的 blacklist_brands sync, 避免抢飞书 API 配额) -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>7</integer>
+        <key>Minute</key>
+        <integer>5</integer>
+    </dict>
+
+    <key>StartCalendarIntervalRandomDelay</key>
+    <integer>0</integer>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/audit_sync_phase0_blacklist.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/audit_sync_phase0_blacklist.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+    </dict>
+</dict>
+</plist>

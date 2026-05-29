@@ -83,9 +83,13 @@
 ## 🔄 运行原理
 
 ```
-L0  数据准备（每日同步黑名单 / 类目映射 / 违规回测；USPTO LIVE 商标）
+L0  数据准备（每日同步黑名单 / 类目映射 / 违规回测；USPTO LIVE 商标；飞书 Phase 0 黑名单）
     ↓
-Phase0  硬过滤：品牌完全黑名单 / 标题带 ®™ / 17 大禁售大类直接 -100
+Phase0  硬过滤（任一命中 -100 直接 reject，不进 L1/L2）：
+    0a 飞书黑名单 — seller_id / ASIN / amazon 类目（每日同步约 25k 条目）
+    0b Amazon 顶级 8 大禁售类目（Books/Kindle/Clothing/Automotive/Beauty/Health×2/Grocery）
+    0c title/bullets/desc 含 ®/™/℠/©
+    0d 品牌精准黑名单（36k 飞书维护 + yaml 手工补）
     ↓
 L1  类目判定（输出 walmart_product_type 必出）
     1) walmart_category_map 精确匹配（最高优先级）
@@ -146,6 +150,7 @@ cp .env.example .env
 
 ```bash
 python3 -m sync.sync_blacklist_brands     # 飞书黑名单品牌
+python3 -m sync.sync_phase0_blacklist     # 飞书 Phase 0 黑名单（卖家/ASIN/Amazon 类目）
 python3 -m sync.sync_category_map         # Amazon → Walmart PT 映射
 python3 -m sync.sync_pt_meta              # walmart_pt_meta（L1 校验白名单）
 python3 -m sync.sync_violation_daily      # 回测 ground truth（按日）
@@ -208,7 +213,10 @@ python3 -m cli.audit_asin_list --input failed.csv --filter-stage L3   # 只重�
 | `blacklist_brands` | 飞书 + TRO + USPTO 黑名单品牌 | `brand` |
 | `walmart_category_map` | Amazon 类目 → Walmart PT 映射（置信度 / 证书 / 中国卖家可否） | `(amazon_category, walmart_product_type)` |
 | `walmart_pt_meta` | Walmart PT 全量元数据，L1 候选校验白名单 | `walmart_product_type` |
-| `products` | DMIT 拉到的商品主表（含 raw JSONB） | `asin` |
+| `phase0_blacklist_sellers` | 飞书 Phase 0 黑名单卖家（~1.2k）| `seller_id` |
+| `phase0_blacklist_asins` | 飞书 Phase 0 黑名单 ASIN（~12.6k）| `asin` |
+| `phase0_blacklist_amazon_cats` | 飞书 Phase 0 黑名单 Amazon 类目（归一化后）（~11.6k）| `category_norm` |
+| `products` | DMIT 拉到的商品主表（含 raw JSONB + seller_id/name）| `asin` |
 | `audit_runs` | 每次审核（一个 ASIN 可多次重审） | `run_id BIGSERIAL` |
 | `audit_hits` | 每条规则命中（stage / rule_code / penalty / detail） | `hit_id` |
 | `violation_groundtruth` | 回测 ground truth（按 source_sheet 分） | `(asin, source_sheet)` |
@@ -256,6 +264,8 @@ python3 -m cli.audit_asin_list --input failed.csv --filter-stage L3   # 只重�
 
 ## ⚠️ 注意事项
 
+- **Phase 0 飞书黑名单 fail-soft**：[pipelines/phase0_lark_blacklist.py](pipelines/phase0_lark_blacklist.py) 加载失败时等同空 set（跳过这一项），让旧表数据继续工作；要靠 `sync_runs.status` 监控同步本身是否失败。
+- **类目归一化必须双向对齐**：飞书表用 `Beauty&PersonalCare->Fragrance->Men's->Sets`（无空格 + `->`），DMIT 用 `Beauty & Personal Care > Fragrance > Men's > Sets`（含空格 + `>`）；`normalize_amazon_category()` 是唯一真理，sync 入库 + 审核查询都必须用它。
 - **lark-cli 是硬依赖**：`integrations/lark_client.py` 走 `subprocess` 调系统 `lark-cli`，未登录会全部同步任务失败。
 - **DMIT 不稳**：批量审核已加自动等待 + 重试（[sync/audit_listing_sheet.py](sync/audit_listing_sheet.py)、[sync/audit_from_lark_sheet.py](sync/audit_from_lark_sheet.py)），但仍可能命中网络/限流；查 [api/dmit_fetcher.py](api/dmit_fetcher.py) 调整并发。
 - **L1 候选必须经 walmart_pt_meta 校验**：直接取 LLM 第一个候选会取到不存在的 PT；务必迭代候选选第一个真实可用的（参考 a3a2f69 / 125ffbf）。
@@ -272,6 +282,9 @@ python3 -m cli.audit_asin_list --input failed.csv --filter-stage L3   # 只重�
 ## 📝 变更记录
 
 最近的重要变更（按时间倒序）：
+
+- **feat(phase0)** 新增飞书黑名单过滤：`pipelines/phase0_lark_blacklist.py` + `sync/sync_phase0_blacklist.py` + 3 张新表（sellers/asins/amazon_cats）+ launchd 日定时；`ProductInfo` / DMIT converter 加 `seller_id` / `seller_name` 字段并回填 50.6 万历史数据
+- **refactor** 移除 Gemini provider 集成（8 个文件，-466 行）
 
 - **a3a2f69** `fix(L1)` fallback 必须迭代候选找第一个真实可用 PT，不能盲取 `candidates[0]`
 - **125ffbf** `fix(L1)` PT 校验 + 候选生成必须是 `walmart_pt_meta` 真实可用 PT
