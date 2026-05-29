@@ -192,7 +192,7 @@ CREATE INDEX IF NOT EXISTS idx_llm_cache_created ON llm_cache(created_at);
 
 CREATE TABLE IF NOT EXISTS sync_runs (
     sync_id     BIGSERIAL PRIMARY KEY,
-    job         TEXT NOT NULL,                   -- 'blacklist_brands' / 'category_map' / 'violation_daily'
+    job         TEXT NOT NULL,                   -- 'blacklist_brands' / 'category_map' / 'violation_daily' / 'phase0_blacklist'
     started_at  TIMESTAMPTZ DEFAULT NOW(),
     finished_at TIMESTAMPTZ,
     rows_in     INT,
@@ -200,5 +200,33 @@ CREATE TABLE IF NOT EXISTS sync_runs (
     status      TEXT,                            -- 'ok' / 'error'
     error_text  TEXT
 );
+
+-- ============================================================
+-- Phase 0 飞书黑名单 (每日同步飞书表 BV25suzM7htNtBte91jc40iXnvg!8280e8)
+-- 三列 (黑名单卖家店铺ID / 黑名单ASIN / 黑名单类目) 各拆 1 张表, 任一命中 → L0 reject -100
+-- 同步策略: TRUNCATE + 全量重灌; 同步失败时旧数据继续生效 (fail-soft)
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS phase0_blacklist_sellers (
+    seller_id   TEXT PRIMARY KEY,                -- Amazon seller ID, e.g. 'A327G0VM18EU0N'
+    synced_at   TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS phase0_blacklist_asins (
+    asin        TEXT PRIMARY KEY,                -- Amazon ASIN, e.g. 'B0F9YPLHLZ'
+    synced_at   TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS phase0_blacklist_amazon_cats (
+    category_norm  TEXT PRIMARY KEY,             -- 归一化路径: 去全部空格 + '>' → '->', e.g. 'VideoGames->XboxOne->Games'
+    category_raw   TEXT,                         -- 飞书原文 (调试用)
+    synced_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- products 表新增 seller_id / seller_name 字段
+-- DMIT raw 一直返回这两个字段, 之前未提取; 现 Phase 0 卖家黑名单需要
+ALTER TABLE products ADD COLUMN IF NOT EXISTS seller_id   TEXT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS seller_name TEXT;
+CREATE INDEX IF NOT EXISTS idx_products_seller ON products(seller_id) WHERE seller_id IS NOT NULL;
 
 COMMIT;

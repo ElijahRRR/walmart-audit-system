@@ -94,6 +94,8 @@ def _product_row_to_info(row: dict[str, Any]) -> ProductInfo:
         amazon_category_path=row.get("amazon_category_path") or "",
         stock_count=stock_count,
         stock_status=stock_status,
+        seller_id=row.get("seller_id") or "",
+        seller_name=row.get("seller_name") or "",
     )
 
 
@@ -109,6 +111,8 @@ def _detail_to_info(d: ProductDetail) -> ProductInfo:
         amazon_category_path=d.amazon_category_path or "",
         stock_count=d.stock_count,
         stock_status=d.stock_status or "",
+        seller_id=d.seller_id or "",
+        seller_name=d.seller_name or "",
     )
 
 
@@ -121,7 +125,8 @@ def _db_lookup_fresh(asin: str, fresh_sec: int) -> ProductInfo | None:
                 """
                 SELECT asin, title, brand, country_of_origin,
                        bullet_points, long_description, image_urls,
-                       amazon_category_path, raw, raw_fetched_at
+                       amazon_category_path, seller_id, seller_name,
+                       raw, raw_fetched_at
                 FROM products
                 WHERE asin = %s AND raw_fetched_at >= %s
                 """,
@@ -151,7 +156,8 @@ def _db_lookup_fresh_batch(asins: list[str], fresh_sec: int) -> dict[str, Produc
                     """
                     SELECT asin, title, brand, country_of_origin,
                            bullet_points, long_description, image_urls,
-                           amazon_category_path, raw, raw_fetched_at
+                           amazon_category_path, seller_id, seller_name,
+                           raw, raw_fetched_at
                     FROM products
                     WHERE asin = ANY(%s) AND raw_fetched_at >= %s
                     """,
@@ -171,8 +177,9 @@ def _persist_product(info: ProductInfo, raw: dict[str, Any] | None = None) -> No
                 INSERT INTO products(
                     asin, title, brand, country_of_origin,
                     bullet_points, long_description, image_urls,
-                    amazon_category_path, raw, raw_fetched_at, updated_at
-                ) VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s, %s::jsonb, NOW(), NOW())
+                    amazon_category_path, seller_id, seller_name,
+                    raw, raw_fetched_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s, %s, %s, %s::jsonb, NOW(), NOW())
                 ON CONFLICT (asin) DO UPDATE
                   SET title                = EXCLUDED.title,
                       brand                = EXCLUDED.brand,
@@ -181,6 +188,8 @@ def _persist_product(info: ProductInfo, raw: dict[str, Any] | None = None) -> No
                       long_description     = EXCLUDED.long_description,
                       image_urls           = EXCLUDED.image_urls,
                       amazon_category_path = EXCLUDED.amazon_category_path,
+                      seller_id            = EXCLUDED.seller_id,
+                      seller_name          = EXCLUDED.seller_name,
                       raw                  = EXCLUDED.raw,
                       raw_fetched_at       = NOW(),
                       updated_at           = NOW()
@@ -194,6 +203,8 @@ def _persist_product(info: ProductInfo, raw: dict[str, Any] | None = None) -> No
                     info.long_description,
                     to_jsonb(info.image_urls),
                     info.amazon_category_path,
+                    info.seller_id or None,
+                    info.seller_name or None,
                     to_jsonb(raw or {}),
                 ),
             )

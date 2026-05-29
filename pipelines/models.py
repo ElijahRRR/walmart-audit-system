@@ -23,6 +23,8 @@ class ProductInfo:
     amazon_category_path: str = ""
     stock_count: int | None = None       # DMIT.stock_count, None=未知, 0=无货
     stock_status: str = ""               # DMIT.stock_status: 'In Stock'/'Currently unavailable'/'N/A' 等
+    seller_id: str = ""                  # DMIT.seller_id, e.g. 'A327G0VM18EU0N' — Phase 0 卖家黑名单用
+    seller_name: str = ""                # DMIT.seller_name, e.g. 'iKiTo' (调试/审计)
 
     @property
     def searchable_text(self) -> str:

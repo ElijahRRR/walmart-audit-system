@@ -39,6 +39,8 @@ class ProductDetail:
     amazon_category_path: str | None = None
     stock_count: int | None = None      # DMIT.stock_count
     stock_status: str | None = None     # DMIT.stock_status
+    seller_id: str | None = None        # DMIT.seller_id (e.g. 'A327G0VM18EU0N')
+    seller_name: str | None = None      # DMIT.seller_name (e.g. 'iKiTo')
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -105,6 +107,8 @@ class ProductDetail:
             amazon_category_path=category_path,
             stock_count=stock_count,
             stock_status=raw.get("stock_status"),
+            seller_id=(raw.get("seller_id") or "").strip() or None,
+            seller_name=(raw.get("seller_name") or "").strip() or None,
             raw=raw,
         )
 
