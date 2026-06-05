@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# 起 N 个 worker 进程 (默认 14, 跟原 audit_from_lark_sheet 配置对齐)
+# 起 N 个 worker 进程 (默认 10; 之前 14 调到 10 减本机负载, 总并发 500 ASIN 够用)
 # 用法:
-#   bash scripts/start_workers.sh                  # 14 worker, 连本地 server
+#   bash scripts/start_workers.sh                  # 10 worker, 连本地 server
 #   bash scripts/start_workers.sh 8                # 8 worker
-#   bash scripts/start_workers.sh 14 http://x:8200 # 自定义 server
+#   bash scripts/start_workers.sh 14 http://x:8200 # 自定义数量 + server
 set -euo pipefail
 
-N="${1:-14}"
+N="${1:-10}"
 SERVER="${2:-http://127.0.0.1:8200}"
 HOST=$(hostname -s | tr '[:upper:]' '[:lower:]')
 
@@ -51,7 +51,7 @@ for i in $(seq 1 "$N"); do
         > "$LOG_DIR/worker_$i.log" 2>&1 &
     PID=$!
     echo "$PID" >> "$PIDS_FILE"
-    # 错开启动避免 14 个进程同时打 server
+    # 错开启动避免 N 个进程同时打 server
     sleep 0.3
 done
 
