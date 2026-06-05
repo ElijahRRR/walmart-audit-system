@@ -1,9 +1,9 @@
 """Worker 主循环 - 拉任务, 跑审核 pipeline, 上传结果.
 
 架构: 单进程 N 协程 (跟 ERP erp_worker 对齐).
-  - 一台机器跑 14 个独立 worker 进程 (用 scripts/start_workers.sh)
+  - 一台机器跑 10 个独立 worker 进程 (用 scripts/start_workers.sh)
   - 每 worker 内部: asyncio Semaphore(50 协程) 跑 audit_batch
-  - 总并发 = 14 × 50 = 700 ASIN 同时
+  - 总并发 = 10 × 50 = 500 ASIN 同时
   - 进度: 每完成 N 个 ASIN 上报 server (节流避免压垮)
   - 日志: BufferedLogHandler 缓冲 → 每 1 秒批量推到 server
 

@@ -2,7 +2,7 @@
 
 站在沃尔玛官方审核视角，**预审** Amazon 搬运商品在上架沃尔玛前能否通过。通过后品牌统一改 `unbranded` 交下游 API 上架。
 
-**状态**：L0 → L4 全链路打通，已在全量 4326 ASIN 跑通；线上以 server + 14 worker 分布式队列方式服务。Python 3.11+，PostgreSQL，FastAPI。
+**状态**：L0 → L4 全链路打通，已在全量 4326 ASIN 跑通；线上以 server + 10 worker 分布式队列方式服务。Python 3.11+，PostgreSQL，FastAPI。
 
 ---
 
@@ -187,7 +187,7 @@ python3 -m sync.audit_listing_sheet   --token <sheet_token>      # 6 列布局�
 
 ```
 ┌──────────────── 开发机 (macOS) ─────────────────┐    ┌─── VPS 64.186.239.11 ───┐
-│ 14× worker (worker.poll_loop)                  │    │ FastAPI server :8200      │
+│ 10× worker (worker.poll_loop)                  │    │ FastAPI server :8200      │
 │   → PostgreSQL walmart_audit (本地)            │◄──►│ SQLite jobs.db            │
 │   → PostgreSQL uspto (本地, L2 R5 商标)        │    │ HTMX Web 控制台           │
 │   → DMIT API (远程)                            │    │ DMIT scraper :8899 同机   │
@@ -199,10 +199,11 @@ python3 -m sync.audit_listing_sheet   --token <sheet_token>      # 6 列布局�
 # 1. server: 一键部署到 VPS (打包 + scp + systemd 启动)
 bash server/deploy/deploy_to_dmit.sh                 # 改代码后必跑
 
-# 2. worker: 本机起 14 进程 (改完 pipelines/worker/cli 代码后必跑)
+# 2. worker: 本机起 10 进程 (改完 pipelines/worker/cli 代码后必跑)
 bash scripts/stop_workers.sh
-bash scripts/start_workers.sh 14 http://64.186.239.11:8200
-curl -s http://64.186.239.11:8200/api/workers/online  # 期望 {"online":14}
+bash scripts/start_workers.sh                          # 不传参数 = 默认 10 个, 连本地 server
+# 连远程: bash scripts/start_workers.sh 10 http://64.186.239.11:8200
+curl -s http://64.186.239.11:8200/api/workers/online  # 期望 {"online":10}
 
 # 3. Web 控制台:
 #    http://64.186.239.11:8200/  上传 CSV → 进度追踪 → 下载 XLSX
@@ -304,7 +305,8 @@ python3 -m cli.audit_asin_list --input failed.csv --filter-stage L3   # 只重�
 
 最近的重要变更（按时间倒序）：
 
-- **docs/deploy** README 补"分布式队列"实际拓扑（server@VPS + worker@本机），生产环境 server 已部署到 64.186.239.11:8200，本机 14 worker 在线
+- **chore(worker)** 默认 worker 数从 14 降到 10（减本机负载，总并发 500 ASIN 仍够用）；同步改 README / start_workers.sh / poll_loop.py 注释 / scheduled-task SKILL.md
+- **docs/deploy** README 补"分布式队列"实际拓扑（server@VPS + worker@本机），生产环境 server 已部署到 64.186.239.11:8200
 - **feat(shortcut)** 新增历史 reject 短路：`pipelines/history_shortcut.py` + `orchestrator.audit_one(force_rerun=...)` + 前端 checkbox + CLI `--force-rerun`。命中老 reject 时直接出 verdict=reject stage='SHORTCUT'，零 LLM 调用；新 audit_run 仍写库便于审计
 - **revert(scripts)** 移除 phase0 launchd plist，回退 `install_sync_cron.sh`：phase0 同步统一由 Claude Code `scheduled-tasks` 调度（`sync-blacklist-brands-daily` 已合并 brand + phase0），避免双跑
 - **feat(phase0)** 新增飞书黑名单过滤：`pipelines/phase0_lark_blacklist.py` + `sync/sync_phase0_blacklist.py` + 3 张新表（sellers/asins/amazon_cats）；`ProductInfo` / DMIT converter 加 `seller_id` / `seller_name` 字段并回填 50.6 万历史数据
