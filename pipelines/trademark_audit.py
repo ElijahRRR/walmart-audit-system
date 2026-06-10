@@ -165,8 +165,8 @@ def query_marks(brand_uppers: list[str]) -> dict[str, list[dict[str, str]]]:
                                     t.registration_date    AS registration_date,
                                     o.nationality_country  AS nationality_country
                     FROM brand_nice_class bnc
-                    LEFT JOIN trademarks t        ON t.serial_number = bnc.serial_number
-                    LEFT JOIN trademark_owners o  ON o.serial_number = bnc.serial_number
+                    LEFT JOIN trademarks t        ON t.serial_number::text = bnc.serial_number
+                    LEFT JOIN trademark_owners o  ON o.serial_number::text = bnc.serial_number
                     WHERE bnc.brand_upper = ANY(%s)
                       AND bnc.is_live = TRUE
                     """,
