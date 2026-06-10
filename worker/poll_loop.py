@@ -80,6 +80,7 @@ async def run_audit_job(
     force_rerun = bool(opts.get("force_rerun", False))
     if force_rerun:
         log.info("[#%d] 用户勾选 重新审核 — 跳过历史 reject 短路", job_id)
+    mode = opts.get("mode") or "audit"
 
     # 装一个临时 logging handler, 把这次任务的所有日志推回 server
     log_handler = BufferedLogHandler()
@@ -103,6 +104,14 @@ async def run_audit_job(
             input_path = tmp / f"job_{job_id}_input{ext}"
             log.info("[#%d] 下载输入文件 (ext=%s)...", job_id, ext)
             await server.download_input(job_id, input_path)
+
+            # 商标品牌审核走独立路径 (不碰 DMIT / L0-L4)
+            if mode == "trademark":
+                await _run_trademark_job(
+                    server, job, tmp, input_path,
+                    async_concurrency=async_concurrency,
+                )
+                return
 
             # 2. 解析 + 切片
             all_asins = await asyncio.to_thread(file_io.parse_asin_file, input_path)
@@ -159,6 +168,65 @@ async def run_audit_job(
         except Exception:  # noqa: BLE001
             pass
         root_logger.removeHandler(log_handler)
+
+
+async def _run_trademark_job(
+    server: ServerClient,
+    job: dict[str, Any],
+    tmp: Path,
+    input_path: Path,
+    *,
+    async_concurrency: int,
+) -> None:
+    """商标品牌审核子任务: 读分片行 → 查商标库 + 标题检测 + LLM 真伪 → 写 CSV 上传.
+
+    不走 DMIT / orchestrator. 列布局由 trademark_audit.columns_for(has_title) 决定.
+    """
+    from pipelines import trademark_audit
+
+    job_id = int(job["job_id"])
+    offset = int(job.get("asin_offset") or 0)
+    count = int(job.get("asin_count") or 0)
+
+    rows_tuples, has_title = await asyncio.to_thread(
+        file_io.read_trademark_slice, input_path, offset, count,
+    )
+    log.info("[#%d] 商标审核切片 [%d:%d) → %d 行 (has_title=%s)",
+             job_id, offset, offset + count, len(rows_tuples), has_title)
+
+    columns = trademark_audit.columns_for(has_title)
+    output_path = tmp / f"job_{job_id}_result.csv"
+
+    if not rows_tuples:
+        await asyncio.to_thread(file_io.write_trademark_csv, output_path, [], columns)
+        await server.upload_result(
+            job_id, output_path, pass_count=0, reject_count=0,
+            summary="empty slice (0 行)",
+        )
+        return
+
+    trade_rows = [
+        trademark_audit.TradeRow(asin=a, brand=b, title=(t if has_title else None))
+        for (a, b, t) in rows_tuples
+    ]
+    results = await trademark_audit.audit_rows(
+        trade_rows, has_title=has_title, concurrency=async_concurrency,
+    )
+    await asyncio.to_thread(file_io.write_trademark_csv, output_path, results, columns)
+    await server.report_progress(job_id, len(results))
+
+    # UI 复用 pass/reject: reject=命中真品牌(需关注), pass=其余
+    real_count = sum(1 for r in results if r.get(trademark_audit.COL_VERDICT) == trademark_audit.REAL)
+    brand_hit = sum(1 for r in results if r.get(trademark_audit.COL_BRAND_EXISTS) == trademark_audit.YES)
+    pass_count = max(0, len(results) - real_count)
+    summary = f"{len(results)} 行 / 品牌命中 {brand_hit}"
+    if has_title:
+        summary += f" / 标题真品牌 {real_count}"
+    log.info("[#%d] 商标审核完成: %s", job_id, summary)
+    await server.upload_result(
+        job_id, output_path,
+        pass_count=pass_count, reject_count=real_count, summary=summary,
+    )
 
 
 async def _heartbeat_loop(

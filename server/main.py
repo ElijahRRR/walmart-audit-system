@@ -261,6 +261,83 @@ async def submit_job(
     }
 
 
+@app.post("/api/jobs/trademark")
+async def submit_trademark_job(
+    file: UploadFile = File(...),
+    user_email: str = Form(...),
+    job_name: str | None = Form(None),
+) -> dict[str, Any]:
+    """商标品牌审核入口 (独立于 ASIN 审核).
+
+    输入表格: 第1列 ASIN, 第2列 品牌, 第3列 标题(可选).
+    不走 DMIT / L0-L4 — Worker 仅查商标库 + 标题品牌检测 + LLM 真伪判定.
+    按"数据行数"切分子任务 (复用同一套 server+worker 队列).
+    """
+    contents = await file.read()
+    size_mb = len(contents) / 1024 / 1024
+    if size_mb > MAX_UPLOAD_MB:
+        raise HTTPException(413, f"file too large: {size_mb:.1f}MB > {MAX_UPLOAD_MB}MB")
+
+    ext = (Path(file.filename or "").suffix or ".csv").lower()
+    if ext not in (".csv", ".txt", ".xlsx", ".xls"):
+        raise HTTPException(415, f"unsupported file type: {ext} (csv/txt/xlsx only)")
+
+    file_uuid = str(uuid.uuid4())
+    saved_name = f"{file_uuid}{ext}"
+    saved_path = UPLOAD_DIR / saved_name
+    saved_path.write_bytes(contents)
+
+    try:
+        n_rows, has_title = await run_in_threadpool(file_io.count_trademark_rows, saved_path)
+    except Exception as e:
+        saved_path.unlink(missing_ok=True)
+        raise HTTPException(400, f"failed to parse file: {e}") from e
+
+    if n_rows <= 0:
+        saved_path.unlink(missing_ok=True)
+        raise HTTPException(400, "no data rows found in file (需要至少 asin + 品牌 两列)")
+
+    options: dict[str, Any] = {"mode": "trademark", "has_title": has_title}
+
+    n_alive = await run_in_threadpool(_count_alive_workers)
+
+    parent_id = await run_in_threadpool(
+        db.create_parent_job,
+        user_email=user_email,
+        job_name=job_name or (file.filename or saved_name),
+        input_file=str(saved_path.relative_to(DATA_ROOT)),
+        input_size=len(contents),
+        total_asins=n_rows,
+        options=options,
+        expires_in_days=RETENTION_DAYS,
+    )
+
+    chunks = file_io.compute_chunks_auto(n_rows, n_alive)
+    sub_ids = await run_in_threadpool(
+        db.create_sub_jobs,
+        parent_id=parent_id,
+        input_file=str(saved_path.relative_to(DATA_ROOT)),
+        options=options,
+        chunks=chunks,
+        user_email=user_email,
+    )
+    layout = "asin+品牌+标题" if has_title else "asin+品牌"
+    log.info(
+        "trademark job #%d submitted: %d 行 (%s) → %d sub-jobs (%d worker 在线)",
+        parent_id, n_rows, layout, len(sub_ids), n_alive,
+    )
+    await run_in_threadpool(
+        db.add_log, parent_id,
+        message=f"商标审核提交: {n_rows} 行 ({layout}) → {len(sub_ids)} 个子任务 "
+                f"(按 {n_alive} 个在线 worker 自动切分)",
+    )
+    return {
+        "job_id": parent_id, "total_asins": n_rows,
+        "sub_jobs": len(sub_ids), "has_title": has_title,
+        "n_workers_online": n_alive,
+    }
+
+
 def _find_stuck_merging() -> list[int]:
     """找 status='merging' 状态的父任务 (server 重启时遗留 / merge OOM 中断).
 
@@ -635,6 +712,34 @@ async def _try_merge_parent(parent_id: int) -> None:
             return
 
         merged_path = MERGED_DIR / f"{parent_id}.xlsx"
+
+        # 按 mode 分流: trademark 走商标合并 (不同列布局), 否则走 ASIN 审核合并.
+        parent = await run_in_threadpool(db.get_job, parent_id)
+        opts = parent.get("options") if parent else {}
+        mode = opts.get("mode") if isinstance(opts, dict) else None
+
+        if mode == "trademark":
+            total_rows, highlighted = await run_in_threadpool(
+                file_io.merge_trademark_results_to_xlsx, sub_files, merged_path,
+            )
+            rel = str(merged_path.relative_to(DATA_ROOT))
+            # UI 复用 pass/reject 两栏: reject=命中真品牌(需关注), pass=其余
+            reject_count = highlighted
+            pass_count = max(0, total_rows - highlighted)
+            summary = f"{total_rows} 行 / {highlighted} 命中真品牌"
+            if failed_count:
+                summary += f" / {failed_count} failed sub-jobs"
+            if cancelled_count:
+                summary += f" / {cancelled_count} cancelled"
+            await run_in_threadpool(
+                db.mark_parent_done, parent_id,
+                merged_file=rel, summary=summary,
+                pass_count=pass_count, reject_count=reject_count,
+            )
+            await run_in_threadpool(db.add_log, parent_id, message=f"商标合并完成: {summary}")
+            log.info("parent #%d merged (trademark): %s", parent_id, summary)
+            return
+
         pass_count, reject_count = await run_in_threadpool(
             file_io.merge_results_to_xlsx, sub_files, merged_path,
         )

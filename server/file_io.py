@@ -290,6 +290,215 @@ def merge_results_to_xlsx(
 
 
 # -----------------------------------------------------------------------------
+# 商标品牌审核 (独立入口) — 输入解析 / 输出
+#
+# 输入布局: 第1列 ASIN, 第2列 品牌, 第3列 标题(可选).
+# 与 ASIN 审核不同: 不去重、不丢弃非法 ASIN — 逐行回填, 行序即输出序.
+# -----------------------------------------------------------------------------
+
+# 表头识别: 第2列出现这些词 → 认定首行是表头
+_BRAND_HEADER_TOKENS = {"品牌", "brand", "brand name", "brandname"}
+
+
+def _read_raw_rows(path: str | Path) -> list[list[str]]:
+    """读 csv/xlsx/txt 的全部行 (每行 = 字符串单元格列表). 不做任何过滤."""
+    path = Path(path)
+    suffix = path.suffix.lower()
+    rows: list[list[str]] = []
+
+    if suffix in (".xlsx", ".xls"):
+        try:
+            from openpyxl import load_workbook
+        except ImportError as e:
+            raise RuntimeError("openpyxl 未安装, 请 pip install openpyxl") from e
+        wb = load_workbook(path, read_only=True, data_only=True)
+        ws = wb.active
+        if ws is not None:
+            for row_raw in ws.iter_rows(values_only=True):
+                rows.append([str(c).strip() if c is not None else "" for c in row_raw])
+        wb.close()
+        return rows
+
+    if suffix == ".txt":
+        with path.open("r", encoding="utf-8-sig", errors="replace") as f:
+            for line in f:
+                line = line.rstrip("\n\r")
+                if not line.strip():
+                    continue
+                rows.append([c.strip() for c in re.split(r"\t", line)])
+        return rows
+
+    # csv / 兜底
+    with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as f:
+        sample = f.read(4096)
+        f.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",\t;")
+        except csv.Error:
+            dialect = csv.excel
+        for row in csv.reader(f, dialect):
+            rows.append([(c or "").strip() for c in row])
+    return rows
+
+
+def _is_trademark_header(first_row: list[str]) -> bool:
+    """首行是否表头: 第1列不是合法 ASIN, 或第2列命中品牌表头词."""
+    if not first_row:
+        return False
+    c0 = (first_row[0] if len(first_row) > 0 else "").strip()
+    c1 = (first_row[1] if len(first_row) > 1 else "").strip().lower()
+    if c1 in _BRAND_HEADER_TOKENS:
+        return True
+    # 第1列像表头 (asin 字面量 / 非法 ASIN 且非空)
+    if c0.lower() == "asin":
+        return True
+    if c0 and not is_valid_asin(c0):
+        return True
+    return False
+
+
+def parse_trademark_rows(path: str | Path) -> tuple[list[tuple[str, str, str]], bool]:
+    """解析商标审核输入. 返回 (rows, has_title).
+
+    rows: [(asin, brand, title), ...] — 按原文件行序, 不去重.
+    has_title: 是否存在第3列标题 (任一数据行第3列非空即 True).
+    """
+    raw = _read_raw_rows(path)
+    if not raw:
+        return [], False
+    start = 1 if _is_trademark_header(raw[0]) else 0
+    data = raw[start:]
+
+    has_title = any(len(r) >= 3 and (r[2] or "").strip() for r in data)
+    rows: list[tuple[str, str, str]] = []
+    for r in data:
+        asin = (r[0] if len(r) > 0 else "").strip()
+        brand = (r[1] if len(r) > 1 else "").strip()
+        title = (r[2] if len(r) > 2 else "").strip()
+        # 跳过完全空行
+        if not asin and not brand and not title:
+            continue
+        rows.append((asin, brand, title))
+    return rows, has_title
+
+
+def count_trademark_rows(path: str | Path) -> tuple[int, bool]:
+    """Server 提交时用: 返回 (数据行数, has_title) 供切片."""
+    rows, has_title = parse_trademark_rows(path)
+    return len(rows), has_title
+
+
+def read_trademark_slice(
+    input_path: str | Path, offset: int, count: int
+) -> tuple[list[tuple[str, str, str]], bool]:
+    """Worker 用: 读 [offset, offset+count) 行 + has_title (按整表判定, 保证分片列布局一致)."""
+    rows, has_title = parse_trademark_rows(input_path)
+    sliced = rows[offset:offset + count] if count else rows
+    return sliced, has_title
+
+
+def write_trademark_csv(
+    output_path: str | Path, rows: list[dict[str, Any]], columns: list[str]
+) -> None:
+    """Worker 把商标审核结果写 CSV (列由 trademark_audit.columns_for 决定)."""
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        for r in rows:
+            writer.writerow({k: r.get(k, "") for k in columns})
+
+
+def merge_trademark_results_to_xlsx(
+    sub_result_files: list[str | Path],
+    output_xlsx: str | Path,
+    *,
+    highlight_col: str = "判定结果",
+    highlight_value: str = "真",
+) -> tuple[int, int]:
+    """合并商标审核子任务结果 → XLSX. 风格与 merge_results_to_xlsx 一致:
+    蓝底表头 + 关注行 (highlight_col == highlight_value) 红字.
+
+    列顺序取首个非空子文件的表头 (各子文件列布局一致).
+    返回 (total_rows, highlighted_rows).
+    """
+    try:
+        from openpyxl import Workbook
+        from openpyxl.cell import WriteOnlyCell
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+    except ImportError as e:
+        raise RuntimeError("openpyxl 未安装") from e
+
+    # 1. 找首个可读子文件确定列
+    columns: list[str] = []
+    valid_files: list[Path] = []
+    for sf in sub_result_files:
+        p = Path(sf) if sf else None
+        if p is None or not p.exists():
+            log.warning("商标合并: 子结果缺失 %s, skip", sf)
+            continue
+        valid_files.append(p)
+        if not columns:
+            with p.open("r", encoding="utf-8-sig", newline="") as f:
+                header = next(csv.reader(f), None)
+            if header:
+                columns = [h.strip() for h in header]
+    if not columns:
+        # 没有任何有效列 → 写空表
+        columns = ["asin", "brand"]
+
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet("商标审核结果")
+
+    # 列宽: 详情类列加宽
+    wide_cols = {"品牌详情", "标题", "标题品牌详情", "疑似真品牌", "title"}
+    for idx, col in enumerate(columns, start=1):
+        ws.column_dimensions[get_column_letter(idx)].width = 48 if col in wide_cols else 16
+
+    header_fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF")
+    header_align = Alignment(horizontal="center", vertical="center")
+    header_row = []
+    for col in columns:
+        c = WriteOnlyCell(ws, value=col)
+        c.fill = header_fill
+        c.font = header_font
+        c.alignment = header_align
+        header_row.append(c)
+    ws.append(header_row)
+
+    alert_font = Font(color="C00000", bold=True)
+    total = 0
+    highlighted = 0
+    for p in valid_files:
+        for row in read_result_csv(p):
+            is_alert = (row.get(highlight_col) or "").strip() == highlight_value
+            data_row = []
+            for col in columns:
+                value = row.get(col, "")
+                if is_alert:
+                    c = WriteOnlyCell(ws, value=value)
+                    c.font = alert_font
+                    data_row.append(c)
+                else:
+                    data_row.append(value)
+            ws.append(data_row)
+            total += 1
+            if is_alert:
+                highlighted += 1
+
+    output_path = Path(output_xlsx)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(output_path)
+    wb.close()
+    log.info("商标合并 %d 子文件 → %s (%d 行, %d 命中真品牌)",
+             len(valid_files), output_path, total, highlighted)
+    return total, highlighted
+
+
+# -----------------------------------------------------------------------------
 # 子任务切分计算 (Server 端)
 # -----------------------------------------------------------------------------
 
@@ -364,6 +573,11 @@ __all__ = [
     "write_result_csv",
     "read_result_csv",
     "merge_results_to_xlsx",
+    "parse_trademark_rows",
+    "count_trademark_rows",
+    "read_trademark_slice",
+    "write_trademark_csv",
+    "merge_trademark_results_to_xlsx",
     "compute_chunks",
     "compute_chunks_auto",
     "RESULT_COLUMNS",
