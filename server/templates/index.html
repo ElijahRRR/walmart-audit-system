@@ -69,6 +69,14 @@
     .card-body { padding: 6px 20px 20px; }
 
     /* ----------- Upload ----------- */
+    .upload-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    .upload-grid .card { margin-bottom: 0; }
+    .card-title .tag {
+      font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 10px;
+      margin-left: 8px;
+    }
+    .card-title .tag.audit { background: #dbeafe; color: var(--primary); }
+    .card-title .tag.tm { background: #ede9fe; color: #7c3aed; }
     .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 14px; }
     label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
     label .req { color: var(--danger); }
@@ -259,6 +267,10 @@
     .log-box .log-line.error { color: #f87171; }
     .log-box .log-line .ts { color: #94a3b8; }
 
+    @media (max-width: 920px) {
+      .upload-grid { grid-template-columns: 1fr; }
+      .upload-grid .card { margin-bottom: 0; }
+    }
     @media (max-width: 720px) {
       main { padding: 16px; }
       .form-row { grid-template-columns: 1fr; }
@@ -284,42 +296,79 @@
 </header>
 
 <main>
-  <!-- ============ 上传 ============ -->
-  <div class="card">
-    <div class="card-title">📤 上传新任务</div>
-    <div class="card-body">
-      <form id="submit-form">
-        <div class="form-row">
-          <div>
-            <label>提交人 <span class="req">*</span></label>
-            <input type="text" name="user_email" required placeholder="你的名字 / 工号 / 任意标识" autocomplete="name" maxlength="40">
+  <!-- ============ 上传 (左: ASIN 审核 / 右: 商标品牌审核) ============ -->
+  <div class="upload-grid">
+    <!-- 左: 原 ASIN 全流程审核 -->
+    <div class="card">
+      <div class="card-title">📤 ASIN 全流程审核<span class="tag audit">L0·L1·L2·L3·L4</span></div>
+      <div class="card-body">
+        <form id="submit-form">
+          <div class="form-row">
+            <div>
+              <label>提交人 <span class="req">*</span></label>
+              <input type="text" name="user_email" required placeholder="你的名字 / 工号 / 任意标识" autocomplete="name" maxlength="40">
+            </div>
+            <div>
+              <label>任务名称 <span style="color:#9ca3af">(可选)</span></label>
+              <input type="text" name="job_name" placeholder="自动从文件名提取">
+            </div>
           </div>
-          <div>
-            <label>任务名称 <span style="color:#9ca3af">(可选)</span></label>
-            <input type="text" name="job_name" placeholder="自动从文件名提取">
-          </div>
-        </div>
 
-        <div class="dropzone" id="dropzone">
-          <div class="dz-icon">📁</div>
-          <div class="dz-title" id="dz-title">拖入文件，或点击选择</div>
-          <div class="dz-hint">支持 .csv / .xlsx / .txt — 自动识别 ASIN 列</div>
-          <input type="file" name="file" id="file-input" accept=".csv,.xlsx,.xls,.txt" required>
-        </div>
-
-        <div class="submit-row">
-          <div class="chunk-input" style="color:#9ca3af; display: flex; flex-direction: column; gap: 4px;">
-            <div>🤖 自动按在线 worker 数切分子任务</div>
-            <label style="display: flex; align-items: center; gap: 6px; color: #6b7280; cursor: pointer;">
-              <input type="checkbox" name="force_rerun" value="true" style="width: auto; margin: 0;">
-              <span>♻️ 重新审核（忽略历史 reject，全部 ASIN 从头审一遍）</span>
-            </label>
+          <div class="dropzone" id="dropzone">
+            <div class="dz-icon">📁</div>
+            <div class="dz-title" id="dz-title">拖入文件，或点击选择</div>
+            <div class="dz-hint">支持 .csv / .xlsx / .txt — 自动识别 ASIN 列</div>
+            <input type="file" name="file" id="file-input" accept=".csv,.xlsx,.xls,.txt" required>
           </div>
-          <button type="submit" class="btn btn-primary" id="submit-btn">提交任务</button>
-        </div>
-      </form>
+
+          <div class="submit-row">
+            <div class="chunk-input" style="color:#9ca3af; display: flex; flex-direction: column; gap: 4px;">
+              <div>🤖 自动按在线 worker 数切分子任务</div>
+              <label style="display: flex; align-items: center; gap: 6px; color: #6b7280; cursor: pointer;">
+                <input type="checkbox" name="force_rerun" value="true" style="width: auto; margin: 0;">
+                <span>♻️ 重新审核（忽略历史 reject）</span>
+              </label>
+            </div>
+            <button type="submit" class="btn btn-primary" id="submit-btn">提交任务</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- 右: 商标品牌审核 (asin + 品牌 + 标题可选) -->
+    <div class="card">
+      <div class="card-title">🏷️ 商标品牌审核<span class="tag tm">品牌 / 标题查商标库</span></div>
+      <div class="card-body">
+        <form id="tm-submit-form">
+          <div class="form-row">
+            <div>
+              <label>提交人 <span class="req">*</span></label>
+              <input type="text" name="user_email" required placeholder="你的名字 / 工号 / 任意标识" autocomplete="name" maxlength="40">
+            </div>
+            <div>
+              <label>任务名称 <span style="color:#9ca3af">(可选)</span></label>
+              <input type="text" name="job_name" placeholder="自动从文件名提取">
+            </div>
+          </div>
+
+          <div class="dropzone" id="tm-dropzone">
+            <div class="dz-icon">🏷️</div>
+            <div class="dz-title" id="tm-dz-title">拖入文件，或点击选择</div>
+            <div class="dz-hint">第1列 ASIN · 第2列 品牌 · 第3列 标题(可选)</div>
+            <input type="file" name="file" id="tm-file-input" accept=".csv,.xlsx,.xls,.txt" required>
+          </div>
+
+          <div class="submit-row">
+            <div class="chunk-input" style="color:#9ca3af;">
+              <div>🔎 查 LIVE 商标 + 标题品牌真伪 (LLM)</div>
+            </div>
+            <button type="submit" class="btn btn-primary" id="tm-submit-btn">提交任务</button>
+          </div>
+        </form>
+      </div>
     </div>
   </div>
+  <div style="height:20px"></div>
 
   <!-- ============ 任务列表 ============ -->
   <div class="card">
@@ -473,6 +522,65 @@ document.getElementById("submit-form").addEventListener("submit", async e => {
     // 重置 (但保留提交人)
     fi.value = ""; onFilePicked();
     document.querySelector('input[name="job_name"]').value = "";
+    btn.disabled = false; btn.textContent = "提交任务";
+    state.expanded.add(data.job_id);
+    await refreshJobs();
+  } catch (err) {
+    alert(`网络错误: ${err.message}`);
+    btn.disabled = false; btn.textContent = "提交任务";
+  }
+});
+
+//==================================================================
+// 上传 (商标品牌审核) — 右侧入口, POST /api/jobs/trademark
+//==================================================================
+const tmDz = document.getElementById("tm-dropzone");
+const tmFi = document.getElementById("tm-file-input");
+const tmDzTitle = document.getElementById("tm-dz-title");
+tmDz.addEventListener("click", () => tmFi.click());
+tmDz.addEventListener("dragover", e => { e.preventDefault(); tmDz.classList.add("over"); });
+tmDz.addEventListener("dragleave", () => tmDz.classList.remove("over"));
+tmDz.addEventListener("drop", e => {
+  e.preventDefault(); tmDz.classList.remove("over");
+  if (e.dataTransfer.files.length) { tmFi.files = e.dataTransfer.files; onTmFilePicked(); }
+});
+tmFi.addEventListener("change", onTmFilePicked);
+function onTmFilePicked() {
+  const f = tmFi.files[0];
+  const form = document.getElementById("tm-submit-form");
+  if (!f) { tmDzTitle.textContent = "拖入文件，或点击选择"; tmDz.classList.remove("has-file"); return; }
+  const sizeMB = (f.size/1024/1024).toFixed(2);
+  tmDzTitle.textContent = `已选: ${f.name} (${sizeMB} MB)`;
+  tmDz.classList.add("has-file");
+  const nameInput = form.querySelector('input[name="job_name"]');
+  if (nameInput && !nameInput.value) nameInput.value = f.name.replace(/\.[^.]+$/, "");
+}
+
+// 两个表单共享"提交人"记忆
+const tmSubmitter = document.querySelector('#tm-submit-form input[name="user_email"]');
+if (lastSubmitter && tmSubmitter) tmSubmitter.value = lastSubmitter;
+
+document.getElementById("tm-submit-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const btn = document.getElementById("tm-submit-btn");
+  const fd = new FormData(e.target);
+  if (!fd.get("file") || !fd.get("file").name) { alert("请先选择文件"); return; }
+  btn.disabled = true; btn.textContent = "上传中…";
+  try {
+    const r = await fetch("/api/jobs/trademark", { method: "POST", body: fd });
+    const data = await r.json();
+    if (!r.ok) {
+      alert(`提交失败: ${data.error || r.statusText}`);
+      btn.disabled = false; btn.textContent = "提交任务";
+      return;
+    }
+    const submitter = fd.get("user_email");
+    if (submitter) {
+      localStorage.setItem("audit-submitter", submitter);
+      if (submitterInput && !submitterInput.value) submitterInput.value = submitter;
+    }
+    tmFi.value = ""; onTmFilePicked();
+    e.target.querySelector('input[name="job_name"]').value = "";
     btn.disabled = false; btn.textContent = "提交任务";
     state.expanded.add(data.job_id);
     await refreshJobs();
