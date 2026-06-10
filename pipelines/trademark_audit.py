@@ -6,7 +6,7 @@
   第 3 列 标题 (可选)
 
 逻辑:
-  1. 品牌列 → 商标库精确匹配 (brand_upper 全等, is_live=TRUE) → "品牌是否存在" + "品牌详情"
+  1. 品牌列 → 商标库精确匹配 (trademarks.mark_identification 精确匹配 + status_code_mapping.live_dead='LIVE')
      品牌详情 = 申请国 (trademark_owners.nationality_country) + 注册时间 (trademarks.registration_date),
      多条命中全部列出。
   2. 标题列 (存在时) → 候选词提取 (首字母大写/长度>=4/过滤停用词) → 商标库 live 命中
@@ -14,9 +14,12 @@
      → "判定结果" (任一词判真即"真") + "疑似真品牌" (列出所有判真词的详情)。
 
 数据源 (PostgreSQL uspto 库, USPTO_DATABASE_URL):
-  brand_nice_class  (brand_upper / serial_number / is_live)   ← 精确匹配 + live
-  trademarks        (serial_number / registration_date)        ← 注册时间
-  trademark_owners  (serial_number / nationality_country)      ← 申请国 (所有人国籍)
+  trademarks          (mark_identification / serial_number / registration_date / status_code)
+  status_code_mapping (status_code / live_dead)                    ← LIVE 过滤
+  trademark_owners    (serial_number / nationality_country)        ← 申请国 (所有人国籍)
+
+注: 以 trademarks 为主表 (1400 万+ 记录)，通过 status_code_mapping.live_dead='LIVE' 过滤，
+而非以 brand_nice_class 为主表 (仅 2.6 万 serial_number, 漏掉大量商标如 CRAZYVIEW)。
 
 public:
   columns_for(has_title) -> list[str]
@@ -146,9 +149,10 @@ def query_marks(brand_uppers: list[str]) -> dict[str, list[dict[str, str]]]:
     """批量查 live 商标。
 
     返回 {brand_upper: [{"country": .., "registration_date": ..}, ...]}.
-    精确匹配 brand_nice_class.brand_upper + is_live=TRUE; JOIN trademarks 取注册时间,
-    JOIN trademark_owners 取所有人国籍 (申请国). 同一品牌多 serial / 多所有人时全部列出
-    (去重 (country, registration_date)). DB 不可达时返回空 dict (fail-soft)。
+    以 trademarks 表为主 (mark_identification 精确匹配) + status_code 关联 status_code_mapping
+    过滤 LIVE (brand_nice_class 仅覆盖约 2.6 万 serial_number, 漏掉大量商标如 CRAZYVIEW)。
+    同一品牌多 serial / 多所有人时全部列出 (去重 (country, registration_date)).
+    DB 不可达时返回空 dict (fail-soft)。
     """
     uniq = sorted({b for b in brand_uppers if b})
     if not uniq:
@@ -161,14 +165,14 @@ def query_marks(brand_uppers: list[str]) -> dict[str, list[dict[str, str]]]:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT DISTINCT bnc.brand_upper       AS brand_upper,
-                                    t.registration_date    AS registration_date,
-                                    o.nationality_country  AS nationality_country
-                    FROM brand_nice_class bnc
-                    LEFT JOIN trademarks t        ON t.serial_number::text = bnc.serial_number
-                    LEFT JOIN trademark_owners o  ON o.serial_number::text = bnc.serial_number
-                    WHERE bnc.brand_upper = ANY(%s)
-                      AND bnc.is_live = TRUE
+                    SELECT DISTINCT t.mark_identification       AS brand_upper,
+                                    t.registration_date          AS registration_date,
+                                    o.nationality_country        AS nationality_country
+                    FROM trademarks t
+                    JOIN status_code_mapping scm ON scm.status_code = t.status_code
+                    LEFT JOIN trademark_owners o  ON o.serial_number::text = t.serial_number::text
+                    WHERE t.mark_identification = ANY(%s)
+                      AND scm.live_dead = 'LIVE'
                     """,
                     (uniq,),
                 )
