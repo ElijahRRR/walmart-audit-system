@@ -829,9 +829,10 @@ async def classify(product: ProductInfo, *, skip_llm: bool = False) -> L1Result:
         return _apply_spec_override(_classify_db_only(product, candidates, seed_reason))
 
     # LLM 综合判定
-    # L1 类目判定固定用 qwen-plus (实测 PT 准确率最高); 可用 L1_TEXT_MODEL env 覆盖
+    # L1 类目判定默认 deepseek-v4-flash; 可用 L1_TEXT_MODEL env 覆盖
+    # (历史曾用 qwen-plus, 现统一走 deepseek; 默认值同步改掉, 避免 env 缺失时静默回落 qwen)
     import os as _os
-    l1_model = _os.getenv("L1_TEXT_MODEL", "qwen-plus")
+    l1_model = _os.getenv("L1_TEXT_MODEL", "deepseek-v4-flash")
     _sys_prompt = L1_SYSTEM_PROMPT
     try:
         raw = await llm_client.chat_json(
