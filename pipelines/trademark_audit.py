@@ -281,8 +281,12 @@ _JUDGE_SYSTEM = (
 )
 
 
-async def judge_title_brand(word: str, title: str) -> bool:
-    """LLM 判定: word 在 title 里是不是真品牌。失败时保守返回 False (假)。"""
+async def judge_title_brand(word: str, title: str, *, timeout: float = 45.0) -> bool:
+    """LLM 判定: word 在 title 里是不是真品牌。失败/超时保守返回 False (假)。
+
+    timeout: 单次判定上限秒数。正常 ~1-2s, 给 45s 余量; 一个卡住的 LLM 调用
+    超时即保守判假, 不拖死整批 (asin_db 大任务分片挂起的根因之一)。
+    """
     from integrations import llm_client
 
     messages = [
@@ -297,7 +301,13 @@ async def judge_title_brand(word: str, title: str) -> bool:
         },
     ]
     try:
-        res = await llm_client.chat_json(messages, cache=True, max_tokens=256, purpose="trademark_brand_verdict")
+        res = await asyncio.wait_for(
+            llm_client.chat_json(messages, cache=True, max_tokens=256, purpose="trademark_brand_verdict"),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        log.warning("LLM 判定品牌真伪超时 (%.0fs) word=%r → 保守判假", timeout, word)
+        return False
     except Exception as e:  # noqa: BLE001
         log.warning("LLM 判定品牌真伪失败 word=%r: %s", word, e)
         return False
@@ -312,6 +322,7 @@ async def audit_rows(
     *,
     has_title: bool,
     concurrency: int = 50,
+    progress_counter: list[int] | None = None,
 ) -> list[dict[str, Any]]:
     """审核一批行, 返回与 columns_for(has_title) 对齐的输出行 dict 列表。
 
@@ -319,6 +330,9 @@ async def audit_rows(
       1. 收集所有品牌 + 标题候选词 → 一次批量查 query_marks
       2. 逐行组装"品牌是否存在 / 品牌详情 / 标题品牌 / 标题品牌详情"
       3. 对标题命中词并发调 LLM 判真伪 → "判定结果 / 疑似真品牌"
+
+    progress_counter: 可选的单元素可变计数器 [n]。每完成一行就 +1, 供调用方
+      独立 reporter task 每隔几秒读取并上报进度 (参照全流程审核, 避免末尾才报)。
     """
     if not rows:
         return []
@@ -399,7 +413,13 @@ async def audit_rows(
         )
         return out
 
-    return await asyncio.gather(*(_process(i, r) for i, r in enumerate(rows)))
+    async def _process_counted(i: int, r: TradeRow) -> dict[str, Any]:
+        out = await _process(i, r)
+        if progress_counter is not None:   # 每完成一行 +1, 独立 reporter 读它增量上报
+            progress_counter[0] += 1
+        return out
+
+    return await asyncio.gather(*(_process_counted(i, r) for i, r in enumerate(rows)))
 
 
 __all__ = [

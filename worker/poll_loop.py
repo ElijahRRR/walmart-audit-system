@@ -281,25 +281,55 @@ async def _run_trademark_asin_db_job(
         trademark_audit.TradeRow(asin=a, brand=db_data[a]["brand"], title=db_data[a]["title"])
         for a in asins if a in db_data
     ]
-    audited = (
-        await trademark_audit.audit_rows(found_rows, has_title=True, concurrency=async_concurrency)
-        if found_rows else []
-    )
+    missing = len(asins) - len(found_rows)
+
+    # 增量进度上报 (参照全流程审核 _run_audit_pipeline): 独立 reporter task 每 5s
+    # 读计数器上报, 不与 audit 协程抢 asyncio。无数据行无需处理, 先计入 done。
+    done_counter = [missing]
+    stop_reporter = asyncio.Event()
+
+    async def _reporter() -> None:
+        last = -1
+        while True:
+            try:
+                await asyncio.wait_for(stop_reporter.wait(), timeout=5.0)
+                break
+            except asyncio.TimeoutError:
+                pass
+            cur = done_counter[0]
+            if cur != last:
+                try:
+                    await server.report_progress(job_id, cur)
+                    last = cur
+                except Exception:  # noqa: BLE001
+                    pass
+
+    reporter_task = asyncio.create_task(_reporter())
+    try:
+        audited = (
+            await trademark_audit.audit_rows(
+                found_rows, has_title=True, concurrency=async_concurrency,
+                progress_counter=done_counter,
+            )
+            if found_rows else []
+        )
+    finally:
+        stop_reporter.set()
+        try:
+            await asyncio.wait_for(reporter_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            pass
+
     by_asin = {r[trademark_audit.COL_ASIN]: r for r in audited}
 
     # 按输入顺序回填; 缺数据的标"无数据"
     results: list[dict[str, Any]] = []
-    missing = 0
     for a in asins:
         row = by_asin.get(a)
-        if row is None:
-            results.append(trademark_audit.build_no_data_row(a))
-            missing += 1
-        else:
-            results.append(row)
+        results.append(row if row is not None else trademark_audit.build_no_data_row(a))
 
     await asyncio.to_thread(file_io.write_trademark_csv, output_path, results, columns)
-    await server.report_progress(job_id, len(results))
+    await server.report_progress(job_id, len(results))   # 最终精确值
 
     # UI 复用 pass/reject: reject=命中真品牌(需关注), pass=其余 (含无数据行)
     real_count = sum(1 for r in results if r.get(trademark_audit.COL_VERDICT) == trademark_audit.REAL)
