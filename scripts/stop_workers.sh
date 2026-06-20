@@ -2,6 +2,11 @@
 # 停掉所有 worker 进程
 PIDS_FILE=/tmp/audit_workers.pids
 
+launchctl list | awk '/com\.nextderboy\.audit_worker\./ {print $3}' | while read -r label; do
+    [ -z "$label" ] && continue
+    launchctl remove "$label" 2>/dev/null || true
+done
+
 if [ -f "$PIDS_FILE" ]; then
     n=0
     while read -r pid; do

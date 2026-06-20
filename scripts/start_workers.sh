@@ -19,6 +19,11 @@ LOG_DIR=/tmp/audit_worker_logs
 mkdir -p "$LOG_DIR"
 
 # 先停掉所有旧的
+launchctl list | awk '/com\.nextderboy\.audit_worker\./ {print $3}' | while read -r label; do
+    [ -z "$label" ] && continue
+    launchctl remove "$label" 2>/dev/null || true
+done
+
 if [ -f "$PIDS_FILE" ]; then
     while read -r pid; do
         [ -z "$pid" ] && continue
@@ -43,13 +48,10 @@ PYTHON="${PYTHON:-$PROJ_ROOT/.venv/bin/python}"
 [ -x "$PYTHON" ] || PYTHON="python3"
 
 for i in $(seq 1 "$N"); do
-    "$PYTHON" -u -m worker.poll_loop \
-        --server "$SERVER" \
-        --worker-id "$HOST-$i" \
-        --async-concurrency 50 \
-        --poll-interval 3 \
-        > "$LOG_DIR/worker_$i.log" 2>&1 &
-    PID=$!
+    label="com.nextderboy.audit_worker.$i"
+    launchctl submit -l "$label" -- /bin/bash -lc \
+        "cd '$PROJ_ROOT' && exec '$PYTHON' -u -m worker.poll_loop --server '$SERVER' --worker-id '$HOST-$i' --async-concurrency 50 --poll-interval 3 >> '$LOG_DIR/worker_$i.log' 2>&1"
+    PID="$(launchctl list | awk -v label="$label" '$3 == label {print $1}')"
     echo "$PID" >> "$PIDS_FILE"
     # 错开启动避免 N 个进程同时打 server
     sleep 0.3

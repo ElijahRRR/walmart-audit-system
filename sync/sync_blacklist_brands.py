@@ -158,7 +158,7 @@ def run() -> SyncResult:
 
         for sh in SHEETS:
             log.info("reading sheet %s (%s) ...", sh["id"], sh["desc"])
-            rows = lc.read_paginated(obj_token, sh["id"], last_col_letter=sh["last_col"], page_size=200)
+            rows = lc.read_paginated(obj_token, sh["id"], last_col_letter=sh["last_col"], page_size=5000)
             log.info("  fetched %d rows", len(rows))
             total_in += len(rows)
 

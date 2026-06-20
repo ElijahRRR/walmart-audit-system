@@ -43,6 +43,9 @@ tmp/
 *.dump
 dumps/
 
+# Scheduled-task 运行证据 (运行时日志, 不入库)
+.agent/
+
 # Embedding cache (27.8 MB - too large for git, regenerate with sync/build_pt_embeddings.py)
 data/pt_embeddings.npz
 data/

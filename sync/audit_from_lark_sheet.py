@@ -1,18 +1,16 @@
-"""从飞书"上架表"读 ASIN → 跑审核 → 写回结果.
+"""从飞书表读 ASIN → 跑审核 → 写回结果 (默认"在线产品"大表, 8 列 v2 布局).
 
-表格: https://my.feishu.cn/wiki/JeSEw8QNgieDaKkr6xLcDUConSc
-obj_token: PDsRsfGRrhmWq1tOt25cHgUAnPh  sheet_id: ea2b2a
+默认表格: 在线产品大表 (11 万 ASIN)
+spreadsheet_token: MO2escopjhLFzVtOzVlcq8xvnmI  sheet_id: e7834a
+列布局见下方 COL_* 常量 (A ASIN / C PT / D category / E 审核结果 / F 阻拦层 / G reason_cat / H 理由).
 
-列:
-  A  ASIN                      (业务方填, 触发审核)
-  B  店铺                      (业务方填, 上架脚本用)
-  C  walmart_product_type      (本系统写)
-  D  审核结果                  (本系统写: pass/reject/pending/error — 兼触发器)
-  E  理由                      (本系统写)
-  F  是否上架  / G  上架feedid (上架脚本写)
+⚠️ 历史: 本脚本最初对接 6 列布局"上架表" (PDsRsfGRrhmWq1tOt25cHgUAnPh/ea2b2a)。
+该表 2026-05-12 已扩成 26 列 (C 位置插入标题列), 6 列读写逻辑对它已不适用,
+勿用 --spreadsheet-token 把本脚本指回上架表 (姊妹脚本 audit_listing_sheet.py
+因此于 2026-06-11 删除, 上架表审核走 server Web 控制台 CSV 流程).
 
 待审规则:
-  A 非空 AND (D 为空 OR D == "pending" OR D == "error")
+  A 非空 AND (E 为空 OR E == "pending" OR E == "error")
   → 其中 pending/error 自动重试 (按用户 2026-04-24 要求)
 
 用法:
