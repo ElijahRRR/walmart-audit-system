@@ -3,7 +3,8 @@
 输入: CSV 文件, 至少含列 `asin`; 可选 `title` `brand` `amazon_category_path`
       `bullet_points` (用 '||' 分隔) `long_description` `country_of_origin` `image_urls` (用 '||' 分隔)
 
-输出: result.csv, 每行: asin, verdict, score_final, stage, hit_codes, reason_summary
+输出: result.csv, 列: asin, verdict, score_final, stage_stopped_at,
+      walmart_product_type, pt_confidence, pt_source, hit_codes, reason_summary
 
 用法:
   python -m cli.audit_asin_list --input asins.csv --out result.csv           # 全层默认启用

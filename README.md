@@ -2,7 +2,7 @@
 
 站在沃尔玛官方审核视角，**预审** Amazon 搬运商品在上架沃尔玛前能否通过。通过后品牌统一改 `unbranded` 交下游 API 上架。
 
-**状态**：L0 → L4 全链路打通，已在全量 4326 ASIN 跑通；线上以 server + 10 worker 分布式队列方式服务。Python 3.11+，PostgreSQL，FastAPI。
+**状态**：L0 → L4 全链路打通，已在全量 4326 ASIN 跑通；线上以 server + 10 worker 分布式队列方式服务（**worker 默认只跑 L0→L3，L4 视觉需 `RUN_L4=true` 或 `--run-l4` 显式开启**）。Python 3.11+，PostgreSQL，FastAPI。
 
 ---
 
@@ -11,8 +11,8 @@
 - **5 层审核管道** L0 预过滤 → L1 类目判定 → L2 硬规则打分 → L3 LLM 语义审核 → L4 LLM 视觉审核
 - **L1 混合检索** `walmart_category_map` 精确匹配优先；未命中则走 `text-embedding-v3` (1024 维) Top-N 候选 + 关键词召回 → LLM 复排
 - **L2 硬拒 + 软证据** R1 类目准入 / R2 禁售大类 / R3 强制证书 走硬拒；R4-R8 软证据（0 分）交 L3 判断
-- **L3 多任务语义判定** DeepSeek / qwen-plus，单进程 `Semaphore(LLM_CONCURRENCY=100)`，3 次指数退避重试，全 37 条政策
-- **L4 视觉审核** 默认 Volcengine `doubao-seed-1-6-flash`（多图 + 中文优势），可降级 qwen-vl-plus；每商品最多 5 张
+- **L3 多任务语义判定** 文本模型由 `LLM_TEXT_PROVIDER` 决定（`dashscope`→默认 `qwen-turbo` / `deepseek`→默认 `deepseek-v4-flash`），单进程 `Semaphore(LLM_CONCURRENCY=100)`，3 次指数退避重试，全 37 条政策
+- **L4 视觉审核** 默认 Volcengine `doubao-seed-1-6-flash`（多图 + 中文优势），可降级 qwen-vl-plus；每商品最多 5 张。**线上 worker 默认不开 L4**（`run_l4=False`），需 `RUN_L4=true` / `--run-l4` 开启；单机 CLI 与 `orchestrator.audit_one` 默认开启
 - **多 Provider 路由** 文本：DashScope / DeepSeek；视觉：Volcengine / Qwen；按使用场景分配独立 key
 - **LLM 缓存** `llm_cache` 表按 `sha256(system+user+model)` 哈希复用，避免重复 token 消耗
 - **成本核算** `usage_log` 表逐次记录 provider / model / token / 美元；`cli/cost_report.py` 生成报表
@@ -61,11 +61,10 @@
 │   ├── sync_prohibited.py / sync_pt_meta.py / sync_pt_specs.py
 │   ├── build_pt_embeddings.py        # 周期性重算 PT embedding
 │   ├── audit_from_lark_sheet.py      # 飞书表批量审核
-│   ├── audit_listing_sheet.py        # 6 列布局上架表审核
 │   └── analyze_brand_ip_precision.py # 黑名单品牌命中精度统计
 ├── server/              # FastAPI 任务队列服务端
 │   ├── main.py / db.py (SQLite) / file_io.py
-│   ├── templates/ + static/ (HTMX 控制台)
+│   ├── templates/index.html (HTMX 控制台单页; static/ 按需挂载, 当前未使用)
 │   └── deploy/requirements.txt
 ├── worker/              # 长驻 worker
 │   ├── poll_loop.py / server_client.py / log_pusher.py
@@ -100,7 +99,7 @@ L1  类目判定（输出 walmart_product_type 必出）
     1) walmart_category_map 精确匹配（最高优先级）
     2) prefix 匹配
     3) embedding (text-embedding-v3, 1024d) Top-20 + 关键词 Top-10 召回
-    4) LLM 复排 (deepseek-v4-flash / qwen-plus) 输出 PT + confidence + source
+    4) LLM 复排（文本模型由 LLM_TEXT_PROVIDER 决定, 同 L3）输出 PT + confidence + source
        → 候选必须迭代选 walmart_pt_meta 真实可用 PT, 不能盲取第一个
     同时识别 zh_seller_forbidden / requires_certificate
     ↓
@@ -115,7 +114,7 @@ L2  硬规则打分（起始 100，<60 直接 reject）
     R8  walmart_strict_sensitive 文化/宗教/政治/武器/成人 7 类敏感             0  → L3
     R9  title 含 ®              中国搬运卖家不可能真持有 ®，硬拦              -100
     ↓  score ≥ 60
-L3  LLM 语义审核（DeepSeek / qwen-plus, Semaphore(100), 重试 3, llm_cache）
+L3  LLM 语义审核（文本模型由 LLM_TEXT_PROVIDER 决定, Semaphore(100), 重试 3, llm_cache）
     全 37 条政策：IP 侵权 / 冒犯性内容 / 证书合规 / 品牌伪装 / 政策路由
     严格证据原则：禁止"PT 类目接近就套政策"
     ↓  verdict = pass
@@ -177,9 +176,13 @@ python3 -m cli.audit_asin_list --input asins.csv --no-persist    # 不写库
 ### 飞书表批量审核
 
 ```bash
-python3 -m sync.audit_from_lark_sheet --token <sheet_token>
-python3 -m sync.audit_listing_sheet   --token <sheet_token>      # 6 列布局上架表
+python3 -m sync.audit_from_lark_sheet                                  # 默认扫内置"在线产品"大表 (11 万 ASIN)
+python3 -m sync.audit_from_lark_sheet --spreadsheet-token <token> --sheet-id <id>   # 指定其他表
+python3 -m sync.audit_from_lark_sheet --limit 10 --dry-run             # 只看前 10 行待审, 不回写
 ```
+
+> `audit_listing_sheet.py`（6 列布局上架表审核）已于 2026-06-11 删除：上架表 2026-05-12 起扩成 26 列，
+> 6 列写回会错位污染 C:F；该流程已被 server Web 控制台（CSV → 审核 → XLSX）取代。
 
 ### 分布式队列（生产部署）
 
@@ -289,11 +292,11 @@ python3 -m cli.audit_asin_list --input failed.csv --filter-stage L3   # 只重�
 - **Phase 0 飞书黑名单 fail-soft**：[pipelines/phase0_lark_blacklist.py](pipelines/phase0_lark_blacklist.py) 加载失败时等同空 set（跳过这一项），让旧表数据继续工作；要靠 `sync_runs.status` 监控同步本身是否失败。
 - **类目归一化必须双向对齐**：飞书表用 `Beauty&PersonalCare->Fragrance->Men's->Sets`（无空格 + `->`），DMIT 用 `Beauty & Personal Care > Fragrance > Men's > Sets`（含空格 + `>`）；`normalize_amazon_category()` 是唯一真理，sync 入库 + 审核查询都必须用它。
 - **lark-cli 是硬依赖**：`integrations/lark_client.py` 走 `subprocess` 调系统 `lark-cli`，未登录会全部同步任务失败。
-- **DMIT 不稳**：批量审核已加自动等待 + 重试（[sync/audit_listing_sheet.py](sync/audit_listing_sheet.py)、[sync/audit_from_lark_sheet.py](sync/audit_from_lark_sheet.py)），但仍可能命中网络/限流；查 [api/dmit_fetcher.py](api/dmit_fetcher.py) 调整并发。
+- **DMIT 不稳**：批量审核已加自动等待 + 重试（[sync/audit_from_lark_sheet.py](sync/audit_from_lark_sheet.py)、[worker/poll_loop.py](worker/poll_loop.py)），但仍可能命中网络/限流；查 [api/dmit_fetcher.py](api/dmit_fetcher.py) 调整并发。
 - **L1 候选必须经 walmart_pt_meta 校验**：直接取 LLM 第一个候选会取到不存在的 PT；务必迭代候选选第一个真实可用的（参考 a3a2f69 / 125ffbf）。
 - **L2 软证据 0 扣分**：R4 / R5 / R7 / R8 不直接扣分，只作为证据交 L3 严判；过去给软证据扣分会误伤大量正常商品。
 - **R9 `®` 硬拦无豁免**：中国搬运卖家不可能真持有 ®，所有 title 含 ® 直接拒，不接受授权声明。
-- **L4 默认豆包**：ce200 集评测 Volcengine `doubao-seed-1-6-flash` 优于 qwen-vl-plus（独家救回 14 vs 3）；切回需改 `VISION_PROVIDER`。
+- **L4 默认豆包，但线上 worker 默认不跑**：ce200 集评测 Volcengine `doubao-seed-1-6-flash` 优于 qwen-vl-plus（独家救回 14 vs 3）；切 provider 改 `VISION_PROVIDER`。注意 worker 端 L4 默认关闭（[worker/poll_loop.py](worker/poll_loop.py) `run_l4=False`，[scripts/start_workers.sh](scripts/start_workers.sh) 未传 `--run-l4`），线上要跑视觉需设环境变量 `RUN_L4=true` 或给 worker 启动加 `--run-l4`。单机 [cli/audit_asin_list.py](cli/audit_asin_list.py) 与 `orchestrator.audit_one` 则默认开 L4。
 - **`feature_list.json` 不可改描述**：只允许把 `"passes": false` 改为 `true`；新需求另起。
 - **飞书大表分页**：读飞书表必须用 `page_size=5000`（小于 200 会被旧调用方误覆盖，见 4399a17）。
 - **`API Key.txt` 与 `.env` 含密钥**：`.gitignore` 已排除，但务必避免误提交。
