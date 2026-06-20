@@ -518,29 +518,31 @@ def compute_chunks_auto(
     n_workers_online: int,
     *,
     min_chunk: int = 50,
+    max_chunk: int = 800,
 ) -> list[tuple[int, int]]:
-    """自动切片 - 每个 worker 最多分一片, 平均分.
+    """自动切片 - 默认每 worker 一片, 但单片不超过 max_chunk.
 
     规则:
-      片数 = min(n_workers, ceil(total / min_chunk))
+      片数 = min(n_workers, ceil(total / min_chunk))      # 优先每 worker 一片
+      若 ceil(total / 片数) > max_chunk:                   # 片太大 → 改按 max_chunk 切更多片
+          片数 = ceil(total / max_chunk)                   # worker 依次多轮拉取
       每片大小 = ceil(total / 片数)
 
-    设计意图 (用户原话):
-      - 同时 14 worker 在线, 至少需要 100 个产品才划算多分片
-      - <50 ASIN 给 1 worker (再分太小, 字典加载和 DMIT 拉取的开销不划算)
-      - 700 ASIN/14 worker = 14 片 × 50, 每 worker 一片正好
-      - 1400 → 14 片 × 100; 14000 → 14 片 × 1000; 50000 → 14 片 × ~3571
-      - 关键: 每个 worker 一次拿一大片, 不再多次 claim. 减少初始化开销 (字典加载 ~10s/worker).
+    为什么要 max_chunk 上限 (2026-06-20 加, 因 95k 大任务全员心跳超时失败):
+      - 单片过大 (如 95619/10 = 9562) 时, worker 要先 DMIT 抓完整片才报第一条进度,
+        抓取阶段长达数分钟 > 180s 心跳窗口 → server 误判 worker 死掉, 子任务被 reclaim 判 failed.
+      - 切成 ≤max_chunk 小片后: 每片 DMIT 快 (~800 条 ≈ 50s), 心跳稳, 进度可见;
+        worker 多拉几片即可, 总吞吐基本不变 (代价仅多几次 claim + 字典已 warm).
 
-    例:
-      total=50,    workers=14 → 1 片 × 50         (任务太小, 1 worker 干)
-      total=100,   workers=14 → 2 片 × 50         (能给 2 worker 各 50)
-      total=700,   workers=14 → 14 片 × 50        (每 worker 一片)
-      total=1400,  workers=14 → 14 片 × 100
-      total=14000, workers=14 → 14 片 × 1000
-      total=50000, workers=14 → 14 片 × ~3571
+    例 (min_chunk=50, max_chunk=800):
+      total=50,     workers=10 → 1 片 × 50          (任务太小, 1 worker 干)
+      total=100,    workers=10 → 2 片 × 50
+      total=700,    workers=10 → 10 片 × 70         (每片 < max_chunk, 每 worker 一片)
+      total=2991,   workers=10 → 10 片 × 300
+      total=25459,  workers=10 → 32 片 × ~796       (2546 > 800, 切更多片)
+      total=95619,  workers=10 → 120 片 × ~797      (worker 各拉 ~12 片)
 
-    无 worker 在线时按 1 worker 切 (任务进队列等待 worker 上线).
+    无 worker 在线时按 1 worker 起算 (任务进队列等待 worker 上线).
     """
     if total <= 0:
         return []
@@ -550,10 +552,14 @@ def compute_chunks_auto(
     # 最多能切多少片 (每片至少 min_chunk)
     max_useful_chunks = _ceil_div(total, min_chunk)
 
-    # 实际片数 = 在线 worker 数 vs 总数能撑得起的片数, 取小的
+    # 优先每 worker 一片
     n_chunks = max(1, min(n_workers, max_useful_chunks))
-
     chunk_size = _ceil_div(total, n_chunks)
+
+    # 单片超过 max_chunk → 改按 max_chunk 切更多片 (大任务防 DMIT 抓取阶段心跳超时)
+    if chunk_size > max_chunk:
+        n_chunks = _ceil_div(total, max_chunk)
+        chunk_size = _ceil_div(total, n_chunks)
 
     chunks: list[tuple[int, int]] = []
     for offset in range(0, total, chunk_size):

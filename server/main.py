@@ -70,7 +70,7 @@ async def lifespan(app: FastAPI):
         d.mkdir(parents=True, exist_ok=True)
     db.init_db(DB_PATH)
     log.info("Server data root: %s", DATA_ROOT)
-    log.info("自动切片: 每片最小 50 ASIN, 片数=min(在线 worker 数, ceil(总数/50)), 每片大小动态算, 无上限")
+    log.info("自动切片: 每片 50-800 ASIN (min_chunk=50, max_chunk=800), 片数依在线 worker 数 + 单片上限动态算")
     log.info("数据保留: %d 天 (DB + 磁盘文件 同步清理, 每 %ds 检查)",
              RETENTION_DAYS, CLEANUP_INTERVAL_SEC)
 
@@ -158,7 +158,7 @@ async def health() -> dict[str, Any]:
         "ok": True,
         "time": datetime.now().isoformat(timespec="seconds"),
         "data_root": str(DATA_ROOT),
-        "auto_chunk": "min_chunk=50, 片数=min(workers, ceil(total/50)), 无 max 上限",
+        "auto_chunk": "min_chunk=50, max_chunk=800, 片数 = max(min(workers, ceil(total/50)), ceil(total/800))",
     }
 
 
@@ -232,7 +232,7 @@ async def submit_job(
     )
 
     # 所有任务统一走 "父任务 + N 个子任务" 路径 (N >= 1).
-    # 自动切分: 片数 = min(在线 worker 数, ceil(总数 / min_chunk=50)), 每片大小 = ceil(总数 / 片数), 无 max 上限.
+    # 自动切分: 优先每 worker 一片; 单片超过 max_chunk=800 则切更多片 (worker 多轮拉, 防大任务 DMIT 抓取期心跳超时).
     chunks = file_io.compute_chunks_auto(len(asins), n_alive)
     sub_ids = await run_in_threadpool(
         db.create_sub_jobs,
