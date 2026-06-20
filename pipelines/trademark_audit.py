@@ -174,7 +174,10 @@ def query_marks(brand_uppers: list[str]) -> dict[str, list[dict[str, str]]]:
                                     o.nationality_country        AS nationality_country
                     FROM trademarks t
                     JOIN status_code_mapping scm ON scm.status_code = t.status_code
-                    LEFT JOIN trademark_owners o  ON o.serial_number::text = t.serial_number::text
+                    -- 两列均为 bigint, 直接等值 join 走 owners.serial_number 索引。
+                    -- ⚠️ 切勿加 ::text 强转: 会让索引失效 → 排序 3200万行 owners 溢写 9.5GB 临时盘,
+                    --    单次查询从 2.8s 飙到 170s (EXPLAIN 实测), 是大批量商标审核心跳超时的根因。
+                    LEFT JOIN trademark_owners o  ON o.serial_number = t.serial_number
                     WHERE t.mark_identification = ANY(%s)
                       AND scm.live_dead = 'LIVE'
                     """,
