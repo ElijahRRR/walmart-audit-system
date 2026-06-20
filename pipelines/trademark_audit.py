@@ -70,6 +70,10 @@ NO = "否"
 REAL = "真"
 FAKE = "假"
 
+# asin_db 模式 (仅传 ASIN, 从主库补全): 库里查不到该 ASIN 时的标记
+BRAND_EXISTS_NO_DATA = "无数据"
+NO_DATA_NOTE = "库中无此 ASIN 商品数据 (请改用 手填 ASIN+品牌+标题 模式)"
+
 
 def columns_for(has_title: bool) -> list[str]:
     """返回输出 CSV / XLSX 的完整列顺序 (含回显的输入列)。"""
@@ -213,6 +217,56 @@ def format_brand_detail(entries: list[dict[str, str]]) -> str:
 
 
 # -----------------------------------------------------------------------------
+# asin_db 模式: 从主库 products 表补全 brand + title (输入只有 ASIN 时用)
+# -----------------------------------------------------------------------------
+def load_brand_title(asins: list[str]) -> dict[str, dict[str, str]]:
+    """从主库 (walmart_audit) products 表批量查 brand + title。
+
+    返回 {asin: {"brand": .., "title": ..}}, 仅包含库中存在的 ASIN;
+    不存在的 ASIN 不出现在返回里 (由调用方标"无数据")。
+    主库不可达 / 查询失败时返回 {} (fail-soft — 整批当作无数据, 不崩任务)。
+    """
+    uniq = [a for a in dict.fromkeys(asins) if a]   # 去重保序
+    if not uniq:
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    try:
+        from sync._common import db_conn
+        with db_conn() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "SELECT asin, COALESCE(brand, '') AS brand, COALESCE(title, '') AS title "
+                    "FROM products WHERE asin = ANY(%s)",
+                    (uniq,),
+                )
+                for r in cur.fetchall():
+                    out[r["asin"]] = {
+                        "brand": (r["brand"] or "").strip(),
+                        "title": (r["title"] or "").strip(),
+                    }
+    except Exception as e:  # noqa: BLE001
+        log.warning("products 库查询失败 (asin_db 商标审核降级为全无数据): %s", e)
+        return {}
+    log.info("asin_db 商标审核: 主库命中 %d / %d ASIN", len(out), len(uniq))
+    return out
+
+
+def build_no_data_row(asin: str) -> dict[str, Any]:
+    """asin_db 模式下库里查不到该 ASIN → 构造一行"无数据"输出 (固定 has_title 9 列布局)。"""
+    return {
+        COL_ASIN: asin,
+        COL_BRAND: "",
+        COL_TITLE: "",
+        COL_BRAND_EXISTS: BRAND_EXISTS_NO_DATA,
+        COL_BRAND_DETAIL: NO_DATA_NOTE,
+        COL_TITLE_BRAND: "",
+        COL_TITLE_BRAND_DETAIL: "",
+        COL_VERDICT: "",
+        COL_SUSPECT_REAL: "",
+    }
+
+
+# -----------------------------------------------------------------------------
 # LLM: 判定标题命中词是真品牌还是通用词
 # -----------------------------------------------------------------------------
 _JUDGE_SYSTEM = (
@@ -351,6 +405,8 @@ __all__ = [
     "extract_title_tokens",
     "query_marks",
     "format_brand_detail",
+    "load_brand_title",
+    "build_no_data_row",
     "judge_title_brand",
     "audit_rows",
     "COL_ASIN", "COL_BRAND", "COL_TITLE",

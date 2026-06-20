@@ -351,10 +351,22 @@
             </div>
           </div>
 
+          <div style="margin:2px 0 12px">
+            <label>输入方式 <span class="req">*</span></label>
+            <div style="display:flex;gap:18px;align-items:center;margin-top:6px;font-size:13px;color:#374151">
+              <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:400">
+                <input type="radio" name="source" value="manual" checked> 手填 ASIN+品牌+标题
+              </label>
+              <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:400">
+                <input type="radio" name="source" value="asin_db"> 仅 ASIN（库中查品牌/标题）
+              </label>
+            </div>
+          </div>
+
           <div class="dropzone" id="tm-dropzone">
             <div class="dz-icon">🏷️</div>
             <div class="dz-title" id="tm-dz-title">拖入文件，或点击选择</div>
-            <div class="dz-hint">第1列 ASIN · 第2列 品牌 · 第3列 标题(可选)</div>
+            <div class="dz-hint" id="tm-dz-hint">第1列 ASIN · 第2列 品牌 · 第3列 标题(可选)</div>
             <input type="file" name="file" id="tm-file-input" accept=".csv,.xlsx,.xls,.txt" required>
           </div>
 
@@ -555,6 +567,17 @@ function onTmFilePicked() {
   const nameInput = form.querySelector('input[name="job_name"]');
   if (nameInput && !nameInput.value) nameInput.value = f.name.replace(/\.[^.]+$/, "");
 }
+
+// 输入方式切换 → 更新拖拽区提示 (radio 的 change 只在被选中的那个上触发)
+document.querySelectorAll('#tm-submit-form input[name="source"]').forEach(el => {
+  el.addEventListener("change", () => {
+    const hint = document.getElementById("tm-dz-hint");
+    if (!hint) return;
+    hint.textContent = el.value === "asin_db"
+      ? "仅需 1 列 ASIN（品牌/标题从数据库自动补全；库中无数据的 ASIN 会标记「无数据」）"
+      : "第1列 ASIN · 第2列 品牌 · 第3列 标题(可选)";
+  });
+});
 
 // 两个表单共享"提交人"记忆
 const tmSubmitter = document.querySelector('#tm-submit-form input[name="user_email"]');

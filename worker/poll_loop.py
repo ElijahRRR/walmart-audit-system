@@ -182,11 +182,26 @@ async def _run_trademark_job(
 
     不走 DMIT / orchestrator. 列布局由 trademark_audit.columns_for(has_title) 决定.
     """
+    import json as _json
     from pipelines import trademark_audit
 
     job_id = int(job["job_id"])
     offset = int(job.get("asin_offset") or 0)
     count = int(job.get("asin_count") or 0)
+    raw_options = job.get("options") or "{}"
+    try:
+        opts: dict[str, Any] = _json.loads(raw_options) if isinstance(raw_options, str) else (raw_options or {})
+    except Exception:
+        opts = {}
+    source = opts.get("source") or "manual"
+
+    # 仅 ASIN 模式: 从主库 products 补全 品牌+标题, 查不到的标"无数据" (独立分支)
+    if source == "asin_db":
+        await _run_trademark_asin_db_job(
+            server, trademark_audit, job_id, input_path, offset, count, tmp,
+            async_concurrency=async_concurrency,
+        )
+        return
 
     rows_tuples, has_title = await asyncio.to_thread(
         file_io.read_trademark_slice, input_path, offset, count,
@@ -223,6 +238,75 @@ async def _run_trademark_job(
     if has_title:
         summary += f" / 标题真品牌 {real_count}"
     log.info("[#%d] 商标审核完成: %s", job_id, summary)
+    await server.upload_result(
+        job_id, output_path,
+        pass_count=pass_count, reject_count=real_count, summary=summary,
+    )
+
+
+async def _run_trademark_asin_db_job(
+    server: ServerClient,
+    trademark_audit: Any,
+    job_id: int,
+    input_path: Path,
+    offset: int,
+    count: int,
+    tmp: Path,
+    *,
+    async_concurrency: int,
+) -> None:
+    """商标审核 — 仅 ASIN 模式: 读 ASIN 分片 → 主库 products 补全 品牌+标题 → 审核.
+
+    库里查不到的 ASIN 输出一行"无数据"标记 (品牌是否存在=无数据), 行序与输入一致.
+    输出固定走 has_title=True 的 9 列布局.
+    """
+    asins = await asyncio.to_thread(file_io.read_asin_slice, input_path, offset, count)
+    log.info("[#%d] 商标审核(仅ASIN查库)切片 [%d:%d) → %d ASIN",
+             job_id, offset, offset + count, len(asins))
+
+    columns = trademark_audit.columns_for(True)
+    output_path = tmp / f"job_{job_id}_result.csv"
+
+    if not asins:
+        await asyncio.to_thread(file_io.write_trademark_csv, output_path, [], columns)
+        await server.upload_result(
+            job_id, output_path, pass_count=0, reject_count=0,
+            summary="empty slice (0 ASIN)",
+        )
+        return
+
+    # 主库批量补全 brand + title (查不到的 ASIN 不在返回里)
+    db_data = await asyncio.to_thread(trademark_audit.load_brand_title, asins)
+    found_rows = [
+        trademark_audit.TradeRow(asin=a, brand=db_data[a]["brand"], title=db_data[a]["title"])
+        for a in asins if a in db_data
+    ]
+    audited = (
+        await trademark_audit.audit_rows(found_rows, has_title=True, concurrency=async_concurrency)
+        if found_rows else []
+    )
+    by_asin = {r[trademark_audit.COL_ASIN]: r for r in audited}
+
+    # 按输入顺序回填; 缺数据的标"无数据"
+    results: list[dict[str, Any]] = []
+    missing = 0
+    for a in asins:
+        row = by_asin.get(a)
+        if row is None:
+            results.append(trademark_audit.build_no_data_row(a))
+            missing += 1
+        else:
+            results.append(row)
+
+    await asyncio.to_thread(file_io.write_trademark_csv, output_path, results, columns)
+    await server.report_progress(job_id, len(results))
+
+    # UI 复用 pass/reject: reject=命中真品牌(需关注), pass=其余 (含无数据行)
+    real_count = sum(1 for r in results if r.get(trademark_audit.COL_VERDICT) == trademark_audit.REAL)
+    found = len(asins) - missing
+    pass_count = max(0, len(results) - real_count)
+    summary = f"{len(asins)} ASIN / 库命中 {found} / 无数据 {missing} / 标题真品牌 {real_count}"
+    log.info("[#%d] 商标审核(仅ASIN)完成: %s", job_id, summary)
     await server.upload_result(
         job_id, output_path,
         pass_count=pass_count, reject_count=real_count, summary=summary,

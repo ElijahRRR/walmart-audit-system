@@ -70,7 +70,7 @@ async def lifespan(app: FastAPI):
         d.mkdir(parents=True, exist_ok=True)
     db.init_db(DB_PATH)
     log.info("Server data root: %s", DATA_ROOT)
-    log.info("自动切片: 每片 100-500 ASIN, 片数依在线 worker 动态算")
+    log.info("自动切片: 每片最小 50 ASIN, 片数=min(在线 worker 数, ceil(总数/50)), 每片大小动态算, 无上限")
     log.info("数据保留: %d 天 (DB + 磁盘文件 同步清理, 每 %ds 检查)",
              RETENTION_DAYS, CLEANUP_INTERVAL_SEC)
 
@@ -158,7 +158,7 @@ async def health() -> dict[str, Any]:
         "ok": True,
         "time": datetime.now().isoformat(timespec="seconds"),
         "data_root": str(DATA_ROOT),
-        "auto_chunk": "max=500, min=100",
+        "auto_chunk": "min_chunk=50, 片数=min(workers, ceil(total/50)), 无 max 上限",
     }
 
 
@@ -232,7 +232,7 @@ async def submit_job(
     )
 
     # 所有任务统一走 "父任务 + N 个子任务" 路径 (N >= 1).
-    # 自动切分: 根据当前在线 worker 数 + 总 ASIN 数, 按 max_chunk=500 / min_chunk=100 自动算.
+    # 自动切分: 片数 = min(在线 worker 数, ceil(总数 / min_chunk=50)), 每片大小 = ceil(总数 / 片数), 无 max 上限.
     chunks = file_io.compute_chunks_auto(len(asins), n_alive)
     sub_ids = await run_in_threadpool(
         db.create_sub_jobs,
@@ -266,10 +266,13 @@ async def submit_trademark_job(
     file: UploadFile = File(...),
     user_email: str = Form(...),
     job_name: str | None = Form(None),
+    source: str = Form("manual"),
 ) -> dict[str, Any]:
     """商标品牌审核入口 (独立于 ASIN 审核).
 
-    输入表格: 第1列 ASIN, 第2列 品牌, 第3列 标题(可选).
+    两种输入方式 (source):
+      - "manual" (默认): 表格第1列 ASIN, 第2列 品牌, 第3列 标题(可选). 适合库里没有数据的商品.
+      - "asin_db":        表格只有 ASIN 一列, Worker 从主库 products 表补全 品牌+标题再审 (库中已有数据).
     不走 DMIT / L0-L4 — Worker 仅查商标库 + 标题品牌检测 + LLM 真伪判定.
     按"数据行数"切分子任务 (复用同一套 server+worker 队列).
     """
@@ -287,17 +290,31 @@ async def submit_trademark_job(
     saved_path = UPLOAD_DIR / saved_name
     saved_path.write_bytes(contents)
 
-    try:
-        n_rows, has_title = await run_in_threadpool(file_io.count_trademark_rows, saved_path)
-    except Exception as e:
-        saved_path.unlink(missing_ok=True)
-        raise HTTPException(400, f"failed to parse file: {e}") from e
-
-    if n_rows <= 0:
-        saved_path.unlink(missing_ok=True)
-        raise HTTPException(400, "no data rows found in file (需要至少 asin + 品牌 两列)")
-
-    options: dict[str, Any] = {"mode": "trademark", "has_title": has_title}
+    if source == "asin_db":
+        # 仅 ASIN 输入: 复用 ASIN 审核解析 (去重 + 校验 ASIN); 品牌/标题在 Worker 端从主库补全.
+        try:
+            asins = await run_in_threadpool(file_io.parse_asin_file, saved_path)
+        except Exception as e:
+            saved_path.unlink(missing_ok=True)
+            raise HTTPException(400, f"failed to parse file: {e}") from e
+        if not asins:
+            saved_path.unlink(missing_ok=True)
+            raise HTTPException(400, "no valid ASINs found in file (仅 ASIN 模式需要至少 1 个合法 ASIN)")
+        n_rows = len(asins)
+        has_title = True   # 标题从库里取, 输出走完整 9 列布局
+        options: dict[str, Any] = {"mode": "trademark", "source": "asin_db", "has_title": True}
+        layout = "仅 ASIN (库中补全 品牌+标题)"
+    else:
+        try:
+            n_rows, has_title = await run_in_threadpool(file_io.count_trademark_rows, saved_path)
+        except Exception as e:
+            saved_path.unlink(missing_ok=True)
+            raise HTTPException(400, f"failed to parse file: {e}") from e
+        if n_rows <= 0:
+            saved_path.unlink(missing_ok=True)
+            raise HTTPException(400, "no data rows found in file (需要至少 asin + 品牌 两列)")
+        options = {"mode": "trademark", "has_title": has_title}
+        layout = "asin+品牌+标题" if has_title else "asin+品牌"
 
     n_alive = await run_in_threadpool(_count_alive_workers)
 
@@ -321,7 +338,6 @@ async def submit_trademark_job(
         chunks=chunks,
         user_email=user_email,
     )
-    layout = "asin+品牌+标题" if has_title else "asin+品牌"
     log.info(
         "trademark job #%d submitted: %d 行 (%s) → %d sub-jobs (%d worker 在线)",
         parent_id, n_rows, layout, len(sub_ids), n_alive,
