@@ -113,6 +113,13 @@ async def _housekeeper_loop():
             if n > 0:
                 log.warning("reclaimed %d stale jobs (heartbeat timeout)", n)
 
+            # 补触发卡死父任务的合并: 子任务已全终结但父任务还卡在 splitting
+            # (心跳回收判 failed 不触发 merge / server 在 merge 前重启 → 否则永远卡死)
+            stuck_parents = await run_in_threadpool(db.find_stuck_splitting_parents)
+            for pid in stuck_parents:
+                log.warning("卡死 splitting 父任务 #%d (子任务已全终结), 补触发合并", pid)
+                asyncio.create_task(_try_merge_parent(pid))
+
             now = asyncio.get_event_loop().time()
             if now - last_cleanup >= CLEANUP_INTERVAL_SEC:
                 last_cleanup = now

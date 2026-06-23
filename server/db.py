@@ -481,6 +481,28 @@ def reclaim_stale_jobs(timeout_seconds: int = 180) -> int:
         return cur.rowcount
 
 
+def find_stuck_splitting_parents() -> list[int]:
+    """找卡死的父任务: status='splitting' 但所有子任务都已终结 (done/failed/cancelled)。
+
+    这类父任务的 merge 没被触发 — 常见于 housekeeper 心跳回收判 failed 不触发 merge,
+    或 server 在触发 merge 前重启。housekeeper 周期性扫到后补触发 _try_merge_parent。
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT p.job_id FROM jobs p
+        WHERE p.parent_id IS NULL AND p.status = 'splitting'
+          AND EXISTS (SELECT 1 FROM jobs s WHERE s.parent_id = p.job_id)
+          AND NOT EXISTS (
+              SELECT 1 FROM jobs s
+              WHERE s.parent_id = p.job_id
+                AND s.status NOT IN ('done', 'failed', 'cancelled')
+          )
+        """
+    ).fetchall()
+    return [r["job_id"] for r in rows]
+
+
 def retry_subjob(sub_id: int) -> bool:
     """重试单个失败/取消的子任务: 状态重置到 pending, 让 worker 重新拉.
 
