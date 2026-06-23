@@ -63,6 +63,10 @@ class Settings:
     l4_max_images_per_product: int
     log_level: str
 
+    # --- 历史短路 ---
+    # reject 永久短路 (无 TTL); pass 仅在最近一次真实 pass 距今 < 该天数时短路, 超期重审
+    shortcut_pass_ttl_days: int
+
 
 def _get(key: str, default: str = "") -> str:
     return os.getenv(key, default)
@@ -115,4 +119,5 @@ def get_settings() -> Settings:
         llm_retry_base_delay=_get_float("LLM_RETRY_BASE_DELAY", 1.0),
         l4_max_images_per_product=_get_int("L4_MAX_IMAGES_PER_PRODUCT", 5),
         log_level=_get("LOG_LEVEL", "INFO"),
+        shortcut_pass_ttl_days=_get_int("SHORTCUT_PASS_TTL_DAYS", 45),
     )

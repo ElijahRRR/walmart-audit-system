@@ -269,12 +269,13 @@ async def audit_one(
 
 
 def _build_shortcut_outcome(product: ProductInfo, hit: history_shortcut.ShortcutHit) -> AuditOutcome:
-    """根据历史 reject snapshot 构造一个短路 AuditOutcome。
+    """根据历史 snapshot 构造短路 AuditOutcome (verdict 复用 hit.verdict: reject 或 pass)。
 
     把 short-circuit hit 挂在 phase0 里 (而非 l1/l2), 因为:
       1. AuditOutcome.all_hits 从 phase0.hits 取, 自动包含到 audit_hits 持久化
       2. 语义上"短路"发生在审核流水线起点之前, 接近 L0 性质
     """
+    is_reject = hit.verdict == "reject"
     l1_stub = L1Result(
         walmart_product_type=hit.original_walmart_product_type or "(history_shortcut)",
         pt_confidence=hit.original_pt_confidence or "低",
@@ -286,18 +287,22 @@ def _build_shortcut_outcome(product: ProductInfo, hit: history_shortcut.Shortcut
         penalty=0,
         detail=hit.as_detail(),
     )
+    score = hit.original_score_final
+    if score is None:
+        score = 0 if is_reject else 100
     return AuditOutcome(
         asin=product.asin,
-        verdict="reject",
-        score_final=0,
+        verdict=hit.verdict,
+        score_final=score,
         stage_stopped_at="SHORTCUT",
         l1=l1_stub,
-        phase0=Phase0Result(blocked=True, hits=[shortcut_hit]),
+        # blocked 仅对 reject 为真; pass 短路时这条 hit 只是 0 分信息标记
+        phase0=Phase0Result(blocked=is_reject, hits=[shortcut_hit]),
         l2=None,
         l3=None,
         l4=None,
-        # 沿用老 reason_category, 便于报表层一致 (没有则 'history_shortcut' 兜底)
-        final_reason_category=hit.original_reason_category or "history_shortcut",
+        # reject 沿用老 reason_category (报表一致); pass 无拒绝原因
+        final_reason_category=(hit.original_reason_category or "history_shortcut") if is_reject else None,
     )
 
 
@@ -309,10 +314,14 @@ async def _audit_pipeline(
     persist: bool,
     force_rerun: bool = False,
 ) -> AuditOutcome:
-    # 历史短路 — 在 Phase 0 之前查, 命中老 reject 直接出 (零 LLM 调用)
+    # 历史短路 — 在 Phase 0 之前查, 命中直接出 (零 LLM 调用)
+    #   reject 永久短路; pass 在 shortcut_pass_ttl_days (默认 45 天) 内短路, 超期重审
     # force_rerun=True 时跳过此层, 让用户重新审核
     if not force_rerun:
-        shortcut_hit = history_shortcut.lookup_latest_reject(product.asin)
+        from config import get_settings
+        shortcut_hit = history_shortcut.lookup_shortcut(
+            product.asin, pass_ttl_days=get_settings().shortcut_pass_ttl_days,
+        )
         if shortcut_hit is not None:
             outcome = _build_shortcut_outcome(product, shortcut_hit)
             if persist:
