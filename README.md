@@ -234,7 +234,7 @@ python3 -m cli.audit_asin_list --input failed.csv --filter-stage L3   # 只重�
 
 | 表 | 作用 | 主键 |
 |---|---|---|
-| `blacklist_brands` | 飞书 + TRO + USPTO 黑名单品牌 | `brand` |
+| `blacklist_brands` | 飞书权威黑名单品牌 + USPTO 命中辅助规则 | `brand` |
 | `walmart_category_map` | Amazon 类目 → Walmart PT 映射（置信度 / 证书 / 中国卖家可否） | `(amazon_category, walmart_product_type)` |
 | `walmart_pt_meta` | Walmart PT 全量元数据，L1 候选校验白名单 | `walmart_product_type` |
 | `phase0_blacklist_sellers` | 飞书 Phase 0 黑名单卖家（~1.2k）| `seller_id` |

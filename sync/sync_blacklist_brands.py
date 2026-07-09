@@ -1,13 +1,11 @@
 """F7 - 同步黑名单品牌 (飞书 TRO案件及商标黑名单).
 
-**两个子表都同步, 取并集**:
-  - 黑名单品牌 (jF8dOw, ~36k 行): 员工维护的精简黑名单, 3 列
+当前只同步现役权威黑名单子表:
+  - 黑名单品牌 (jF8dOw, ~41k 行): 员工维护的精简黑名单, 3 列
     表头: 品牌名 | 来源 | 入库日期
     ⭐ 这个是权威黑名单 (可能包含手工加的 Sony/Roland/Seiko 等)
-  - 品牌明细 (6IpYri, ~126k 行): TRO 商标明细 (多商标/品牌), 10 列
-    表头: 公司名称 | 品牌名 | Serial Number | 注册号 | 状态 |
-          Nice编号 | Nice类目(中) | Nice类目(英) | 商品/服务描述 | 入库日期
 
+旧的“品牌明细”子表 `6IpYri` 已废弃, 不再参与同步.
 落库到 blacklist_brands 表, brand 作为 primary key, 重复 ON CONFLICT DO UPDATE.
 """
 from __future__ import annotations
@@ -22,12 +20,9 @@ from ._common import SyncResult, batched, db_conn, finish_sync_run, start_sync_r
 
 log = logging.getLogger(__name__)
 
-# 两个 sheet 都同步
 SHEETS = [
     {"id": "jF8dOw", "last_col": "C", "source": "飞书-黑名单品牌", "kind": "simple",  # 精简黑名单 (3 列)
      "desc": "员工手工维护的权威黑名单"},
-    {"id": "6IpYri", "last_col": "J", "source": "飞书-品牌明细",   "kind": "detailed", # TRO 明细 (10 列)
-     "desc": "TRO 商标明细含 Serial/Nice 类目"},
 ]
 WIKI_TOKEN_FALLBACK = "UhZJw3EtsiFN9skbG0Ac24Dgn4b"
 
@@ -89,36 +84,10 @@ def _row_to_record_simple(row: list, source_label: str) -> dict | None:
     }
 
 
-def _row_to_record_detailed(row: list, source_label: str) -> dict | None:
-    """6IpYri 明细表行解析 (10 列)."""
-    if not row:
-        return None
-    padded = row + [None] * (10 - len(row))
-    company, brand, serial_no, reg_no, status, nice_code, nice_zh, nice_en, desc, imported_at = padded[:10]
-    brand = _norm_brand(brand)
-    if not brand or _is_garbage_brand(brand):
-        return None
-    return {
-        "brand": brand,
-        "source": source_label,
-        "raw": {
-            "company": company,
-            "serial_number": serial_no,
-            "registration_number": reg_no,
-            "status": status,
-            "nice_code": nice_code,
-            "nice_zh": nice_zh,
-            "nice_en": nice_en,
-            "desc": desc,
-            "imported_at_src": imported_at,
-        },
-    }
-
-
 def _row_to_record(row: list, kind: str, source_label: str) -> dict | None:
     if kind == "simple":
         return _row_to_record_simple(row, source_label)
-    return _row_to_record_detailed(row, source_label)
+    raise ValueError(f"unknown sheet kind: {kind}")
 
 
 def _upsert_batch(records: list[dict]) -> int:
@@ -152,7 +121,7 @@ def run() -> SyncResult:
         obj_token = _resolve_obj_token()
         log.info("spreadsheet obj_token=%s", obj_token[:12])
 
-        # 依次同步两个子表, brand 去重合并
+        # 依次同步现役子表, brand 去重合并
         records: list[dict] = []
         seen: set[str] = set()
 
