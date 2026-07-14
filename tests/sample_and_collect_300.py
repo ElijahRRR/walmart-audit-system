@@ -18,7 +18,7 @@ import httpx
 OUT = Path(__file__).parent / "out"
 GT_IN = OUT / "groundtruth_bl550.json"
 GT_OUT = OUT / "groundtruth_test300.json"
-DMIT_BASE = "http://64.186.239.11:8899"
+DMIT_BASE = "http://179.253.228.184:8899"
 
 
 def sample() -> list[dict]:

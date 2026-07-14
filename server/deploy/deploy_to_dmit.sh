@@ -2,7 +2,7 @@
 # 本机跑: 打包 server 代码 → scp 到 DMIT → ssh 远程 install
 set -euo pipefail
 
-DMIT_HOST="${DMIT_HOST:-root@64.186.239.11}"
+DMIT_HOST="${DMIT_HOST:-root@179.253.228.184}"
 SSH_KEY="${SSH_KEY:-/Users/nextderboy/代码项目文件/DIMT服务器密钥/id_rsa.pem}"
 PROJ_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )/../.." && pwd )"
 
@@ -34,8 +34,8 @@ ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$DMIT_HOST" \
 
 echo "[4/4] 本机健康检查"
 sleep 2
-if curl -sf -m 5 "http://64.186.239.11:8200/api/health" > /dev/null 2>&1; then
-    echo "✓ 公网访问正常: http://64.186.239.11:8200"
+if curl -sf -m 5 "http://179.253.228.184:8200/api/health" > /dev/null 2>&1; then
+    echo "✓ 公网访问正常: http://179.253.228.184:8200"
 else
     echo "⚠ 公网 8200 不可达, 可能是防火墙/iptables. 试 ssh 进 DMIT 跑:"
     echo "    iptables -I INPUT -p tcp --dport 8200 -j ACCEPT"
@@ -44,4 +44,4 @@ fi
 
 echo ""
 echo "本机 worker 启动 (连远程 server):"
-echo "  bash scripts/start_workers.sh 14 http://64.186.239.11:8200"
+echo "  bash scripts/start_workers.sh 14 http://179.253.228.184:8200"
