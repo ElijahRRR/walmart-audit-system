@@ -21,7 +21,14 @@ import re
 import time
 from typing import Any
 
-from openai import APIError, APITimeoutError, AsyncOpenAI, RateLimitError
+from openai import (
+    APIConnectionError,
+    APIError,
+    APITimeoutError,
+    AsyncOpenAI,
+    InternalServerError,
+    RateLimitError,
+)
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from config import get_settings
@@ -32,7 +39,8 @@ log = logging.getLogger(__name__)
 
 _SEM: asyncio.Semaphore | None = None
 _CLIENT: AsyncOpenAI | None = None
-_RETRIABLE = (RateLimitError, APITimeoutError)
+# 与 deepseek_client 对齐: 429 / 超时 / 5xx / 连接抖动都重试
+_RETRIABLE = (RateLimitError, APITimeoutError, InternalServerError, APIConnectionError)
 
 
 def _client() -> AsyncOpenAI:

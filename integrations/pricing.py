@@ -9,8 +9,14 @@
 """
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from typing import Any
+
+log = logging.getLogger(__name__)
+
+# 未知模型只告警一次, 避免刷屏 (每进程)
+_WARNED_UNKNOWN: set[str] = set()
 
 # CNY per 1K tokens
 MODEL_PRICING: dict[str, dict[str, float]] = {
@@ -51,8 +57,31 @@ VISION_TOKENS_PER_IMAGE: dict[str, int] = {
 }
 
 
+# 运行时注册的外部定价 (integrations/llm_routes.py 从 llm_routes.yaml 的 models.*.pricing 注入)
+_EXTERNAL_PRICING: dict[str, dict[str, float]] = {}
+
+
+def register_model_pricing(
+    model: str,
+    *,
+    in_1k: float,
+    out_1k: float,
+    in_cached_1k: float | None = None,
+    provider: str = "external",
+    tokens_per_image: int | None = None,
+) -> None:
+    """llm_routes.yaml 里登记的新模型单价注入这里, compute_cost/get_provider 自动用。"""
+    entry: dict[str, float | str] = {"in": in_1k, "out": out_1k, "provider": provider}
+    if in_cached_1k is not None:
+        entry["in_cached"] = in_cached_1k
+    _EXTERNAL_PRICING[model] = entry  # type: ignore[assignment]
+    if tokens_per_image:
+        VISION_TOKENS_PER_IMAGE[model] = tokens_per_image
+
+
 def get_provider(model: str) -> str:
-    return MODEL_PRICING.get(model, {}).get("provider", "unknown")
+    p = MODEL_PRICING.get(model) or _EXTERNAL_PRICING.get(model)
+    return (p or {}).get("provider", "unknown")  # type: ignore[return-value]
 
 
 def compute_cost(
@@ -68,6 +97,11 @@ def compute_cost(
     """
     p = MODEL_PRICING.get(model)
     if not p:
+        p = _EXTERNAL_PRICING.get(model)
+    if not p:
+        if model not in _WARNED_UNKNOWN:
+            _WARNED_UNKNOWN.add(model)
+            log.warning("pricing: 未知模型 %r 无单价, 成本记 0 — 请在 MODEL_PRICING 或 llm_routes.yaml 补价", model)
         return Decimal("0")
     in_rate = Decimal(str(p["in"]))
     out_rate = Decimal(str(p["out"]))
@@ -87,4 +121,5 @@ def estimate_vision_tokens(model: str, image_count: int) -> int:
 
 
 __all__ = ["MODEL_PRICING", "VISION_TOKENS_PER_IMAGE",
-           "compute_cost", "get_provider", "estimate_vision_tokens"]
+           "compute_cost", "get_provider", "estimate_vision_tokens",
+           "register_model_pricing"]

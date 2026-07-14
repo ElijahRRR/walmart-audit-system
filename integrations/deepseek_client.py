@@ -74,6 +74,9 @@ class _DynamicLimiter:
         self._size = initial
         self._min = min_size
         self._max = max_size
+        # 缩容欠账: asyncio.Semaphore 无法直接回收 permit, 缩容时先记账,
+        # 之后每次 release() 优先吞掉一个欠账 permit (不归还 sem), 并发自然收紧
+        self._deficit = 0
         # metrics 滚动窗口
         self._ok_count = 0
         self._429_count = 0
@@ -90,7 +93,11 @@ class _DynamicLimiter:
         await self._get_sem().acquire()
 
     def release(self):
-        if self._sem is not None:
+        if self._sem is None:
+            return
+        if self._deficit > 0:
+            self._deficit -= 1
+        else:
             self._sem.release()
 
     def record_ok(self, latency_ms: int):
@@ -137,20 +144,22 @@ class _DynamicLimiter:
         new_size = max(self._min, self._size - by)
         if new_size != self._size:
             log.info("DynamicLimiter shrink %d→%d (%s)", self._size, new_size, reason)
-            # asyncio.Semaphore 没法直接缩, 这里只更新 _size, 实际效果在下次 release 时通过自然释放
-            # 注: 为简化, 只更新 _size 不重建 sem (新 acquire 仍按旧 sem). 真正紧缩靠 _shrink_via_acquire.
+            # 记欠账: 接下来 (size-new_size) 次 release() 被吞掉不归还, 并发真实收紧
+            # (修 2026-07: 旧实现先改 _size 再算差值, 恒为 range(0) 空转, 缩容从未生效)
+            self._deficit += self._size - new_size
             self._size = new_size
-            # 主动 acquire 多余 permits (不归还), 实际收紧并发
-            for _ in range(self._size - new_size if self._size > new_size else 0):
-                pass
 
     def _grow_now(self, *, by: int, reason: str):
         new_size = min(self._max, self._size + by)
         if new_size != self._size:
             log.info("DynamicLimiter grow %d→%d (%s)", self._size, new_size, reason)
-            for _ in range(new_size - self._size):
+            delta = new_size - self._size
+            # 先抵掉缩容欠账, 剩余才真正 release 增加 permit
+            pay = min(self._deficit, delta)
+            self._deficit -= pay
+            for _ in range(delta - pay):
                 if self._sem is not None:
-                    self._sem.release()  # 增加 permit
+                    self._sem.release()
             self._size = new_size
 
 

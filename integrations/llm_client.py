@@ -18,7 +18,14 @@ import re
 import time
 from typing import Any
 
-from openai import APIError, APITimeoutError, AsyncOpenAI, RateLimitError
+from openai import (
+    APIConnectionError,
+    APIError,
+    APITimeoutError,
+    AsyncOpenAI,
+    InternalServerError,
+    RateLimitError,
+)
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from config import get_settings
@@ -30,6 +37,16 @@ log = logging.getLogger(__name__)
 # 全局 semaphore + 懒初始化 async client
 _SEM: asyncio.Semaphore | None = None
 _CLIENT: AsyncOpenAI | None = None
+
+
+def router_enabled() -> bool:
+    """LLM 路由体系总开关 (灰度用)。
+
+    读 os.getenv 而非 settings: canary worker 通过 launchctl 系统 env 注入
+    (系统 env 优先级高于 .env, settings 的 lru_cache 不影响这里)。
+    """
+    import os
+    return os.getenv("LLM_ROUTER_ENABLED", "").lower() in ("1", "true", "yes")
 
 
 def _client() -> AsyncOpenAI:
@@ -49,8 +66,9 @@ def _sem() -> asyncio.Semaphore:
     return _SEM
 
 
-# 可重试的异常
-_RETRIABLE = (RateLimitError, APITimeoutError)
+# 可重试的异常 (与 deepseek_client 对齐: 429 / 超时 / 5xx / 连接抖动;
+# 旧版漏了 5xx 和连接错, DashScope 偶发 500 会直接炸而不重试)
+_RETRIABLE = (RateLimitError, APITimeoutError, InternalServerError, APIConnectionError)
 
 
 def _json_from_text(text: str) -> dict[str, Any]:
