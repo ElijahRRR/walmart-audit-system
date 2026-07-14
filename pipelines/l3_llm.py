@@ -27,6 +27,7 @@ import yaml
 
 from config import ROOT
 from integrations import llm_client
+from integrations.llm_router import LLMAllNodesFailed
 from sync._common import db_conn
 
 from . import l3_policy_router
@@ -732,20 +733,24 @@ async def judge(product: ProductInfo, l1: L1Result, l2: L2Result) -> L3Result:
     system_prompt = get_system_prompt(l1.walmart_category, l1.walmart_product_type, text_hint)
     user_prompt = _build_user_prompt(product, l1, l2, routed_policies)
 
-    # === 混合路由: 高 offensive 语义风险产品启用 thinking 模式 (深度推理), 其他用快速非 thinking ===
-    # dashscope: turbo (默认) → plus (升级)
-    # deepseek: v4-flash thinking=False 默认 → v4-flash thinking=True 升级 (同模型, 开关 thinking)
+    # === 混合路由: 高 offensive 语义风险产品启用强判定 (深度推理), 其他用快速模式 ===
+    # 路由体系 (LLM_ROUTER_ENABLED=1): 只传 strong=True, 由 "l3.strong" 链决定
+    #   升级语义 (thinking / 换模型), 业务代码不再感知 provider 方言
+    # 旧路径: dashscope turbo→plus (换模型); deepseek v4-flash 开 thinking (同模型)
+    from .aggressive_offensive import should_use_strong_l3_model
+    _need_strong = should_use_strong_l3_model(l1, product)
+    _router_on = llm_client.router_enabled()
     _enable_thinking = False
     _model_override: str | None = None
-    from .aggressive_offensive import should_use_strong_l3_model
-    if should_use_strong_l3_model(l1, product):
+    if _need_strong and not _router_on:
         if _settings.llm_text_provider == "dashscope":
             _model_override = "qwen-plus"
         elif _settings.llm_text_provider == "deepseek":
             # v4-flash 同模型, 切换 thinking=True 走推理 (官方文档: extra_body={"thinking":{"type":"enabled"}})
             _enable_thinking = True
-        log.info("L3 混合路由: %s 走 %s thinking=%s (pt=%r, title=%r)",
-                 product.asin, _model_override or "(default)", _enable_thinking,
+    if _need_strong:
+        log.info("L3 混合路由: %s 走 %s thinking=%s strong=%s (pt=%r, title=%r)",
+                 product.asin, _model_override or "(default)", _enable_thinking, _router_on,
                  l1.walmart_product_type, (product.title or "")[:60])
 
     try:
@@ -755,12 +760,33 @@ async def judge(product: ProductInfo, l1: L1Result, l2: L2Result) -> L3Result:
                 {"role": "user", "content": user_prompt},
             ],
             model=_model_override,       # None = 用 settings.llm_text_model (deepseek-v4-flash)
-            max_tokens=4096 if _enable_thinking else 1500,  # thinking 占大头, 给 4K
+            # thinking 占大头, 给 4K (路由体系 strong 链节点可能开 thinking, 同样给 4K)
+            max_tokens=4096 if (_enable_thinking or (_need_strong and _router_on)) else 1500,
             temperature=0.1,
             cache=True,
-            thinking=_enable_thinking,   # deepseek 路径下生效
+            thinking=_enable_thinking,   # 旧路径 deepseek 生效; 路由体系下由链节点覆盖
             reasoning_effort="high",
-            purpose="l3",                # 路由到 DEEPSEEK_API_KEY_L3
+            purpose="l3",                # 路由到 "l3" 链 / DEEPSEEK_API_KEY_L3
+            strong=_need_strong,         # 路由体系下走 "l3.strong" 升级链
+        )
+    except LLMAllNodesFailed as e:
+        # 主+备全链失败 (已发 CRITICAL 告警) — 不放行: pending 待人工复核。
+        # 与旧的"pass 保守放行"不同: 故障窗口内漏审违规商品的代价远大于人工复核成本。
+        log.error("L3 全链失败 for %s: %s — verdict=pending 待人工复核", product.asin, e)
+        return L3Result(
+            verdict="pending",
+            reason_category="none",
+            reason_text="LLM 全链路故障, 待人工复核",
+            llm_confidence="low",
+            raw={"error": str(e)[:500]},
+            hits=[
+                RuleHit(
+                    stage="L3",
+                    rule_code="llm_chain_exhausted",
+                    penalty=0,
+                    detail={"error": str(e)[:500], "errors": e.errors[-5:]},
+                )
+            ],
         )
     except Exception as e:  # noqa: BLE001
         log.error("L3 LLM call failed for %s: %s", product.asin, e)

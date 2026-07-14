@@ -1,0 +1,120 @@
+# =====================================================================
+# LLM 路由配置 — 主模型 → 备用模型 → 自动故障切换
+#
+# 用法:
+#   1. 拷贝为 config/llm_routes.yaml (或 .env 里 LLM_ROUTES_FILE 指定路径)
+#   2. 校验:  python -m integrations.llm_routes --check
+#   3. 重启 worker 生效:  scripts/stop_workers.sh && scripts/start_workers.sh
+#      (不做热加载 — 故障时的实时切换由熔断器自动完成, 不依赖改配置)
+#
+# 没有此文件时: 从 .env 自动合成等价单节点链 (行为与旧版完全一致, 但无自动切换)。
+# 总开关: .env 里 LLM_ROUTER_ENABLED=1 (默认 0 = 完全走旧代码路径)。
+#
+# key 一律写"环境变量名", 明文 key 只放 .env — 本文件可安全提交 git。
+# =====================================================================
+version: 1
+
+# ---------------------------------------------------------------
+# 端点: 任意 OpenAI 兼容 API。
+# 端点 ≠ 模型家族 — 第三方聚合网关 (one-api / new-api / OpenRouter...) 上
+# 混着 deepseek / qwen / gpt / glm 各家模型是一等公民场景。
+# ---------------------------------------------------------------
+endpoints:
+  deepseek-official:
+    base_url: https://api.deepseek.com
+    keys:
+      - {env: DEEPSEEK_API_KEY}                      # 默认池 (任意 purpose 兜底)
+      - {env: DEEPSEEK_API_KEY_L1, purposes: [l1]}   # L1 专属 (余额隔离, 沿用既有语义)
+      - {env: DEEPSEEK_API_KEY_L3, purposes: [l3]}   # L3 专属
+    timeout_s: 600            # httpx 绝对上限 (路由层还会按 thinking/文本 收紧到 300/90s)
+    connect_timeout_s: 10
+    max_concurrency: 100
+    limiter: aimd             # 429/p95 驱动的动态并发 (官方端点限流敏感)
+
+  # 第三方聚合网关示例 (自建 one-api / new-api): 上面混着多家模型
+  oneapi-gw:
+    base_url: http://127.0.0.1:3000/v1
+    keys:
+      - {env: ONEAPI_KEY}
+    timeout_s: 300
+    max_concurrency: 60
+    limiter: fixed
+
+  dashscope:
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    keys:
+      - {env: DASHSCOPE_API_KEY}
+    max_concurrency: 100
+
+  volcengine:
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    keys:
+      - {env: VOLCENGINE_API_KEY}
+    max_concurrency: 100
+
+# ---------------------------------------------------------------
+# 模型注册表: canonical 名 = 计价/缓存/统计的唯一身份。
+# 内置已含现役模型 (deepseek-v4-flash / qwen-plus / qwen-turbo / qwen-vl-plus /
+# doubao-seed-1-6-flash-250615 / text-embedding-v3 等), 这里只需:
+#   - 登记新模型 (含单价, CNY/1K tokens)
+#   - 给内置模型补聚合网关上的异名 aliases
+# ★ 禁止未注册模型进链 — 异名必须显式声明, 不做正则猜测
+#   (开源 DeepSeek-V3/R1 快照 ≠ 官方 v4-flash, 并桶会串缓存/串计价)
+# ---------------------------------------------------------------
+models:
+  deepseek-v4-flash:
+    # 内置模型只补 aliases — 聚合网关上的命名映射到同一 canonical
+    aliases: [deepseek-chat, deepseek-reasoner, deepseek-ai/DeepSeek-V4-Flash]
+
+  glm-4.7:                    # 新模型完整登记示例
+    family: glm
+    modality: [text]
+    thinking_dialect: none
+    max_output_tokens: 8192
+    pricing: {in_1k: 0.0008, out_1k: 0.002}
+    aliases: [zai-org/GLM-4.7]
+    provider_label: oneapi
+
+# ---------------------------------------------------------------
+# 路由链: purpose → 有序节点 (首 = 主模型, 其余 = 备用)。
+# model 写"发请求的字面 ID" (端点上的真实名字), canonical 由 aliases 反查。
+# 节点可覆盖: thinking / max_tokens_cap / expensive
+# 链可带 deadline_s (整链总时间预算)。
+# 昂贵护栏: 备节点输入单价 > 主节点 5 倍必须显式 expensive: true;
+#           expensive 节点默认不参与自动切换 (仅显式 model= 强切时可用),
+#           再加 allow_auto: true 才允许进自动链 (明知昂贵仍要, 双重确认)。
+# ---------------------------------------------------------------
+chains:
+  l1:                          # L1 类目判定 (全灭兜底: DB-only 判定, 业务层保留)
+    - {endpoint: deepseek-official, model: deepseek-v4-flash}
+    - {endpoint: oneapi-gw,         model: deepseek-ai/DeepSeek-V4-Flash}  # 同模型异端点
+    - {endpoint: oneapi-gw,         model: glm-4.7}                        # 异构备胎
+
+  l3:                          # L3 语义审核 (全灭兜底: verdict=pending 人工复核)
+    - {endpoint: deepseek-official, model: deepseek-v4-flash}
+    - {endpoint: oneapi-gw,         model: deepseek-ai/DeepSeek-V4-Flash}
+    - {endpoint: dashscope,         model: qwen-plus}
+
+  l3.strong:                   # 高风险升级链 (业务只传 strong=True, 方言由注册表翻译)
+    - {endpoint: deepseek-official, model: deepseek-v4-flash, thinking: true}
+    - {endpoint: dashscope,         model: qwen-plus}
+
+  trademark:                   # 商标品牌判定 (外层 45s 超时 → 链预算 40s)
+    deadline_s: 40
+    nodes:
+      - {endpoint: deepseek-official, model: deepseek-v4-flash, max_tokens_cap: 256}
+      - {endpoint: oneapi-gw,         model: glm-4.7,           max_tokens_cap: 256}
+
+  vision:                      # L4 视觉 (全灭兜底: pass, 业务层保留)
+    - {endpoint: volcengine, model: doubao-seed-1-6-flash-250615}
+    # qwen-vl 单价 ≈ 豆包 50 倍, 但 L4 量小且是刻意选择的备胎 (volcengine 之前的默认视觉模型)
+    # → expensive 承认成本 + allow_auto 显式豁免进自动链
+    - {endpoint: dashscope,  model: qwen-vl-plus, expensive: true, allow_auto: true}
+
+  default:                     # 兜底链 (必须存在; chat_text / 未知 purpose 走它)
+    - {endpoint: deepseek-official, model: deepseek-v4-flash}
+    - {endpoint: dashscope,         model: qwen-plus}
+
+  default.strong:
+    - {endpoint: deepseek-official, model: deepseek-v4-flash, thinking: true}
+    - {endpoint: dashscope,         model: qwen-plus}

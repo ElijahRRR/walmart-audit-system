@@ -382,6 +382,11 @@ async def _audit_pipeline(
         if l3.verdict == "reject":
             outcome.verdict = "reject"
             outcome.stage_stopped_at = "L3"
+        elif l3.verdict == "pending":
+            # LLM 全链故障 (路由体系): 不放行不拒绝, 待人工复核。
+            # 历史短路只认 pass/reject, pending 不会被复用; L4 也不再跑 (verdict != pass)。
+            outcome.verdict = "pending"
+            outcome.stage_stopped_at = "L3"
 
     # L4 视觉审核 (只在 L3 通过后跑, 最贵的一层)
     if outcome.verdict == "pass" and run_l4:
