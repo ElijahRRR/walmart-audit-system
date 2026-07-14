@@ -54,6 +54,10 @@ CREATE TABLE IF NOT EXISTS jobs (
   pass_count      INTEGER DEFAULT 0,
   reject_count    INTEGER DEFAULT 0,
   error_msg       TEXT,                 -- 失败时的错误信息
+  auto_requeues   INTEGER NOT NULL DEFAULT 0,
+                                        -- 心跳超时/worker 中断的自动重新入队次数;
+                                        -- 达上限 (AUDIT_MAX_AUTO_REQUEUE, 默认 2) 后才标 failed 等人工
+                                        -- (上限防"毒切片"反复打挂 worker 的死循环)
 
   -- 时间戳
   created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,

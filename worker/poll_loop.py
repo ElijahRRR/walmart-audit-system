@@ -673,6 +673,17 @@ def main() -> int:
     )
 
     args = parser.parse_args()
+
+    # stop_workers.sh 用 kill (SIGTERM) 停 worker — 转成 KeyboardInterrupt,
+    # 让 main_loop 的 except KeyboardInterrupt 分支来得及上报 "worker interrupted",
+    # server 收到后把切片立即自动重新入队 (不用等 180s 心跳超时)
+    import signal
+
+    def _sigterm(signum, frame):  # noqa: ARG001
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _sigterm)
+
     try:
         asyncio.run(main_loop(
             args.server, args.worker_id,

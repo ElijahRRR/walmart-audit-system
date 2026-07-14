@@ -38,6 +38,11 @@ def init_db(db_path: Path | None = None) -> None:
     schema_sql = _SCHEMA_PATH.read_text(encoding="utf-8")
     with sqlite3.connect(_db_path, isolation_level=None) as conn:
         conn.executescript(schema_sql)
+        # 存量库迁移: CREATE TABLE IF NOT EXISTS 不会给旧表补列
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
+        if "auto_requeues" not in cols:
+            conn.execute("ALTER TABLE jobs ADD COLUMN auto_requeues INTEGER NOT NULL DEFAULT 0")
+            log.info("migrated: jobs.auto_requeues 列已补")
     log.info("SQLite initialized at %s", _db_path)
 
 
@@ -240,19 +245,24 @@ def mark_done(
     """
     with transaction(immediate=True) as conn:
         # 同时把 progress_done 设成 progress_total (任务完成 = 进度 100%)
-        # 接受 status='running' (正常路径) 和 status='failed' (复活: worker 心跳超时
-        # 被 reclaim 标 failed, 但实际还跑完了 → 接受晚到的好结果, 把 error_msg 清掉)
+        # 接受三种状态的晚到好结果 (复活, 省一次重跑):
+        #   running (正常路径, worker 匹配)
+        #   failed  (被 reclaim 判死但实际跑完了, worker 匹配)
+        #   pending + worker_id IS NULL (被自动重新入队但还没被新 worker 领走)
+        # 已被新 worker 领走 (running + 别的 worker_id) 的晚到结果拒绝 — 先到先得
         cur = conn.execute(
             """
             UPDATE jobs
             SET status='done', finished_at=?, result_file=?,
                 pass_count=?, reject_count=?, result_summary=?,
-                error_msg=NULL,
+                error_msg=NULL, worker_id=?,
                 progress_done = COALESCE(progress_total, asin_count, ?)
-            WHERE job_id=? AND worker_id=? AND status IN ('running', 'failed')
+            WHERE job_id=?
+              AND ((worker_id=? AND status IN ('running', 'failed'))
+                   OR (status='pending' AND worker_id IS NULL))
             """,
             (datetime.now(), result_file, pass_count, reject_count, summary,
-             pass_count + reject_count, job_id, worker_id),
+             worker_id, pass_count + reject_count, job_id, worker_id),
         )
         if cur.rowcount == 0:
             return None
@@ -260,17 +270,43 @@ def mark_done(
     return _row_to_dict(row)
 
 
-def mark_failed(job_id: int, worker_id: str, error: str) -> bool:
-    """返回 True 表示成功标 failed; False 表示任务已不是 running 状态."""
-    with transaction() as conn:
-        cur = conn.execute(
+def mark_failed(
+    job_id: int, worker_id: str, error: str,
+    *, allow_requeue: bool = False, max_auto_requeues: int = 2,
+) -> str:
+    """worker 上报失败。返回 'failed' / 'requeued' / 'noop' (任务已不是该 worker 的 running)。
+
+    allow_requeue=True (worker 中断类错误, 如 stop_workers 重启): auto_requeues
+    未达上限时直接重新入队, 其他 worker 立即接手, 不等心跳超时也不用人工点重试。
+    """
+    with transaction(immediate=True) as conn:
+        row = conn.execute(
+            "SELECT status, auto_requeues FROM jobs WHERE job_id=? AND worker_id=?",
+            (job_id, worker_id),
+        ).fetchone()
+        if row is None or row["status"] != "running":
+            return "noop"
+        if allow_requeue and row["auto_requeues"] < max_auto_requeues:
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status='pending', worker_id=NULL, claimed_at=NULL, finished_at=NULL,
+                    progress_done=0, last_heartbeat=NULL,
+                    auto_requeues = auto_requeues + 1,
+                    error_msg = 'auto requeued: ' || ?
+                WHERE job_id=?
+                """,
+                (error[:200], job_id),
+            )
+            return "requeued"
+        conn.execute(
             """
             UPDATE jobs SET status='failed', finished_at=?, error_msg=?
-            WHERE job_id=? AND worker_id=? AND status='running'
+            WHERE job_id=?
             """,
-            (datetime.now(), error[:2000], job_id, worker_id),
+            (datetime.now(), error[:2000], job_id),
         )
-        return cur.rowcount > 0
+        return "failed"
 
 
 def try_lock_parent_for_merge(parent_id: int) -> bool:
@@ -465,20 +501,40 @@ def get_logs_since(job_id: int, since_log_id: int = 0, limit: int = 200) -> list
 # 守护任务: 检查死 worker (心跳超时回收任务)
 # -----------------------------------------------------------------------------
 
-def reclaim_stale_jobs(timeout_seconds: int = 180) -> int:
-    """超过 timeout_seconds 没心跳的任务标 failed. 返回回收数."""
+def reclaim_stale_jobs(timeout_seconds: int = 180, *, max_auto_requeues: int = 2) -> tuple[int, int]:
+    """超过 timeout_seconds 没心跳的 running 任务回收.
+
+    自动重试 (2026-07): auto_requeues < max 的直接重新入队 (status='pending',
+    worker 重新领取, 无需人工点重试 — worker 被 kill/重启的标准恢复路径);
+    达上限的才标 failed 等人工 (防"毒切片"反复打挂 worker 的死循环)。
+
+    返回 (requeued 数, failed 数)。
+    """
     cutoff = datetime.now() - timedelta(seconds=timeout_seconds)
     with transaction(immediate=True) as conn:
         cur = conn.execute(
             """
             UPDATE jobs
-            SET status='failed', error_msg='worker heartbeat timeout',
+            SET status='pending', worker_id=NULL, claimed_at=NULL, finished_at=NULL,
+                progress_done=0, last_heartbeat=NULL,
+                auto_requeues = auto_requeues + 1,
+                error_msg = 'auto requeued: heartbeat timeout (第 ' || (auto_requeues + 1) || ' 次)'
+            WHERE status='running' AND last_heartbeat < ? AND auto_requeues < ?
+            """,
+            (cutoff, max_auto_requeues),
+        )
+        requeued = cur.rowcount
+        cur = conn.execute(
+            """
+            UPDATE jobs
+            SET status='failed',
+                error_msg='worker heartbeat timeout (自动重试已达上限, 需人工重试)',
                 finished_at=?
             WHERE status='running' AND last_heartbeat < ?
             """,
             (datetime.now(), cutoff),
         )
-        return cur.rowcount
+        return requeued, cur.rowcount
 
 
 def find_stuck_splitting_parents() -> list[int]:

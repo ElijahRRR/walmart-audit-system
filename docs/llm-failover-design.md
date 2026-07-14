@@ -113,6 +113,18 @@ scripts/stop_workers.sh && scripts/start_workers.sh
 - 飞书告警: `.env` 配 `LARK_ALERT_WEBHOOK` (自定义机器人); 空 = 不发。节流: 同类 600s 一条, CRITICAL 60s。分级: 熔断开 (WARN/ERROR) / key 不可用 (ERROR) / **全链失败 (CRITICAL)** / 网关模型绊线 (WARN) / 恢复 (INFO)
 - 绊线: 网关返回的 `response.model` 与节点 canonical 不符 → `served_model_mismatch` 事件 + 告警 (抓"网关偷换上游模型")
 
+### 切片自动重试 (重启不再需要人工点重试)
+
+worker 被停 (`stop_workers.sh` / 重启 / 崩溃) 时, 正在跑的切片自动恢复, 无需人工干预:
+
+- **优雅路径** (SIGTERM/SIGINT): worker 立即上报 "worker interrupted" → server **即时**把切片重新入队, 其他 worker 马上接手;
+- **硬死路径** (kill -9 / 断电): 心跳超时 180s 后 housekeeper 自动重新入队 (不再标 failed 等人工);
+- **上限**: 同一切片自动入队最多 `AUDIT_MAX_AUTO_REQUEUE`(默认 2) 次, 超过才标 failed 等人工点重试 — 防"毒切片"反复打挂 worker 的死循环;
+- **晚到结果复活**: 被入队但还没被新 worker 领走时, 老 worker 迟到的完整结果直接被接受 (省一次重跑); 已被新 worker 领走则拒收 (先到先得)。
+
+重跑成本有缓冲垫: 商品数据在 PG 缓存 (不重抓 DMIT)、LLM 判定命中 `llm_cache` (不重复花钱)、已出结论的 ASIN 走历史短路。
+因此改 `llm_routes.yaml` 后即使任务运行中直接重启 worker, 切片也会自动续跑, 只损失部分切片的重跑时间。
+
 ### 回滚
 
 `.env` 置 `LLM_ROUTER_ENABLED=0` + 重启 worker → 完全回到旧代码路径 (旧 client 原样保留)。

@@ -17,7 +17,7 @@
 - **主→备自动故障切换**（`LLM_ROUTER_ENABLED=1` 启用）任意 OpenAI 兼容端点（含第三方聚合网关混合模型）按 purpose 配路由链，熔断 + key 池轮换 + 自动回切 + 飞书告警；L3 全链失败出 `pending` 待人工复核而非放行。详见 [docs/llm-failover-design.md](docs/llm-failover-design.md)
 - **LLM 缓存** `llm_cache` 表按 `sha256(system+user+model)` 哈希复用，避免重复 token 消耗
 - **成本核算** `usage_log` 表逐次记录 provider / model / token / 美元；`cli/cost_report.py` 生成报表
-- **分布式队列** server (FastAPI + SQLite 任务表) 切片派发，worker 心跳 + 增量日志回传，支持按层 `--filter-stage` 重跑
+- **分布式队列** server (FastAPI + SQLite 任务表) 切片派发，worker 心跳 + 增量日志回传，支持按层 `--filter-stage` 重跑；worker 被停/心跳超时的切片**自动重新入队**（上限 `AUDIT_MAX_AUTO_REQUEUE=2` 次，超过才标 failed 等人工）
 - **飞书同步** 黑名单品牌 / 类目映射 / 每日违规商品 / 错误商品日报 / Walmart PT 元数据 全部从 Lark 拉取入库
 
 ---
