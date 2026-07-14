@@ -344,39 +344,18 @@ async def judge(
         log.info("L4 aggressive offensive mode ON for %s (pt=%r, cat=%r)",
                  product.asin, l1.walmart_product_type, l1.walmart_category)
 
-    # 组装多模态消息: system + user(text + images)
-    content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
-    for u in data_urls:
-        content.append({"type": "image_url", "image_url": {"url": u}})
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": content},
-    ]
-
-    # 按 provider 路由 (qwen / volcengine)
+    # 视觉调用统一走 llm_client.vision_json:
+    #   - 路由体系开启: "vision" 链 主→备 自动故障切换 (volcengine → qwen-vl 等)
+    #   - 旧路径: 按 settings.vision_provider 分支 (行为同历史; qwen 路径现在也记 usage + 重试)
     raw: dict[str, Any] = {}
     try:
-        if s.vision_provider == "volcengine":
-            from integrations import volcengine_client
-            raw = await volcengine_client.vision_json(
-                image_urls=data_urls,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                temperature=_L4_TEMPERATURE,
-                max_tokens=1024,
-            )
-        else:  # qwen (DashScope qwen-vl-plus)
-            from integrations.llm_client import _client, _sem, _json_from_text
-            async with _sem():
-                resp = await _client().chat.completions.create(
-                    model=s.llm_vision_model,
-                    messages=messages,
-                    temperature=_L4_TEMPERATURE,
-                    max_tokens=1024,
-                )
-            text = (resp.choices[0].message.content or "").strip()
-            raw = _json_from_text(text)
+        raw = await llm_client.vision_json(
+            data_urls,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            temperature=_L4_TEMPERATURE,
+            max_tokens=1024,
+        )
     except Exception as e:  # noqa: BLE001
         log.warning("L4 vision 调用失败 %s (provider=%s): %s - 回落 pass",
                     product.asin, s.vision_provider, e)

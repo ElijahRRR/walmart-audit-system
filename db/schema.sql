@@ -229,4 +229,49 @@ ALTER TABLE products ADD COLUMN IF NOT EXISTS seller_id   TEXT;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS seller_name TEXT;
 CREATE INDEX IF NOT EXISTS idx_products_seller ON products(seller_id) WHERE seller_id IS NOT NULL;
 
+-- ============================================================
+-- LLM 调用 usage 落库 (integrations/usage_logger.py 写)
+-- DDL 还账: 该表生产库早已存在但 schema.sql 一直缺定义
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS llm_usage (
+    id                  BIGSERIAL PRIMARY KEY,
+    asin                TEXT,
+    run_id              BIGINT,
+    stage               TEXT,                    -- L1 / L2 / L3 / L4 / probe
+    provider            TEXT,                    -- dashscope / deepseek / volcengine / external / unknown
+    model               TEXT,                    -- canonical 模型名 (路由体系下统一为规范名)
+    prompt_tokens       INT DEFAULT 0,
+    completion_tokens   INT DEFAULT 0,
+    total_tokens        INT DEFAULT 0,
+    image_count         INT DEFAULT 0,
+    cached_input_tokens INT DEFAULT 0,           -- 前缀缓存命中 tokens (deepseek 折扣价)
+    cost_cny            NUMERIC(12, 6) DEFAULT 0,
+    duration_ms         INT,
+    cached              BOOLEAN DEFAULT FALSE,   -- 整次命中本地 llm_cache (0 成本)
+    extra               JSONB,                   -- 路由体系: {route, node, endpoint, key_label, failover, strong, ...}
+    created_at          TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_created ON llm_usage(created_at);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_model   ON llm_usage(model);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_asin    ON llm_usage(asin);
+
+-- ============================================================
+-- LLM 路由事件 (integrations/llm_router.py 写)
+-- failover / 熔断开合 / key 不可用 / 全链失败 / 网关偷换模型绊线
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS llm_route_events (
+    event_id    BIGSERIAL PRIMARY KEY,
+    event       TEXT NOT NULL,       -- failover / breaker_open / breaker_close / key_unavailable
+                                     -- / chain_exhausted / served_model_mismatch / forced_canary
+    node_key    TEXT,                -- 'endpoint::model_id'
+    purpose     TEXT,                -- l1 / l3 / trademark / vision / default
+    detail      JSONB,
+    worker      TEXT,                -- 'hostname:pid' (10 worker 分布定位)
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_route_events_created ON llm_route_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_route_events_event   ON llm_route_events(event);
+
 COMMIT;

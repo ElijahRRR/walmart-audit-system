@@ -301,8 +301,10 @@ async def judge_title_brand(word: str, title: str, *, timeout: float = 45.0) -> 
         },
     ]
     try:
+        # purpose="trademark": 路由体系下走 "trademark" 链 (链自带 40s 总预算,
+        # 备用节点在外层 45s 超时内可达); 旧路径下 purpose 仅落 usage 标注, 行为不变
         res = await asyncio.wait_for(
-            llm_client.chat_json(messages, cache=True, max_tokens=256, purpose="trademark_brand_verdict"),
+            llm_client.chat_json(messages, cache=True, max_tokens=256, purpose="trademark"),
             timeout=timeout,
         )
     except asyncio.TimeoutError:

@@ -831,8 +831,10 @@ async def classify(product: ProductInfo, *, skip_llm: bool = False) -> L1Result:
     # LLM 综合判定
     # L1 类目判定默认 deepseek-v4-flash; 可用 L1_TEXT_MODEL env 覆盖
     # (历史曾用 qwen-plus, 现统一走 deepseek; 默认值同步改掉, 避免 env 缺失时静默回落 qwen)
+    # 路由体系 (LLM_ROUTER_ENABLED=1): 不再 pin 模型 — "l1" 链是唯一权威 (主→备自动切换),
+    #   L1_TEXT_MODEL 仅作为无 YAML 时 legacy 链合成的输入
     import os as _os
-    l1_model = _os.getenv("L1_TEXT_MODEL", "deepseek-v4-flash")
+    l1_model = None if llm_client.router_enabled() else _os.getenv("L1_TEXT_MODEL", "deepseek-v4-flash")
     _sys_prompt = L1_SYSTEM_PROMPT
     try:
         raw = await llm_client.chat_json(
@@ -845,7 +847,7 @@ async def classify(product: ProductInfo, *, skip_llm: bool = False) -> L1Result:
             # 500 太小会让 content JSON 被截断 (实测 9.4% 失败率)
             # 2048 给 thinking ~1500 + content ~500 留够空间
             max_tokens=2048,
-            purpose="l1",  # 路由到 DEEPSEEK_API_KEY_L1
+            purpose="l1",  # 路由到 "l1" 链 / DEEPSEEK_API_KEY_L1
         )
     except Exception as e:  # noqa: BLE001
         log.warning("L1 LLM failed for %s: %s - 回落 DB-only 判定", product.asin, e)

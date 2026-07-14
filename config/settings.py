@@ -55,6 +55,10 @@ class Settings:
     lark_wiki_category_map: str
     lark_sheet_violation: str
 
+    # --- LLM 路由与故障切换 ---
+    llm_routes_file: str            # 路由配置 YAML 路径 (不存在时从 env 合成 legacy 链)
+    lark_alert_webhook: str         # 飞书自定义机器人 webhook (空 = 不告警)
+
     # --- 运行参数 ---
     score_threshold: int
     llm_concurrency: int
@@ -110,6 +114,9 @@ def get_settings() -> Settings:
         deepseek_api_key_l3=_get("DEEPSEEK_API_KEY_L3", ""),          # L3 内容审核 (可空 → 用默认)
         deepseek_base_url=_get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),  # 官方主页推荐 (不带 /v1)
         deepseek_model=_get("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+        # LLM 路由与故障切换 (总开关 LLM_ROUTER_ENABLED 由 llm_client.router_enabled() 动态读, 不进冻结 settings)
+        llm_routes_file=_get("LLM_ROUTES_FILE", str(ROOT / "config" / "llm_routes.yaml")),
+        lark_alert_webhook=_get("LARK_ALERT_WEBHOOK", ""),
         lark_wiki_blacklist=_get("LARK_WIKI_BLACKLIST", "UhZJw3EtsiFN9skbG0Ac24Dgn4b"),
         lark_wiki_category_map=_get("LARK_WIKI_CATEGORY_MAP", "UKdZwr7JqiO6UckjSnPcwTCgnvd"),
         lark_sheet_violation=_get("LARK_SHEET_VIOLATION", "YlA1szPAAhW7CCtmG5hcp6vkndd"),

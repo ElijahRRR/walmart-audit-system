@@ -54,6 +54,8 @@ DB_PATH = DATA_ROOT / "jobs.db"
 
 MAX_UPLOAD_MB = int(os.getenv("AUDIT_MAX_UPLOAD_MB", "50"))
 RECLAIM_TIMEOUT = int(os.getenv("AUDIT_RECLAIM_TIMEOUT", "180"))   # 心跳超时秒
+# 心跳超时/worker 中断的切片自动重新入队上限; 超过才标 failed 等人工 (防毒切片死循环)
+MAX_AUTO_REQUEUE = int(os.getenv("AUDIT_MAX_AUTO_REQUEUE", "2"))
 HOUSEKEEP_INTERVAL = int(os.getenv("AUDIT_HOUSEKEEP_INTERVAL", "60"))
 RETENTION_DAYS = int(os.getenv("AUDIT_RETENTION_DAYS", "7"))       # 任务+文件保留天数
 CLEANUP_INTERVAL_SEC = int(os.getenv("AUDIT_CLEANUP_INTERVAL_SEC", "3600"))  # 1 小时
@@ -109,9 +111,14 @@ async def _housekeeper_loop():
     last_cleanup = 0.0
     while True:
         try:
-            n = await run_in_threadpool(db.reclaim_stale_jobs, RECLAIM_TIMEOUT)
-            if n > 0:
-                log.warning("reclaimed %d stale jobs (heartbeat timeout)", n)
+            requeued, failed = await run_in_threadpool(
+                db.reclaim_stale_jobs, RECLAIM_TIMEOUT, max_auto_requeues=MAX_AUTO_REQUEUE,
+            )
+            if requeued > 0:
+                log.warning("heartbeat 超时: %d 个切片已自动重新入队 (worker 会重新领取)", requeued)
+            if failed > 0:
+                log.warning("heartbeat 超时: %d 个切片自动重试已达上限 %d 次, 标 failed 等人工",
+                            failed, MAX_AUTO_REQUEUE)
 
             # 补触发卡死父任务的合并: 子任务已全终结但父任务还卡在 splitting
             # (心跳回收判 failed 不触发 merge / server 在 merge 前重启 → 否则永远卡死)
@@ -670,12 +677,25 @@ async def worker_failed(
     job_id: int = Form(...),
     error: str = Form(""),
 ) -> dict[str, Any]:
-    ok = await run_in_threadpool(db.mark_failed, job_id, worker_id, error)
-    if not ok:
+    # worker 中断类错误 (stop_workers 重启 / SIGINT) → 自动重新入队, 其他 worker 立即接手
+    interrupted = "interrupted" in error.lower()
+    outcome = await run_in_threadpool(
+        db.mark_failed, job_id, worker_id, error,
+        allow_requeue=interrupted, max_auto_requeues=MAX_AUTO_REQUEUE,
+    )
+    if outcome == "noop":
         # 任务已不是 running (被取消/已 done/已 failed) - 不再操作
         log.warning("worker %s reported job #%d failed but it's not in 'running' state",
                     worker_id, job_id)
         return {"ok": False, "reason": "job not in running state"}
+    if outcome == "requeued":
+        await run_in_threadpool(
+            db.add_log, job_id,
+            message=f"Worker {worker_id} 中断 ({error[:120]}), 切片已自动重新入队",
+            level="warn", worker_id=worker_id,
+        )
+        # 重新入队 = 子任务回 pending, 不触发父任务合并检查
+        return {"ok": True, "requeued": True}
     await run_in_threadpool(
         db.add_log, job_id,
         message=f"Worker {worker_id} 失败: {error[:200]}",
