@@ -2,7 +2,7 @@
 """Check if any jobs are running on the review server."""
 import urllib.request, json, sys
 
-SERVER = "http://179.253.228.184:8200"
+SERVER = "http://47.108.92.213/audit"
 try:
     req = urllib.request.Request(f"{SERVER}/api/jobs?limit=20")
     data = json.loads(urllib.request.urlopen(req, timeout=15).read())

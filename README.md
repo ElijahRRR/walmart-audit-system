@@ -187,30 +187,30 @@ python3 -m sync.audit_from_lark_sheet --limit 10 --dry-run             # 只看�
 
 ### 分布式队列（生产部署）
 
-**实际拓扑**：server 跑在远程 VPS，worker 跑在开发机本地（本机有完整 PG 数据库 + 配置）。
+**实际拓扑**：server 跑在阿里云，worker 跑在开发机本地（本机有完整 PG 数据库 + 配置）。
 
 ```
-┌──────────────── 开发机 (macOS) ─────────────────┐    ┌─── VPS 179.253.228.184 ───┐
+┌──────────────── 开发机 (macOS) ─────────────────┐    ┌── 阿里云 47.108.92.213 ──┐
 │ 10× worker (worker.poll_loop)                  │    │ FastAPI server :8200      │
 │   → PostgreSQL walmart_audit (本地)            │◄──►│ SQLite jobs.db            │
 │   → PostgreSQL uspto (本地, L2 R5 商标)        │    │ HTMX Web 控制台           │
-│   → DMIT API (远程)                            │    │ DMIT scraper :8899 同机   │
+│   → Amazon API (/amazon)                       │    │ Amazon scraper :8899 同机 │
 └────────────────────────────────────────────────┘    └────────────────────────────┘
                 worker 拉 task / 回报结果 / 推日志
 ```
 
 ```bash
-# 1. server: 一键部署到 VPS (打包 + scp + systemd 启动)
+# 1. server: 一键部署到阿里云 (打包 + scp + systemd 启动)
 bash server/deploy/deploy_to_dmit.sh                 # 改代码后必跑
 
 # 2. worker: 本机起 10 进程 (改完 pipelines/worker/cli 代码后必跑)
 bash scripts/stop_workers.sh
 bash scripts/start_workers.sh                          # 不传参数 = 默认 10 个, 连本地 server
-# 连远程: bash scripts/start_workers.sh 10 http://179.253.228.184:8200
-curl -s http://179.253.228.184:8200/api/workers/online  # 期望 {"online":10}
+# 连远程: bash scripts/start_workers.sh 10 http://47.108.92.213/audit
+curl -s http://47.108.92.213/audit/api/workers/online  # 期望 {"online":10}
 
 # 3. Web 控制台:
-#    http://179.253.228.184:8200/  上传 CSV → 进度追踪 → 下载 XLSX
+#    http://47.108.92.213/audit/  上传 CSV → 进度追踪 → 下载 XLSX
 #    上传时可勾选 ♻️ 重新审核 跳过历史 reject 短路
 ```
 
@@ -328,7 +328,7 @@ python3 -m cli.audit_asin_list --input failed.csv --filter-stage L3   # 只重�
 最近的重要变更（按时间倒序）：
 
 - **chore(worker)** 默认 worker 数从 14 降到 10（减本机负载，总并发 500 ASIN 仍够用）；同步改 README / start_workers.sh / poll_loop.py 注释 / scheduled-task SKILL.md
-- **docs/deploy** README 补"分布式队列"实际拓扑（server@VPS + worker@本机），生产环境 server 已部署到 179.253.228.184:8200
+- **docs/deploy** README 补"分布式队列"实际拓扑（server@阿里云 + worker@本机），生产环境通过 `47.108.92.213/audit` 访问
 - **feat(shortcut)** 新增历史 reject 短路：`pipelines/history_shortcut.py` + `orchestrator.audit_one(force_rerun=...)` + 前端 checkbox + CLI `--force-rerun`。命中老 reject 时直接出 verdict=reject stage='SHORTCUT'，零 LLM 调用；新 audit_run 仍写库便于审计
 - **revert(scripts)** 移除 phase0 launchd plist，回退 `install_sync_cron.sh`：phase0 同步统一由 Claude Code `scheduled-tasks` 调度（`sync-blacklist-brands-daily` 已合并 brand + phase0），避免双跑
 - **feat(phase0)** 新增飞书黑名单过滤：`pipelines/phase0_lark_blacklist.py` + `sync/sync_phase0_blacklist.py` + 3 张新表（sellers/asins/amazon_cats）；`ProductInfo` / DMIT converter 加 `seller_id` / `seller_name` 字段并回填 50.6 万历史数据

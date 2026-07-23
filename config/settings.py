@@ -23,7 +23,7 @@ class Settings:
     database_url: str
     uspto_database_url: str
 
-    # --- DMIT ---
+    # --- Amazon scraper（保留 dmit_* 字段名兼容现有调用） ---
     dmit_base_url: str
     dmit_api_key: str
 
@@ -91,7 +91,7 @@ def get_settings() -> Settings:
     return Settings(
         database_url=_get("DATABASE_URL", "postgresql://nextderboy@localhost:5432/walmart_audit"),
         uspto_database_url=_get("USPTO_DATABASE_URL", "postgresql://nextderboy@localhost:5432/uspto"),
-        dmit_base_url=_get("DMIT_BASE_URL", "http://179.253.228.184:8899"),
+        dmit_base_url=_get("DMIT_BASE_URL", "http://47.108.92.213/amazon"),
         dmit_api_key=_get("DMIT_API_KEY"),
         dashscope_api_key=_get("DASHSCOPE_API_KEY"),
         dashscope_base_url=_get("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),

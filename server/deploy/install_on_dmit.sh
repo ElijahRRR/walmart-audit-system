@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 在 DMIT 上跑: 解压代码 + 装依赖 + 写 systemd unit + 启动服务
-# 由 deploy_to_dmit.sh 通过 ssh 调用, 也可在 DMIT 上手动 bash 执行
+# 在阿里云上跑: 解压代码 + 装依赖 + 写 systemd unit + 启动服务
+# 由 deploy_to_dmit.sh 通过 ssh 调用，也可在服务器上手动 bash 执行
 set -euo pipefail
 
 INSTALL_DIR=/opt/audit-server
@@ -38,10 +38,10 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/opt/audit-server
-ExecStart=/opt/audit-server/.venv/bin/uvicorn server.main:app --host 0.0.0.0 --port 8200
+ExecStart=/opt/audit-server/.venv/bin/uvicorn server.main:app --host 127.0.0.1 --port 8200
 Restart=always
 RestartSec=5
-# DMIT 内存只 1.9GB, 给本服务硬上限 200M, 防 bug 撑爆系统影响其他服务
+# 给本服务设置 200M 内存上限，防止异常占用影响同机其他服务
 MemoryMax=200M
 Environment=PYTHONUNBUFFERED=1
 Environment=AUDIT_SERVER_DATA=/opt/audit-server/data
@@ -68,7 +68,7 @@ curl -sf http://127.0.0.1:8200/api/health && echo "" || echo "❌ 健康检查�
 echo ""
 echo "✓ 部署完成."
 echo "  内部访问: http://127.0.0.1:8200"
-echo "  公网访问: http://179.253.228.184:8200  (前提: 防火墙开放 8200)"
+echo "  公网访问: http://47.108.92.213/audit  (经 nginx 反代)"
 echo "  日志:    tail -f /var/log/audit-server.log"
 echo "  停服:    systemctl stop audit-server"
 echo "  重启:    systemctl restart audit-server"

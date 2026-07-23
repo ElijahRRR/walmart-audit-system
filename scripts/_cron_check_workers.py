@@ -4,7 +4,7 @@ import urllib.request, json, time, sys
 
 time.sleep(6)
 try:
-    data = json.loads(urllib.request.urlopen('http://179.253.228.184:8200/api/workers/online', timeout=10).read())
+    data = json.loads(urllib.request.urlopen('http://47.108.92.213/audit/api/workers/online', timeout=10).read())
     print(f'online_workers: {data}')
     if data.get('online') == 10:
         print('✓ 10/10 workers online')

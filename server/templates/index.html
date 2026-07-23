@@ -425,6 +425,12 @@
 //==================================================================
 // 全局状态
 //==================================================================
+const APP_BASE = window.location.pathname.replace(/\/+$/, "");
+const API_BASE = `${APP_BASE}/api`;
+function apiUrl(path) {
+  return `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
 const state = {
   jobs: [],            // 父任务列表
   expanded: new Set(), // 展开的父任务 id
@@ -521,7 +527,7 @@ document.getElementById("submit-form").addEventListener("submit", async e => {
   if (!fd.get("file") || !fd.get("file").name) { alert("请先选择文件"); return; }
   btn.disabled = true; btn.textContent = "上传中…";
   try {
-    const r = await fetch("/api/jobs", { method: "POST", body: fd });
+    const r = await fetch(apiUrl("/jobs"), { method: "POST", body: fd });
     const data = await r.json();
     if (!r.ok) {
       alert(`提交失败: ${data.error || r.statusText}`);
@@ -590,7 +596,7 @@ document.getElementById("tm-submit-form").addEventListener("submit", async e => 
   if (!fd.get("file") || !fd.get("file").name) { alert("请先选择文件"); return; }
   btn.disabled = true; btn.textContent = "上传中…";
   try {
-    const r = await fetch("/api/jobs/trademark", { method: "POST", body: fd });
+    const r = await fetch(apiUrl("/jobs/trademark"), { method: "POST", body: fd });
     const data = await r.json();
     if (!r.ok) {
       alert(`提交失败: ${data.error || r.statusText}`);
@@ -618,7 +624,7 @@ document.getElementById("tm-submit-form").addEventListener("submit", async e => 
 //==================================================================
 async function refreshJobs() {
   try {
-    const r = await fetch("/api/jobs?limit=100");
+    const r = await fetch(apiUrl("/jobs?limit=100"));
     const data = await r.json();
     state.jobs = data.items || [];
     renderJobs();
@@ -630,7 +636,7 @@ async function refreshJobs() {
 async function refreshWorkers() {
   try {
     // 用 server 端判断, 前端不解析时间 (避免时区 bug)
-    const r = await fetch("/api/workers/online");
+    const r = await fetch(apiUrl("/workers/online"));
     const data = await r.json();
     const n = data.online || 0;
     document.getElementById("worker-count").textContent = `${n} 个 worker 在线`;
@@ -718,9 +724,9 @@ function bindJobCardEvents(root) {
       btn.style.opacity = "0.4";
       try {
         if (isRunning) {
-          await fetch(`/api/jobs/${id}/cancel`, { method: "POST" });
+          await fetch(apiUrl(`/jobs/${id}/cancel`), { method: "POST" });
         }
-        const r = await fetch(`/api/jobs/${id}`, { method: "DELETE" });
+        const r = await fetch(apiUrl(`/jobs/${id}`), { method: "DELETE" });
         if (!r.ok) {
           const data = await r.json().catch(() => ({}));
           alert(`删除失败: ${data.error || r.statusText}`);
@@ -778,7 +784,7 @@ function jobCardHtml(j) {
 
 async function loadSubs(parentId) {
   try {
-    const r = await fetch(`/api/jobs/${parentId}`);
+    const r = await fetch(apiUrl(`/jobs/${parentId}`));
     const data = await r.json();
     const subs = data.subs || [];
     const parent = data.job || {};
@@ -872,7 +878,7 @@ function patchSubFooter(root, parentId, parent) {
   // 取消有 cancelled 状态的子任务时也算"待重试"
   const buttons = [];
   if (downloadable) buttons.push(
-    `<a class="btn btn-primary btn-icon" href="/api/jobs/${parentId}/download">📥 下载合并结果 (XLSX)</a>`
+    `<a class="btn btn-primary btn-icon" href="${apiUrl(`/jobs/${parentId}/download`)}">📥 下载合并结果 (XLSX)</a>`
   );
   if (hasFailed) buttons.push(
     `<button class="btn btn-icon" data-retry-all="${parentId}" style="border-color:#fbbf24; color:#92400e;">↻ 重试所有失败 (${parent.sub_failed})</button>`
@@ -954,7 +960,7 @@ function subRowHtml(s) {
 async function retrySubjob(subId, btn) {
   if (btn) { btn.disabled = true; btn.textContent = "重试中…"; }
   try {
-    const r = await fetch(`/api/jobs/${subId}/retry`, { method: "POST" });
+    const r = await fetch(apiUrl(`/jobs/${subId}/retry`), { method: "POST" });
     if (!r.ok) {
       const data = await r.json().catch(() => ({}));
       alert(`重试失败: ${data.error || r.statusText}`);
@@ -974,7 +980,7 @@ async function retrySubjob(subId, btn) {
 async function retryFailedAll(parentId, btn) {
   if (btn) { btn.disabled = true; btn.textContent = "重试中…"; }
   try {
-    const r = await fetch(`/api/jobs/${parentId}/retry-failed`, { method: "POST" });
+    const r = await fetch(apiUrl(`/jobs/${parentId}/retry-failed`), { method: "POST" });
     const data = await r.json();
     if (!r.ok) { alert(`重试失败: ${data.error || r.statusText}`); return; }
     await refreshJobs();
@@ -987,7 +993,7 @@ async function retryFailedAll(parentId, btn) {
 
 async function cancelJob(id) {
   if (!confirm(`取消任务 #${id} ?`)) return;
-  await fetch(`/api/jobs/${id}/cancel`, { method: "POST" });
+  await fetch(apiUrl(`/jobs/${id}/cancel`), { method: "POST" });
   await refreshJobs();
 }
 
@@ -1029,11 +1035,11 @@ function closeDrawer() {
 async function refreshDrawerStats() {
   if (!state.drawer) return;
   try {
-    const r = await fetch(`/api/jobs/${state.drawer}`);
+    const r = await fetch(apiUrl(`/jobs/${state.drawer}`));
     const data = await r.json();
     const sub = data.job || {};
     const parent = sub.parent_id
-      ? await (await fetch(`/api/jobs/${sub.parent_id}`)).json()
+      ? await (await fetch(apiUrl(`/jobs/${sub.parent_id}`))).json()
       : null;
     renderDrawerStats(sub, parent ? parent.job : null);
   } catch (err) { console.error(err); }
@@ -1056,7 +1062,7 @@ function renderDrawerStats(sub, parent) {
   // 下载链接放在日志工具栏右侧
   const downloadEl = document.getElementById("drawer-download");
   if (sub.status === "done" && parent && parent.result_file) {
-    downloadEl.innerHTML = `<a class="download-link" href="/api/jobs/${parent.job_id}/download">📥 下载合并结果</a>`;
+    downloadEl.innerHTML = `<a class="download-link" href="${apiUrl(`/jobs/${parent.job_id}/download`)}">📥 下载合并结果</a>`;
   } else {
     downloadEl.innerHTML = "";
   }
@@ -1137,7 +1143,7 @@ function renderDrawerStats(sub, parent) {
 
 async function appendNewLogs(subId) {
   try {
-    const r = await fetch(`/api/jobs/${subId}/logs?since=${state.drawerLastLogId}`);
+    const r = await fetch(apiUrl(`/jobs/${subId}/logs?since=${state.drawerLastLogId}`));
     const data = await r.json();
     const logs = data.items || [];
     if (!logs.length) return;

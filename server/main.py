@@ -10,7 +10,7 @@
 仅 SQLite 任务队列 + 文件上传/下载.
 
 启动:
-  uvicorn server.main:app --host 0.0.0.0 --port 8200
+  uvicorn server.main:app --host 127.0.0.1 --port 8200
 """
 from __future__ import annotations
 
