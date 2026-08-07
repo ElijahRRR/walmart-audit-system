@@ -1,0 +1,85 @@
+version: 1
+
+endpoints:
+  kiro-claude:
+    base_url: https://zz.211b.site/v1
+    keys:
+      - {env: KIRO_CLAUDE_API_KEY}
+    timeout_s: 300
+    connect_timeout_s: 10
+    max_concurrency: 60
+    limiter: fixed
+
+  deepseek-official:
+    base_url: https://api.deepseek.com
+    keys:
+      - {env: DEEPSEEK_API_KEY}
+      - {env: DEEPSEEK_API_KEY_L1, purposes: [l1]}
+      - {env: DEEPSEEK_API_KEY_L3, purposes: [l3]}
+    timeout_s: 600
+    connect_timeout_s: 10
+    max_concurrency: 100
+    limiter: aimd
+
+  dashscope:
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    keys:
+      - {env: DASHSCOPE_API_KEY}
+    max_concurrency: 100
+
+  volcengine:
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    keys:
+      - {env: VOLCENGINE_API_KEY}
+    max_concurrency: 100
+
+models:
+  claude-sonnet-5:
+    family: claude
+    modality: [text]
+    supports_json_object: false
+    supports_thinking: false
+    thinking_dialect: none
+    max_output_tokens: 8192
+    pricing:
+      in_1k: 0.000972
+      out_1k: 0.00486
+    aliases:
+      - claude-sonnet-5
+    provider_label: kiro-claude
+
+  deepseek-v4-flash:
+    aliases:
+      - deepseek-chat
+      - deepseek-reasoner
+
+chains:
+  l1:
+    - {endpoint: kiro-claude, model: claude-sonnet-5}
+    - {endpoint: deepseek-official, model: deepseek-v4-flash}
+
+  l3:
+    - {endpoint: kiro-claude, model: claude-sonnet-5}
+    - {endpoint: deepseek-official, model: deepseek-v4-flash}
+
+  l3.strong:
+    - {endpoint: kiro-claude, model: claude-sonnet-5}
+    - {endpoint: deepseek-official, model: deepseek-v4-flash, thinking: true}
+
+  trademark:
+    deadline_s: 40
+    nodes:
+      - {endpoint: kiro-claude, model: claude-sonnet-5, max_tokens_cap: 256}
+      - {endpoint: deepseek-official, model: deepseek-v4-flash, max_tokens_cap: 256}
+
+  vision:
+    - {endpoint: volcengine, model: doubao-seed-1-6-flash-250615}
+    - {endpoint: dashscope, model: qwen-vl-plus, expensive: true, allow_auto: true}
+
+  default:
+    - {endpoint: kiro-claude, model: claude-sonnet-5}
+    - {endpoint: deepseek-official, model: deepseek-v4-flash}
+
+  default.strong:
+    - {endpoint: kiro-claude, model: claude-sonnet-5}
+    - {endpoint: deepseek-official, model: deepseek-v4-flash, thinking: true}
