@@ -14,7 +14,7 @@
 - **L3 多任务语义判定** 文本模型由 `LLM_TEXT_PROVIDER` 决定（`dashscope`→默认 `qwen-turbo` / `deepseek`→默认 `deepseek-v4-flash`），单进程 `Semaphore(LLM_CONCURRENCY=100)`，3 次指数退避重试，全 37 条政策
 - **L4 视觉审核** 默认 Volcengine `doubao-seed-1-6-flash`（多图 + 中文优势），可降级 qwen-vl-plus；每商品最多 5 张。**线上 worker 默认不开 L4**（`run_l4=False`），需 `RUN_L4=true` / `--run-l4` 开启；单机 CLI 与 `orchestrator.audit_one` 默认开启
 - **多 Provider 路由** 文本：DashScope / DeepSeek；视觉：Volcengine / Qwen；按使用场景分配独立 key
-- **主→备自动故障切换**（`LLM_ROUTER_ENABLED=1` 启用）任意 OpenAI 兼容端点（含第三方聚合网关混合模型）按 purpose 配路由链，熔断 + key 池轮换 + 自动回切 + 飞书告警；L3 全链失败出 `pending` 待人工复核而非放行。详见 [docs/llm-failover-design.md](docs/llm-failover-design.md)
+- **主→备自动故障切换** 任意 OpenAI 兼容端点（含第三方聚合网关混合模型）按 purpose 配路由链，熔断 + key 池轮换 + 自动回切 + 飞书告警；L3 全链失败出 `pending` 待人工复核而非放行。详见 [docs/llm-failover-design.md](docs/llm-failover-design.md)
 - **LLM 缓存** `llm_cache` 表按 `sha256(system+user+model)` 哈希复用，避免重复 token 消耗
 - **成本核算** `usage_log` 表逐次记录 provider / model / token / 美元；`cli/cost_report.py` 生成报表
 - **分布式队列** server (FastAPI + SQLite 任务表) 切片派发，worker 心跳 + 增量日志回传，支持按层 `--filter-stage` 重跑；worker 被停/心跳超时的切片**自动重新入队**（上限 `AUDIT_MAX_AUTO_REQUEUE=2` 次，超过才标 failed 等人工）
@@ -227,7 +227,7 @@ curl -s http://47.108.92.213/audit/api/workers/online  # 期望 {"online":10}
 cp config/llm_routes.yaml.example config/llm_routes.yaml
 python -m integrations.llm_routes --check     # 校验 (坏配置运行时被拒并回落 legacy)
 
-# .env: LLM_ROUTER_ENABLED=1 + (可选) LARK_ALERT_WEBHOOK=<飞书机器人>
+# .env: (可选) LARK_ALERT_WEBHOOK=<飞书机器人> — 熔断/全链失败告警; 留空则只落事件表
 scripts/stop_workers.sh && scripts/start_workers.sh   # 重启生效 (不做热加载)
 
 python -m cli.router_report                   # 节点用量 / failover 占比 / 熔断事件

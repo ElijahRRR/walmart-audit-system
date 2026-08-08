@@ -828,13 +828,8 @@ async def classify(product: ProductInfo, *, skip_llm: bool = False) -> L1Result:
     if skip_llm:
         return _apply_spec_override(_classify_db_only(product, candidates, seed_reason))
 
-    # LLM 综合判定
-    # L1 类目判定默认 deepseek-v4-flash; 可用 L1_TEXT_MODEL env 覆盖
-    # (历史曾用 qwen-plus, 现统一走 deepseek; 默认值同步改掉, 避免 env 缺失时静默回落 qwen)
-    # 路由体系 (LLM_ROUTER_ENABLED=1): 不再 pin 模型 — "l1" 链是唯一权威 (主→备自动切换),
-    #   L1_TEXT_MODEL 仅作为无 YAML 时 legacy 链合成的输入
-    import os as _os
-    l1_model = None if llm_client.router_enabled() else _os.getenv("L1_TEXT_MODEL", "deepseek-v4-flash")
+    # LLM 综合判定 — 模型由 "l1" 链决定 (config/llm_routes.yaml, 主→备自动切换)
+    # 不在这里 pin 模型: 链是唯一权威; 无 yaml 时链从 L1_TEXT_MODEL 等 env 合成
     _sys_prompt = L1_SYSTEM_PROMPT
     try:
         raw = await llm_client.chat_json(
@@ -842,12 +837,11 @@ async def classify(product: ProductInfo, *, skip_llm: bool = False) -> L1Result:
                 {"role": "system", "content": _sys_prompt},
                 {"role": "user", "content": _build_l1_user_prompt(product, candidates)},
             ],
-            model=l1_model,
-            # deepseek-v4-flash 是 reasoning 模型, thinking 占大头
+            # reasoning 模型的 thinking 占输出大头
             # 500 太小会让 content JSON 被截断 (实测 9.4% 失败率)
             # 2048 给 thinking ~1500 + content ~500 留够空间
             max_tokens=2048,
-            purpose="l1",  # 路由到 "l1" 链 / DEEPSEEK_API_KEY_L1
+            purpose="l1",  # → "l1" 链 + DEEPSEEK_API_KEY_L1 等 purpose 绑定 key
         )
     except Exception as e:  # noqa: BLE001
         log.warning("L1 LLM failed for %s: %s - 回落 DB-only 判定", product.asin, e)

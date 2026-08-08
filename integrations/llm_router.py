@@ -379,6 +379,8 @@ def _key_available(endpoint: str, key_label: str) -> bool:
 
 
 class _FixedLimiter:
+    """固定并发上限 (endpoint.limiter='fixed')。"""
+
     def __init__(self, size: int):
         self._sem = asyncio.Semaphore(size)
 
@@ -398,6 +400,104 @@ class _FixedLimiter:
         pass
 
 
+class _DynamicLimiter:
+    """AIMD 动态并发 (endpoint.limiter='aimd') — 官方端点限流敏感时用。
+
+    Additive Increase / Multiplicative Decrease:
+      - 429 立即缩; 错误率 >5% 或 p95 >60s 缩
+      - 零错误且 p95 <30s 缓增
+    每进程独立监控 (跨进程共享成本高, 不做)。
+    """
+
+    def __init__(self, *, initial: int = 50, min_size: int = 5, max_size: int = 100):
+        self._sem: asyncio.Semaphore | None = None  # lazy init
+        self._size = initial
+        self._min = min_size
+        self._max = max_size
+        # 缩容欠账: asyncio.Semaphore 无法直接回收 permit, 缩容时先记账,
+        # 之后每次 release() 优先吞掉一个欠账 permit (不归还 sem), 并发自然收紧
+        self._deficit = 0
+        # metrics 滚动窗口
+        self._ok_count = 0
+        self._429_count = 0
+        self._timeout_count = 0
+        self._latencies: list[int] = []
+        self._adjust_check = 30  # 每 30 个请求 review 一次
+
+    def _get_sem(self) -> asyncio.Semaphore:
+        if self._sem is None:
+            self._sem = asyncio.Semaphore(self._size)
+        return self._sem
+
+    async def acquire(self):
+        await self._get_sem().acquire()
+
+    def release(self):
+        if self._sem is None:
+            return
+        if self._deficit > 0:
+            self._deficit -= 1
+        else:
+            self._sem.release()
+
+    def record_ok(self, latency_ms: int):
+        self._ok_count += 1
+        self._latencies.append(latency_ms)
+        if len(self._latencies) > 100:
+            self._latencies = self._latencies[-100:]
+        self._maybe_adjust()
+
+    def record_429(self):
+        self._429_count += 1
+        self._shrink_now(by=5, reason="429")   # 429 立即缩, 不等窗口
+
+    def record_timeout(self):
+        self._timeout_count += 1
+        self._maybe_adjust()
+
+    def _p95(self) -> int:
+        if len(self._latencies) < 10:
+            return 0
+        s = sorted(self._latencies)
+        return s[int(len(s) * 0.95)]
+
+    def _maybe_adjust(self):
+        total = self._ok_count + self._429_count + self._timeout_count
+        if total < self._adjust_check:
+            return
+        bad_rate = (self._429_count + self._timeout_count) / total
+        p95 = self._p95()
+        if bad_rate > 0.05 or p95 > 60000:
+            self._shrink_now(by=5, reason=f"bad_rate={bad_rate:.2%} p95={p95}ms")
+        elif self._429_count == 0 and self._timeout_count == 0 and 0 < p95 < 30000:
+            if self._size < self._max:
+                self._grow_now(by=2, reason=f"p95={p95}ms ok")
+        self._ok_count = 0
+        self._429_count = 0
+        self._timeout_count = 0
+
+    def _shrink_now(self, *, by: int, reason: str):
+        new_size = max(self._min, self._size - by)
+        if new_size != self._size:
+            log.info("DynamicLimiter shrink %d→%d (%s)", self._size, new_size, reason)
+            # 记欠账: 接下来 (size-new_size) 次 release() 被吞掉不归还, 并发真实收紧
+            self._deficit += self._size - new_size
+            self._size = new_size
+
+    def _grow_now(self, *, by: int, reason: str):
+        new_size = min(self._max, self._size + by)
+        if new_size != self._size:
+            log.info("DynamicLimiter grow %d→%d (%s)", self._size, new_size, reason)
+            delta = new_size - self._size
+            # 先抵掉缩容欠账, 剩余才真正 release 增加 permit
+            pay = min(self._deficit, delta)
+            self._deficit -= pay
+            for _ in range(delta - pay):
+                if self._sem is not None:
+                    self._sem.release()
+            self._size = new_size
+
+
 _LIMITERS: dict[str, Any] = {}
 
 
@@ -405,7 +505,6 @@ def _limiter(ep: llm_routes.Endpoint) -> Any:
     lim = _LIMITERS.get(ep.name)
     if lim is None:
         if ep.limiter == "aimd":
-            from .deepseek_client import _DynamicLimiter
             lim = _DynamicLimiter(initial=ep.max_concurrency, min_size=5,
                                   max_size=ep.max_concurrency * 2)
         else:
