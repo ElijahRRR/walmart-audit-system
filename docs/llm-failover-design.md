@@ -100,7 +100,7 @@ scripts/stop_workers.sh && scripts/start_workers.sh
 
 1. `.env` 加 key (如 `ONEAPI_KEY=`), `llm_routes.yaml` 的 `endpoints:` 加端点;
 2. `models:` 登记模型 (canonical + 单价 + 网关异名 aliases) — **未注册模型进链会被校验拒绝**;
-3. 备节点想进自动链: 先 pin 单模型跑 eval 达标 (`tests/eval_l3_precision.py` / `tests/l1_accuracy_eval.py`), 结果贴 PR;
+3. 备节点想进自动链: 先 pin 单模型跑 eval 达标 (`evals/eval_l3_precision.py` / `evals/l1_accuracy_eval.py`), 结果贴 PR;
 4. 单价超主节点 5× 必须 `expensive: true` (默认只可人工强切, 不参与自动切换; 明知昂贵仍要进自动链需再加 `allow_auto: true` 双重确认 — 如 vision 备胎 qwen-vl);
 5. `--check` → 重启 worker → `python -m cli.router_report` 观察。
 

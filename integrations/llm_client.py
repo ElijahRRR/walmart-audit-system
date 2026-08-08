@@ -232,7 +232,10 @@ async def chat_text(
     temperature: float = 0.1,
     max_tokens: int = 1024,
 ) -> str:
-    """调文本 LLM, 返回原始文本 (用于 ping / 简单场景)。
+    """调文本 LLM, 返回原始文本。
+
+    ⚠️ 诊断工具, 审核管线不用它 (管线一律走 chat_json) — 供 ping()、
+    手工连通性排查、REPL 调试用。删改前先确认没有运维脚本依赖。
 
     路由体系开启时走 default 链 (修复旧版无视 provider 永远打 dashscope 的问题)。
     """
@@ -342,7 +345,11 @@ async def vision_json(
 
 
 async def ping() -> str:
-    """简单连通性检查。返回模型回复的 'pong' 或原始文本。"""
+    """简单连通性检查。返回模型回复的 'pong' 或原始文本。
+
+    ⚠️ 诊断工具, 无生产调用方 — 手工排查端点/key 是否可用时在 REPL 里调。
+    (volcengine_client.ping / deepseek_client.ping 同理。)
+    """
     return await chat_text([{"role": "user", "content": "直接回复 pong 两个字母,不要其它任何字。"}])
 
 

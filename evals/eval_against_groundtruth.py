@@ -12,7 +12,7 @@
   - 每条输出: ASIN + 原因 + 判决 + 命中规则
 
 用法:
-  python3 -m tests.eval_against_groundtruth --sample-per 30
+  python3 -m evals.eval_against_groundtruth --sample-per 30
 """
 from __future__ import annotations
 

@@ -15,9 +15,7 @@ public:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import re
 import time
 from typing import Any
 
@@ -64,34 +62,9 @@ def _sem() -> asyncio.Semaphore:
 
 
 def _json_from_text(text: str) -> dict[str, Any]:
-    """从返回文本抽 JSON."""
-    if not text:
-        return {}
-    try:
-        return json.loads(text)
-    except Exception:
-        pass
-    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL | re.IGNORECASE)
-    if m:
-        try:
-            return json.loads(m.group(1))
-        except Exception:
-            pass
-    depth = 0
-    start = -1
-    for i, ch in enumerate(text):
-        if ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0 and start >= 0:
-                try:
-                    return json.loads(text[start : i + 1])
-                except Exception:
-                    start = -1
-    return {"_raw": text}
+    """复用 llm_client._json_from_text 的稳健提取逻辑 (同 deepseek_client)."""
+    from .llm_client import _json_from_text as _f
+    return _f(text)
 
 
 async def vision_json(

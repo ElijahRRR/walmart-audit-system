@@ -1,7 +1,7 @@
 """L1 真实数据评估 - 从 DMIT 拉 N 条已采集产品 (含完整 category_tree), 跑 L1 看输出。
 
 用法:
-  python -m tests.eval_l1_dmit --sample 30
+  python3 -m evals.eval_l1_dmit --sample 30
 """
 from __future__ import annotations
 

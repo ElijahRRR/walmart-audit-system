@@ -7,7 +7,7 @@
   4. 打印 batch_id + 预计抓取时间, 用户稍后跑 eval
 
 用法:
-  python3 -m tests.submit_gt_to_dmit
+  python3 -m evals.submit_gt_to_dmit
 """
 from __future__ import annotations
 
@@ -117,7 +117,7 @@ async def main(sample_per: dict[str, int]) -> None:
     print(f"  待抓取: {len(missing)} ASIN")
     print(f"  预计耗时: {len(missing)*8//60}-{len(missing)*12//60} 分钟 (取决于 worker 数)")
     print(f"\n  查进度: GET {base}/api/progress?batch_id=<id>")
-    print(f"  或直接: python3 -m tests.eval_against_groundtruth (DMIT 抓完后)")
+    print(f"  或直接: python3 -m evals.eval_against_groundtruth (DMIT 抓完后)")
 
     # 保存用过的 ASIN 列表供 eval 用
     from config import ROOT

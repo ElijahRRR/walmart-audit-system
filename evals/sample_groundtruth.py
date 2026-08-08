@@ -12,7 +12,7 @@
   打印 DMIT 覆盖率 (能否拉到详情)
 
 用法:
-  python3 -m tests.sample_groundtruth --total 500
+  python3 -m evals.sample_groundtruth --total 500
 """
 from __future__ import annotations
 

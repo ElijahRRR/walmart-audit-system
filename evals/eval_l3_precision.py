@@ -6,7 +6,7 @@
   stdout — 统计: L3 reject 率 / 按 reason_category / 疑似假阳 list
 
 用法:
-  python3 -m tests.eval_l3_precision
+  python3 -m evals.eval_l3_precision
 """
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ async def _fetch_dmit(asins: list[str], base: str) -> dict[str, dict]:
 async def run() -> None:
     dump_path = OUT_DIR / "pipeline_v2_dump.json"
     if not dump_path.exists():
-        log.error("pipeline_v2_dump.json 不存在, 先跑 `python3 -m tests.dump_pipeline_v2`")
+        log.error("pipeline_v2_dump.json 不存在, 先跑 `python3 -m evals.dump_pipeline_v2`")
         return
     data = json.loads(dump_path.read_text(encoding="utf-8"))
     # 只选 L2 pass 的
