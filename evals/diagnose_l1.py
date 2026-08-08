@@ -1,7 +1,7 @@
 """L1 诊断: 对指定 ASIN 展示完整判定过程 - 候选召回 top-10 + LLM 选择 + 原因。
 
 用法:
-  python -m tests.diagnose_l1 B08FRQCPJX B073G9FRHH B0055X1WW2 B07M5H7QTQ
+  python3 -m evals.diagnose_l1 B08FRQCPJX B073G9FRHH B0055X1WW2 B07M5H7QTQ
 """
 from __future__ import annotations
 

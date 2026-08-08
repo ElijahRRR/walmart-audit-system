@@ -15,7 +15,7 @@
      - L3 reason_category 与 error_code 对齐度
 
 用法:
-  python3 -m tests.eval_expanded_gt --run-l3
+  python3 -m evals.eval_expanded_gt --run-l3
 """
 from __future__ import annotations
 

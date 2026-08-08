@@ -15,11 +15,10 @@
 
 ```
 管线 (l1/l3/l4/trademark)
-   │  chat_json(purpose=..., strong=...) / vision_json(...)   ← 签名不变
+   │  chat_json(purpose=..., strong=...) / vision_json(...)
    ▼
-integrations/llm_client.py (门面)
-   │  LLM_ROUTER_ENABLED=0 → 旧路径 (dashscope/deepseek/volcengine client, 逐位一致)
-   │  LLM_ROUTER_ENABLED=1 ▼
+integrations/llm_client.py (门面 — 纯委托)
+   ▼
 integrations/llm_router.py (路由引擎)
    │  链遍历 → 熔断检查 → key 池 → 限流 → 方言翻译 → 调用 → 错误分类
    │  失败: 同节点短重试 → 换 key → 换节点 → 全链失败 (告警 + 业务兜底)
@@ -87,20 +86,20 @@ purpose → 链: `l1` / `l3` / `l3.strong` / `trademark` / `vision` / `default`�
 ```bash
 # 1. (可选) 配置多节点链; 没有 yaml 时从 env 合成等价单节点链
 cp config/llm_routes.yaml.example config/llm_routes.yaml && vim config/llm_routes.yaml
-python -m integrations.llm_routes --check          # 校验 (错误配置运行时会被拒并回落 legacy)
+python -m integrations.llm_routes --check          # 校验 (错误配置运行时会被拒并回落 legacy 合成)
 
-# 2. 打开总开关 (灰度: 先只给 1 个 worker 注入系统 env)
-echo "LLM_ROUTER_ENABLED=1" >> .env
-
-# 3. 重启 worker 生效 (配置不做热加载 — 故障切换的实时性由熔断器负责)
+# 2. 重启 worker 生效 (配置不做热加载 — 故障切换的实时性由熔断器负责)
 scripts/stop_workers.sh && scripts/start_workers.sh
 ```
+
+路由是 LLM 调用的唯一路径, 没有开关 — 灰度期的 `LLM_ROUTER_ENABLED` 与旧 client 双轨
+已于 2026-08 删除 (路由稳定运行 3.5 周后)。
 
 ### 新增端点/模型 SOP
 
 1. `.env` 加 key (如 `ONEAPI_KEY=`), `llm_routes.yaml` 的 `endpoints:` 加端点;
 2. `models:` 登记模型 (canonical + 单价 + 网关异名 aliases) — **未注册模型进链会被校验拒绝**;
-3. 备节点想进自动链: 先 pin 单模型跑 eval 达标 (`tests/eval_l3_precision.py` / `tests/l1_accuracy_eval.py`), 结果贴 PR;
+3. 备节点想进自动链: 先 pin 单模型跑 eval 达标 (`evals/eval_l3_precision.py` / `evals/l1_accuracy_eval.py`), 结果贴 PR;
 4. 单价超主节点 5× 必须 `expensive: true` (默认只可人工强切, 不参与自动切换; 明知昂贵仍要进自动链需再加 `allow_auto: true` 双重确认 — 如 vision 备胎 qwen-vl);
 5. `--check` → 重启 worker → `python -m cli.router_report` 观察。
 
@@ -127,8 +126,14 @@ worker 被停 (`stop_workers.sh` / 重启 / 崩溃) 时, 正在跑的切片自�
 
 ### 回滚
 
-`.env` 置 `LLM_ROUTER_ENABLED=0` + 重启 worker → 完全回到旧代码路径 (旧 client 原样保留)。
-注意 launchd/登录 shell 里残留的 `LLM_ROUTER_ENABLED` 系统 env 会压过 .env (`load_dotenv(override=False)`), 回滚后用 `scripts/_cron_check_workers.py` 或 worker 日志头核对。
+`git revert` 到目标提交 → 重新部署代码 → 重启 worker。
+
+灰度期曾有 `LLM_ROUTER_ENABLED` 运行时开关 + 旧 client 双轨作为"改 env 即回滚"的快捷路径,
+在路由稳定运行 3.5 周后于 2026-08 删除 — 保险的价值随验证时长衰减, 而双轨代码的维护成本
+(两套重试逻辑 / 两套 JSON 提取 / provider 分支) 是持续的。
+
+日常运维层面更常用的其实不是回滚而是**改链**: 改 `config/llm_routes.yaml` 调整节点顺序
+(如把出问题的主节点挪到备位) + 重启 worker, 无需动代码。
 
 ## 3. 明确不做的 (设计裁决)
 
@@ -144,9 +149,10 @@ worker 被停 (`stop_workers.sh` / 重启 / 崩溃) 时, 正在跑的切片自�
 - `tests/test_llm_router.py` — 错误分类表 / 熔断状态机 (假时钟: 跳闸/冷却/半开 canary/租约/429 权重) / 路由循环 (fake client: failover / key 轮换 / non_json 不切换 / 方言剥离重发 / 截断放大 / 链预算 / 绊线 / 全链失败)
 - 运行: `python3 -m pytest tests/test_llm_routes.py tests/test_llm_router.py` (无网络无 DB 依赖)
 
-## 5. 上线路径 (灰度)
+## 5. 上线历程 (已完成, 存档)
 
-1. `LLM_ROUTER_ENABLED=0` 合入 — 纯死代码, 行为逐位不变;
-2. 单 worker canary: `start_workers.sh` 前对最后一个 worker 注入系统 env `LLM_ROUTER_ENABLED=1`, 观察 1-2 天 `router_report` + `llm_usage.extra`;
-3. eval 回归: pin 备用模型跑 `eval_l3_precision` / `l1_accuracy_eval`, 确认精度可接受再把备节点写进链;
-4. `.env` 全量开 + 重启; 观察一周后可删除旧 client 路径 (M4, 单独 PR)。
+1. **2026-07-14** 路由体系合入, `LLM_ROUTER_ENABLED=0` 默认关 — 纯死代码, 行为逐位不变;
+2. 单 worker canary → 全量开启, 观察 `router_report` + `llm_usage.extra`;
+3. **2026-08-08** 稳定运行 3.5 周无故障 → 删除开关与旧 client 双轨, 路由成为唯一路径。
+
+新备用模型进链前仍需过 eval 门禁 (见上文"新增端点/模型 SOP" 第 3 步)。

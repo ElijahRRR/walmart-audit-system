@@ -344,9 +344,8 @@ async def judge(
         log.info("L4 aggressive offensive mode ON for %s (pt=%r, cat=%r)",
                  product.asin, l1.walmart_product_type, l1.walmart_category)
 
-    # 视觉调用统一走 llm_client.vision_json:
-    #   - 路由体系开启: "vision" 链 主→备 自动故障切换 (volcengine → qwen-vl 等)
-    #   - 旧路径: 按 settings.vision_provider 分支 (行为同历史; qwen 路径现在也记 usage + 重试)
+    # 视觉调用走 "vision" 链 (主→备自动故障切换, 如 豆包 → qwen-vl)
+    # 全链失败时保守回落 pass: L4 只做增量视觉拦截, 不该因视觉端点故障制造假阳
     raw: dict[str, Any] = {}
     try:
         raw = await llm_client.vision_json(
@@ -357,8 +356,7 @@ async def judge(
             max_tokens=1024,
         )
     except Exception as e:  # noqa: BLE001
-        log.warning("L4 vision 调用失败 %s (provider=%s): %s - 回落 pass",
-                    product.asin, s.vision_provider, e)
+        log.warning("L4 vision 调用失败 %s: %s - 回落 pass", product.asin, e)
         return L4Result(verdict="pass", image_issues=[], hits=[])
 
     if not raw or "_raw" in raw:

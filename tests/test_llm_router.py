@@ -205,6 +205,65 @@ def test_breaker_429_weighted_third():
 
 
 # ---------------------------------------------------------------------------
+# 并发限流器 (AIMD)
+# ---------------------------------------------------------------------------
+
+def test_dynamic_limiter_shrink_uses_deficit():
+    """缩容必须真实收紧并发: release() 吞掉欠账 permit 而非归还。
+
+    (回归: 旧实现先改 _size 再算差值恒为 range(0), 缩容是纯日志空操作。)
+    """
+    lim = rt._DynamicLimiter(initial=10, min_size=2, max_size=20)
+    lim._get_sem()
+    lim._shrink_now(by=5, reason="test")
+    assert lim._size == 5 and lim._deficit == 5
+    # 前 5 次 release 被吞掉 (还欠账), 不增加可用 permit
+    for expected in (4, 3, 2, 1, 0):
+        lim.release()
+        assert lim._deficit == expected
+    lim.release()          # 欠账还清, 正常归还
+    assert lim._deficit == 0
+
+
+def test_dynamic_limiter_grow_pays_off_deficit_first():
+    lim = rt._DynamicLimiter(initial=10, min_size=2, max_size=20)
+    lim._get_sem()
+    lim._shrink_now(by=5, reason="test")
+    assert lim._deficit == 5
+    lim._grow_now(by=3, reason="test")
+    # 扩容优先抵欠账, 不会凭空多放 permit
+    assert lim._size == 8 and lim._deficit == 2
+
+
+def test_dynamic_limiter_429_shrinks_immediately():
+    lim = rt._DynamicLimiter(initial=50, min_size=5, max_size=100)
+    lim._get_sem()
+    lim.record_429()
+    assert lim._size == 45      # 429 不等窗口, 立即缩
+
+
+def test_dynamic_limiter_respects_min_max():
+    lim = rt._DynamicLimiter(initial=8, min_size=5, max_size=10)
+    lim._get_sem()
+    for _ in range(5):
+        lim._shrink_now(by=5, reason="test")
+    assert lim._size == 5       # 不低于 min
+    for _ in range(10):
+        lim._grow_now(by=5, reason="test")
+    assert lim._size == 10      # 不高于 max
+
+
+async def test_dynamic_limiter_acquire_release_roundtrip():
+    lim = rt._DynamicLimiter(initial=2, min_size=1, max_size=4)
+    await lim.acquire()
+    await lim.acquire()
+    assert lim._get_sem().locked()
+    lim.release()
+    assert not lim._get_sem().locked()
+    lim.release()
+
+
+# ---------------------------------------------------------------------------
 # 路由循环 (fake client)
 # ---------------------------------------------------------------------------
 

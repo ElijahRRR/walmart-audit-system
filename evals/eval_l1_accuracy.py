@@ -1,7 +1,7 @@
 """L1 准确率评估脚本 (非 pytest, 直接跑)。
 
 用法:
-  python -m tests.eval_l1_accuracy --sample 20 --daily-sheet 2ZLZRu
+  python3 -m evals.eval_l1_accuracy --sample 20 --daily-sheet 2ZLZRu
 
 从飞书日表抽 N 条有 title + ProductType 的产品作为 ground truth,
 跑 L1 输出, 统计:

@@ -82,9 +82,9 @@ CREATE TABLE IF NOT EXISTS workers (
   capacity        INTEGER,              -- processes × async_concurrency
   registered_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   last_seen       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  current_job_id  INTEGER REFERENCES jobs(job_id) ON DELETE SET NULL,
-  total_done      INTEGER DEFAULT 0,
-  total_failed    INTEGER DEFAULT 0
+  current_job_id  INTEGER REFERENCES jobs(job_id) ON DELETE SET NULL
+  -- 注: 曾有 total_done / total_failed 两列, 但从未有代码写入 (统计一律从 jobs 表算),
+  -- 已从 schema 移除; 存量库里的残留列无害, 不做破坏性 DROP COLUMN 迁移
 );
 
 

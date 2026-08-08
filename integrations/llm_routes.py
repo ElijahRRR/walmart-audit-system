@@ -616,7 +616,7 @@ _CLIENTS: dict[tuple[str, str], Any] = {}
 
 
 def client_for(endpoint: Endpoint, key_label: str, key_value: str) -> Any:
-    """AsyncOpenAI client, 按 (endpoint, key) 缓存 — 独立连接池 (延续 deepseek_client 语义)。
+    """AsyncOpenAI client, 按 (endpoint, key) 缓存 — 每把 key 独立连接池。
 
     必须在使用它的进程内 lazy init (worker 是 spawn 子进程, fork client 会连接池错乱)。
     """

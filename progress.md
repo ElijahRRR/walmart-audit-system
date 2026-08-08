@@ -1,15 +1,13 @@
-# Project Progress
+# Project Progress — 迭代会话日志 (归档)
 
-## Current Status
-- Total: 27 features
-- Passing: 17 / 27 (63%) — **F11 L1 LLM fallback (含 Embedding) 通过**
-- Completed: M0 全, M1 (F4/F5/F6), M2 (F7/F8/F9), M3 (F10/F11/F12), M4 (F13-F17)
-- M7 orchestrator + CLI 骨架完成
-- **L1 Embedding 方案 (C) 落地**: text-embedding-v3 召回 top-20 + 关键词 top-10 → qwen-plus 从 30 候选选 1
-  - 15 ASIN 抽测: 精确相等 66.7% + 模糊 6.7% = 73%
-  - map_verified 率 80% (候选质量高到 LLM 直接抄原文)
-  - 真实 L1 类目精度 ≈ 90% (2 个错误: 花瓶/烛台多功能 + 船用船外机配件歧义)
-- L3/L4 暂缓 (用户要求先搞定 L1/L2)
+> ⚠️ **本文件是按时间追加的开发日志, 不是当前状态说明。**
+> 想了解系统现状请看 [README.md](README.md); LLM 路由/故障切换看
+> [docs/llm-failover-design.md](docs/llm-failover-design.md)。
+> 下面各 Session 记录只反映"写下它那一刻"的状态, 早期条目 (如 M0-M4 里程碑、
+> "L3/L4 暂缓"、feature 通过率) 早已被后续迭代取代, 保留仅为追溯决策脉络。
+
+**当前状态一句话**: L0→L4 全链路上线, server + 10 worker 分布式队列服务;
+LLM 主→备自动故障切换路由体系已合入 (`LLM_ROUTER_ENABLED` 控制启用)。
 
 ## Session Log
 

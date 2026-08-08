@@ -14,7 +14,7 @@
 - **L3 多任务语义判定** 文本模型由 `LLM_TEXT_PROVIDER` 决定（`dashscope`→默认 `qwen-turbo` / `deepseek`→默认 `deepseek-v4-flash`），单进程 `Semaphore(LLM_CONCURRENCY=100)`，3 次指数退避重试，全 37 条政策
 - **L4 视觉审核** 默认 Volcengine `doubao-seed-1-6-flash`（多图 + 中文优势），可降级 qwen-vl-plus；每商品最多 5 张。**线上 worker 默认不开 L4**（`run_l4=False`），需 `RUN_L4=true` / `--run-l4` 开启；单机 CLI 与 `orchestrator.audit_one` 默认开启
 - **多 Provider 路由** 文本：DashScope / DeepSeek；视觉：Volcengine / Qwen；按使用场景分配独立 key
-- **主→备自动故障切换**（`LLM_ROUTER_ENABLED=1` 启用）任意 OpenAI 兼容端点（含第三方聚合网关混合模型）按 purpose 配路由链，熔断 + key 池轮换 + 自动回切 + 飞书告警；L3 全链失败出 `pending` 待人工复核而非放行。详见 [docs/llm-failover-design.md](docs/llm-failover-design.md)
+- **主→备自动故障切换** 任意 OpenAI 兼容端点（含第三方聚合网关混合模型）按 purpose 配路由链，熔断 + key 池轮换 + 自动回切 + 飞书告警；L3 全链失败出 `pending` 待人工复核而非放行。详见 [docs/llm-failover-design.md](docs/llm-failover-design.md)
 - **LLM 缓存** `llm_cache` 表按 `sha256(system+user+model)` 哈希复用，避免重复 token 消耗
 - **成本核算** `usage_log` 表逐次记录 provider / model / token / 美元；`cli/cost_report.py` 生成报表
 - **分布式队列** server (FastAPI + SQLite 任务表) 切片派发，worker 心跳 + 增量日志回传，支持按层 `--filter-stage` 重跑；worker 被停/心跳超时的切片**自动重新入队**（上限 `AUDIT_MAX_AUTO_REQUEUE=2` 次，超过才标 failed 等人工）
@@ -65,7 +65,7 @@
 │   └── analyze_brand_ip_precision.py # 黑名单品牌命中精度统计
 ├── server/              # FastAPI 任务队列服务端
 │   ├── main.py / db.py (SQLite) / file_io.py
-│   ├── templates/index.html (HTMX 控制台单页; static/ 按需挂载, 当前未使用)
+│   ├── templates/index.html (控制台单页: 原生 JS fetch 轮询, 无前端框架; static/ 按需挂载, 当前未使用)
 │   └── deploy/requirements.txt
 ├── worker/              # 长驻 worker
 │   ├── poll_loop.py / server_client.py / log_pusher.py
@@ -73,9 +73,15 @@
 │   ├── start_workers.sh / stop_workers.sh
 │   ├── install_sync_cron.sh
 │   └── com.nextderboy.audit-sync-blacklist.plist
-├── tests/               # 测试 + 回测（eval_l1_accuracy / eval_l3_precision / 等）
-├── feature_list.json    # M0-M8 里程碑特性
-└── progress.md          # 迭代会话日志
+├── tests/               # pytest 回归测试（无网络无外部依赖, 秒级; 提交前跑）
+├── evals/               # 评测/采样/诊断脚本（手工跑, 依赖真实 DB/DMIT/LLM 配额）
+│   ├── eval_l3_precision.py / l1_accuracy_eval.py  # 精度回测（新模型进路由链的门禁）
+│   ├── dump_pipeline_v2.py                          # 全链路判定明细导出（eval 的输入）
+│   └── diagnose_l1.py / sample_*.py                 # 单 ASIN 诊断 / 样本采集
+├── docs/
+│   └── llm-failover-design.md   # LLM 主→备故障切换设计与运维手册
+├── feature_list.json    # M0-M8 里程碑特性清单（归档, 反映初期规划非当前状态）
+└── progress.md          # 迭代会话日志（归档）
 ```
 
 ---
@@ -221,7 +227,7 @@ curl -s http://47.108.92.213/audit/api/workers/online  # 期望 {"online":10}
 cp config/llm_routes.yaml.example config/llm_routes.yaml
 python -m integrations.llm_routes --check     # 校验 (坏配置运行时被拒并回落 legacy)
 
-# .env: LLM_ROUTER_ENABLED=1 + (可选) LARK_ALERT_WEBHOOK=<飞书机器人>
+# .env: (可选) LARK_ALERT_WEBHOOK=<飞书机器人> — 熔断/全链失败告警; 留空则只落事件表
 scripts/stop_workers.sh && scripts/start_workers.sh   # 重启生效 (不做热加载)
 
 python -m cli.router_report                   # 节点用量 / failover 占比 / 熔断事件
@@ -230,13 +236,26 @@ python -m cli.router_report --quality         # 主/备模型判定分布对比
 
 要点：主模型故障时熔断器自动切换备用节点（同模型异端点优先，异构模型殿后），恢复后自动回切；
 L3 主备全灭时输出 `verdict=pending`（待人工复核）而非放行；新备用模型进链前先 pin 跑
-`tests/eval_l3_precision.py` 达标（SOP 见 [docs/llm-failover-design.md](docs/llm-failover-design.md)）。
+`evals/eval_l3_precision.py` 达标（SOP 见 [docs/llm-failover-design.md](docs/llm-failover-design.md)）。
 
 ### 成本与诊断
 
 ```bash
 python3 -m cli.cost_report --date 2026-05-27
 python3 -m cli.get_problem_images --asin B0XXXXXX --out ./_dump
+```
+
+### 测试与评测（两者分工不同）
+
+```bash
+# tests/ — pytest 回归测试: 无网络无外部依赖, 秒级, 改代码后/提交前必跑
+python3 -m pytest                             # 全量
+python3 -m pytest tests/test_llm_router.py    # 单文件
+
+# evals/ — 评测/诊断脚本: 手工跑, 依赖真实 DB / DMIT / LLM 配额, 分钟~小时级
+python3 -m evals.eval_l3_precision            # L3 判定精度回测 (新模型进路由链的门禁)
+python3 -m evals.l1_accuracy_eval             # L1 类目判定精度
+python3 -m evals.diagnose_l1 B08FRQCPJX       # 单 ASIN 的 L1 判定过程诊断
 ```
 
 ### 重跑某一层
@@ -353,4 +372,5 @@ python3 -m cli.audit_asin_list --input failed.csv --filter-stage L3   # 只重�
 - **a81376d** `feat(L2+L3)` R9 title 含 ® 硬拦 + L3 取消授权声明豁免
 - **0eaed71** `refactor(L2)` 删除 R6，Compatible for 场景改由 L3 LLM 严判
 
-完整迭代记录见 [progress.md](progress.md)；里程碑/特性见 [feature_list.json](feature_list.json)。
+完整迭代记录见 [progress.md](progress.md)；早期里程碑/特性清单见 [feature_list.json](feature_list.json)。
+> 这两个文件都是**归档性质**（按时间追加、只反映写下时的状态），系统现状以本 README 为准。

@@ -84,7 +84,7 @@ def query_quality(hours: int) -> list[dict[str, Any]]:
     """主/备模型 L3 判定分布对比 (近似 join: llm_usage ↔ audit_runs 按 asin+时间窗)。
 
     注意: 备用模型样本来自降级时段, 天然有偏 — reject 率偏差 >5pt 时应
-    对备用模型重跑 tests/eval_l3_precision.py 而不是直接下结论。
+    对备用模型重跑 evals/eval_l3_precision.py 而不是直接下结论。
     """
     with db_conn() as c:
         with c.cursor() as cur:
