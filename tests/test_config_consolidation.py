@@ -143,6 +143,96 @@ def test_no_hardcoded_server_ip_in_runtime_code():
     )
 
 
+# ---------------------------------------------------------------------------
+# 3. 凭证只能来自 .env — 代码里不得出现任何明文密钥
+# ---------------------------------------------------------------------------
+
+# 明文凭证特征: sk-xxx / Bearer xxx / 连接串里的 :密码@ / key 直接赋字面量
+_SECRET_PATTERNS = [
+    (re.compile(r"sk-[A-Za-z0-9_-]{12,}"), "疑似明文 API key (sk- 开头)"),
+    (re.compile(r"Bearer\s+[A-Za-z0-9._-]{12,}"), "疑似明文 Bearer token"),
+    (re.compile(r"postgres(?:ql)?://[^\s'\"]+:[^\s'\"@]+@"), "连接串内嵌密码"),
+    (re.compile(r"""(?:api[_-]?key|apikey|secret|passwd|password)\s*=\s*["'][^"'{}$]{8,}["']""",
+                re.IGNORECASE), "凭证字段被赋明文字面量"),
+]
+
+_CRED_SCAN_DIRS = ("config", "sync", "pipelines", "integrations", "cli",
+                   "worker", "server", "api", "scripts", "evals")
+
+
+def _scan_files() -> list[Path]:
+    out: list[Path] = []
+    for d in _CRED_SCAN_DIRS:
+        base = ROOT / d
+        if not base.exists():
+            continue
+        out.extend(p for p in base.rglob("*")
+                   if p.is_file() and p.suffix in (".py", ".sh", ".yaml", ".yml", ".html")
+                   and "__pycache__" not in p.parts)
+    # 已提交的路由配置也要查 (它只应写 env 变量名)
+    for name in ("llm_routes.yaml", "llm_routes.yaml.example"):
+        p = ROOT / "config" / name
+        if p.exists() and p not in out:
+            out.append(p)
+    return out
+
+
+def test_no_plaintext_credentials_anywhere():
+    """凭证一律经 .env 读取; 代码/配置里出现明文密钥即失败。
+
+    这条守的是"换环境只改 .env"里最要命的一半 —— 密钥若散落在代码里,
+    不仅换环境要改代码, 还会随 git 泄漏。
+    """
+    offenders: list[str] = []
+    for path in _scan_files():
+        rel = path.relative_to(ROOT).as_posix()
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        code = _strip_comments_and_docstrings(text) if path.suffix == ".py" else text
+        for pat, why in _SECRET_PATTERNS:
+            for m in pat.findall(code):
+                snippet = m if len(m) < 40 else m[:37] + "..."
+                offenders.append(f"{rel}: {why} → {snippet}")
+    assert not offenders, (
+        "凭证必须放 .env 并经 os.getenv/settings 读取, 不得写进代码或已提交的配置:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_committed_route_config_only_references_env_names():
+    """config/llm_routes.yaml 里的 key 只能写环境变量名, 不能是明文。"""
+    import yaml
+    for name in ("llm_routes.yaml", "llm_routes.yaml.example"):
+        path = ROOT / "config" / name
+        if not path.exists():
+            continue
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for ep_name, ep in (data.get("endpoints") or {}).items():
+            for k in (ep or {}).get("keys") or []:
+                assert isinstance(k, dict) and "env" in k, (
+                    f"{name}: endpoints.{ep_name}.keys 必须写 {{env: 变量名}}, 实际 {k!r}"
+                )
+                # env 变量名本身不该长得像密钥
+                assert not k["env"].startswith("sk-"), f"{name}: {ep_name} 疑似写了明文 key"
+
+
+def test_missing_credential_fails_loudly_not_silently(monkeypatch):
+    """缺 key 时该节点必须不可用 (由路由跳过/报错), 绝不能静默回落到某个内置 key。"""
+    from integrations import llm_routes as lr
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY_L1", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY_L3", raising=False)
+    monkeypatch.setenv("LLM_ROUTES_FILE", "/nonexistent-routes.yaml")  # 走 env 合成链
+    get_settings.cache_clear()
+    lr._reset_state_for_test()
+
+    table = lr.force_reload()
+    ep = table.endpoints["deepseek"]
+    # 有效 key 池为空 → 路由循环会跳过该节点并记 "无可用 key", 而不是拿到某个默认值
+    assert lr.iter_keys(ep, "l3") == []
+    lr._reset_state_for_test()
+
+
 def test_env_example_documents_every_sheet():
     """.env.example 必须列出所有表的 *_TOKEN — 否则换表时无从下手。"""
     text = (ROOT / ".env.example").read_text(encoding="utf-8")
