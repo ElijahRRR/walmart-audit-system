@@ -1,26 +1,35 @@
 """备份当前飞书 上架表 C/D/E 列到 JSON, 用于全量重跑后对比."""
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import sys
 from datetime import datetime
 from pathlib import Path
 
+from config import get_settings
 from integrations import lark_client
 
-OUT_DIR = Path(__file__).parent.parent / "tests" / "out"
+OUT_DIR = Path(__file__).parent.parent / "evals" / "out"
 
 
 async def main() -> int:
+    ref = get_settings().sheet_audit_task
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--token", default=ref.token, help="spreadsheet token (默认取 .env 的审核任务表)")
+    ap.add_argument("--sheet-id", default=ref.sheet_id, help="子表 ID")
+    ap.add_argument("--last-col", default="G", help="读取列上界")
+    args = ap.parse_args()
+
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_path = OUT_DIR / f"lark_snapshot_{ts}.json"
 
-    print("读飞书 上架表 ...")
+    print(f"读飞书表 {args.token} / {args.sheet_id} ...")
     rows = await asyncio.to_thread(
         lark_client.read_paginated,
-        "PDsRsfGRrhmWq1tOt25cHgUAnPh", "ea2b2a", "G", 200,
+        args.token, args.sheet_id, args.last_col, 200,
     )
     print(f"读到 {len(rows)} 行 (含表头)")
 

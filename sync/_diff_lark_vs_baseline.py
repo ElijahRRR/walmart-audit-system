@@ -18,14 +18,16 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from config import get_settings
 from integrations import lark_client
 
 
-async def load_current() -> dict[str, dict]:
-    """读飞书当前数据, 按 asin 索引."""
+async def load_current(token: str = "", sheet_id: str = "") -> dict[str, dict]:
+    """读飞书当前数据, 按 asin 索引 (默认表取自 .env 的审核任务表)."""
+    ref = get_settings().sheet_audit_task
     rows = await asyncio.to_thread(
         lark_client.read_paginated,
-        "PDsRsfGRrhmWq1tOt25cHgUAnPh", "ea2b2a", "G", 200,
+        token or ref.token, sheet_id or ref.sheet_id, "G", 200,
     )
     out: dict[str, dict] = {}
     for i, row in enumerate(rows):
@@ -49,7 +51,7 @@ def load_baseline(path: Path) -> dict[str, dict]:
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--baseline", default="tests/out/lark_snapshot_20260426_122744.json",
+    p.add_argument("--baseline", default="evals/out/lark_snapshot_20260426_122744.json",
                    help="baseline JSON path (相对项目根)")
     args = p.parse_args()
 
@@ -83,7 +85,9 @@ def main() -> int:
     # 表格
     rows = sorted({k[0] for k in matrix})
     cols = sorted({k[1] for k in matrix})
-    header = f"{'baseline\\current':<18} | " + " | ".join(f"{c:>10}" for c in cols)
+    # 注: 表头字面量不能内联进 f-string — Python 3.11 不允许 f-string 表达式含反斜杠
+    _corner = "baseline\\current"
+    header = f"{_corner:<18} | " + " | ".join(f"{c:>10}" for c in cols)
     print(header)
     print("-" * len(header))
     for r in rows:

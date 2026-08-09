@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from api.dmit_fetcher import fetch_product_infos_batch
+from config import get_settings
 from integrations import lark_client
 from pipelines.models import AuditOutcome, ProductInfo
 from pipelines.orchestrator import audit_one
@@ -45,12 +46,12 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------
 # 配置 (可用 env / CLI 覆盖)
 # ---------------------------------------------------------------
-# 默认指向"在线产品"大表 (用户 2026-04-27 建立, 11 万 ASIN)
-# 旧 4326 ASIN 表 token = "PDsRsfGRrhmWq1tOt25cHgUAnPh", sheet = "ea2b2a"
-# 用 --spreadsheet-token / --sheet-id 切到任意表
-
-SPREADSHEET_TOKEN = "MO2escopjhLFzVtOzVlcq8xvnmI"
-SHEET_ID = "e7834a"
+# 默认表由 config.settings 提供 (换表改 .env: LARK_AUDIT_TASK_TOKEN / _SHEET_ID);
+# 也可用 --spreadsheet-token / --sheet-id 临时切到任意表 (见 run() 里的 global 覆盖)
+# 历史: 旧 4326 ASIN 表 token = "PDsRsfGRrhmWq1tOt25cHgUAnPh", sheet = "ea2b2a"
+_SHEET_REF = get_settings().sheet_audit_task
+SPREADSHEET_TOKEN = _SHEET_REF.token
+SHEET_ID = _SHEET_REF.sheet_id
 
 # 列位置 (0-based, 与读取出的二维数组对齐) — 新表 v2 8 列结构
 #   A ASIN  B 店铺/上架号  C walmart_product_type  D walmart_category

@@ -29,8 +29,7 @@ from ._common import SyncResult, batched, db_conn, finish_sync_run, start_sync_r
 
 log = logging.getLogger(__name__)
 
-WIKI_TOKEN_FALLBACK = "YlA1szPAAhW7CCtmG5hcp6vkndd"
-LAST_COL = "M"  # 13 列
+# 表定位统一走 config.settings (换表改 .env: LARK_VIOLATION_DAILY_TOKEN/_LAST_COL)
 
 # (keyword pattern, reason_category) 优先匹配前者; 大小写不敏感
 COMPLIANCE_KEYWORDS: list[tuple[re.Pattern, str]] = [
@@ -79,7 +78,9 @@ def _list_daily_sheets(spreadsheet_token: str) -> list[lc.SheetInfo]:
 
 def _process_sheet(spreadsheet_token: str, sheet: lc.SheetInfo, dry_run: bool = False) -> tuple[int, int]:
     """处理一张日表, 返回 (rows_in, rows_out_compliance)。"""
-    rows = lc.read_paginated(spreadsheet_token, sheet.sheet_id, last_col_letter=LAST_COL, page_size=200)
+    rows = lc.read_paginated(spreadsheet_token, sheet.sheet_id,
+                             last_col_letter=get_settings().sheet_violation_daily.last_col,
+                             page_size=200)
     log.info("sheet %s (%s): fetched %d rows", sheet.title, sheet.sheet_id, len(rows))
 
     records: list[dict] = []
@@ -140,7 +141,7 @@ def run(*, limit_days: int | None = None, dry_run: bool = False) -> SyncResult:
     total_in = 0
     total_out = 0
     try:
-        spreadsheet_token = get_settings().lark_sheet_violation or WIKI_TOKEN_FALLBACK
+        spreadsheet_token = get_settings().sheet_violation_daily.token
         # 该 sheet token 不是 wiki, 直接用
         sheets = _list_daily_sheets(spreadsheet_token)
         if limit_days is not None:

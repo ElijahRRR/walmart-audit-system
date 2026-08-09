@@ -1,8 +1,16 @@
-"""集中式配置读取。所有脚本通过 get_settings() 获取。"""
+"""集中式配置读取。所有脚本通过 get_settings() 获取。
+
+设计约定 (2026-08 配置收口):
+  **换服务器 / 换飞书表只需要改 .env, 不需要进代码找。**
+  凡是"跨环境会变"的值 (地址 / token / 表 ID / 列范围) 一律走这里,
+  业务代码里不许再出现字面量。新增此类配置时同步更新 .env.example。
+
+自检:  python -m config.settings --check    打印每项的生效值与来源 (env / 默认值)
+"""
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
@@ -15,6 +23,24 @@ ROOT = Path(__file__).resolve().parent.parent
 _env_path = ROOT / ".env"
 if _env_path.exists():
     load_dotenv(_env_path, override=False)
+
+
+@dataclass(frozen=True)
+class SheetRef:
+    """一张飞书表的完整定位: 父表 token + 子表 ID + 读取列范围。
+
+    token:    wiki node token (走 resolve_wiki_node) 或 spreadsheet token (直读)
+    sheet_id: 子表 ID; 空 = 运行时按表名动态查找 (如违规日报按日期找 sheet)
+    last_col: 读取列范围上界字母; 表结构变宽时改这里
+    """
+
+    token: str
+    sheet_id: str = ""
+    last_col: str = ""
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.token)
 
 
 @dataclass(frozen=True)
@@ -50,10 +76,20 @@ class Settings:
     deepseek_base_url: str
     deepseek_model: str
 
-    # --- Lark ---
+    # --- Lark: 父表 token (向后兼容字段, 新代码优先用下面的 sheet_* SheetRef) ---
     lark_wiki_blacklist: str
     lark_wiki_category_map: str
     lark_sheet_violation: str
+
+    # --- Lark: 各同步任务的完整表定位 (token + 子表 ID + 列范围) ---
+    # 换表只改 .env: LARK_<名字>_TOKEN / _SHEET_ID / _LAST_COL
+    sheet_blacklist_brands: SheetRef    # 黑名单品牌明细
+    sheet_category_map: SheetRef        # Amazon→Walmart 类目映射
+    sheet_prohibited: SheetRef          # Walmart 37 条禁售政策 (与 category_map 同父表)
+    sheet_pt_meta: SheetRef             # Walmart PT 元数据 (与 category_map 同父表)
+    sheet_violation_daily: SheetRef     # 每日违规商品 (sheet_id 按日期动态找)
+    sheet_phase0_blacklist: SheetRef    # Phase0 黑名单 (卖家/ASIN/类目)
+    sheet_audit_task: SheetRef          # 飞书表批量审核的任务表 (读 ASIN + 回写结果)
 
     # --- LLM 路由与故障切换 ---
     llm_routes_file: str            # 路由配置 YAML 路径 (不存在时从 env 合成 legacy 链)
@@ -86,8 +122,25 @@ def _get_float(key: str, default: float) -> float:
     return float(raw) if raw else default
 
 
+def _sheet(prefix: str, *, token: str, sheet_id: str = "", last_col: str = "") -> SheetRef:
+    """按统一命名读一张表的三个维度, 任一维度都可被 .env 覆盖。
+
+    env: LARK_{prefix}_TOKEN / LARK_{prefix}_SHEET_ID / LARK_{prefix}_LAST_COL
+    """
+    return SheetRef(
+        token=_get(f"LARK_{prefix}_TOKEN", token),
+        sheet_id=_get(f"LARK_{prefix}_SHEET_ID", sheet_id),
+        last_col=_get(f"LARK_{prefix}_LAST_COL", last_col),
+    )
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    # 父表 token 的向后兼容读取: 老 env 名仍然生效, 作为新 SheetRef 的默认值
+    _wiki_blacklist = _get("LARK_WIKI_BLACKLIST", "UhZJw3EtsiFN9skbG0Ac24Dgn4b")
+    _wiki_category_map = _get("LARK_WIKI_CATEGORY_MAP", "UKdZwr7JqiO6UckjSnPcwTCgnvd")
+    _sheet_violation = _get("LARK_SHEET_VIOLATION", "YlA1szPAAhW7CCtmG5hcp6vkndd")
+
     return Settings(
         database_url=_get("DATABASE_URL", "postgresql://nextderboy@localhost:5432/walmart_audit"),
         uspto_database_url=_get("USPTO_DATABASE_URL", "postgresql://nextderboy@localhost:5432/uspto"),
@@ -117,9 +170,25 @@ def get_settings() -> Settings:
         # LLM 路由与故障切换 (路由是唯一路径, 无开关; 旧 client 双轨已于 2026-08 删除)
         llm_routes_file=_get("LLM_ROUTES_FILE", str(ROOT / "config" / "llm_routes.yaml")),
         lark_alert_webhook=_get("LARK_ALERT_WEBHOOK", ""),
-        lark_wiki_blacklist=_get("LARK_WIKI_BLACKLIST", "UhZJw3EtsiFN9skbG0Ac24Dgn4b"),
-        lark_wiki_category_map=_get("LARK_WIKI_CATEGORY_MAP", "UKdZwr7JqiO6UckjSnPcwTCgnvd"),
-        lark_sheet_violation=_get("LARK_SHEET_VIOLATION", "YlA1szPAAhW7CCtmG5hcp6vkndd"),
+        lark_wiki_blacklist=_wiki_blacklist,
+        lark_wiki_category_map=_wiki_category_map,
+        lark_sheet_violation=_sheet_violation,
+        # --- 飞书各同步任务的表定位 (换表只改 .env, 不进代码) ---
+        # 黑名单品牌: 子表由 lark-cli 自动取首个 sheet, 无需 sheet_id
+        sheet_blacklist_brands=_sheet("BLACKLIST_BRANDS", token=_wiki_blacklist),
+        # 下面三张共用同一个父表 (类目映射 wiki), 各自不同子表
+        sheet_category_map=_sheet("CATEGORY_MAP", token=_wiki_category_map,
+                                  sheet_id="2p5sL6", last_col="K"),
+        sheet_prohibited=_sheet("PROHIBITED", token=_wiki_category_map,
+                                sheet_id="OJSrkV", last_col="N"),
+        sheet_pt_meta=_sheet("PT_META", token=_wiki_category_map,
+                             sheet_id="0bdc8b", last_col="J"),
+        # 违规日报: sheet_id 留空 — 运行时按 "YYYY.M.D问题商品" 表名动态找
+        sheet_violation_daily=_sheet("VIOLATION_DAILY", token=_sheet_violation, last_col="M"),
+        sheet_phase0_blacklist=_sheet("PHASE0_BLACKLIST", token="QNIpwrRWxiYPeVk86f8cemyenBb",
+                                      sheet_id="8280e8", last_col="C"),
+        sheet_audit_task=_sheet("AUDIT_TASK", token="MO2escopjhLFzVtOzVlcq8xvnmI",
+                                sheet_id="e7834a"),
         score_threshold=_get_int("SCORE_THRESHOLD", 60),
         llm_concurrency=_get_int("LLM_CONCURRENCY", 100),
         llm_retry_attempts=_get_int("LLM_RETRY_ATTEMPTS", 3),
@@ -128,3 +197,123 @@ def get_settings() -> Settings:
         log_level=_get("LOG_LEVEL", "INFO"),
         shortcut_pass_ttl_days=_get_int("SHORTCUT_PASS_TTL_DAYS", 45),
     )
+
+
+# =============================================================
+# 配置自检 (python -m config.settings --check)
+# =============================================================
+#
+# 换服务器 / 换飞书表后必跑: 逐项打印生效值与来源。
+# 来源标 [默认] 的项说明 .env 里没配 —— 用的是代码内置值, 极可能是上一个环境的,
+# 这正是"漏配后静默沿用旧地址"的高危点。
+#
+# (环境变量名, 人类可读说明, 是否关键)
+_AUDIT_ITEMS: list[tuple[str, str, bool]] = [
+    ("DATABASE_URL", "主库连接串", True),
+    ("USPTO_DATABASE_URL", "USPTO 商标库连接串", True),
+    ("DMIT_BASE_URL", "Amazon 抓取服务地址", True),
+    ("DMIT_API_KEY", "Amazon 抓取服务 key", True),
+    ("AUDIT_SERVER_URL", "任务队列 server 地址 (worker/cron 用)", True),
+    ("LLM_ROUTES_FILE", "LLM 路由配置文件路径", False),
+    ("LARK_ALERT_WEBHOOK", "飞书告警机器人 (空=不告警)", False),
+    ("DEEPSEEK_API_KEY", "DeepSeek key", False),
+    ("DASHSCOPE_API_KEY", "DashScope key", False),
+    ("VOLCENGINE_API_KEY", "火山方舟 key", False),
+]
+
+# 飞书表: (settings 字段名, env 前缀, 说明)
+_AUDIT_SHEETS: list[tuple[str, str, str]] = [
+    ("sheet_blacklist_brands", "BLACKLIST_BRANDS", "黑名单品牌"),
+    ("sheet_category_map", "CATEGORY_MAP", "类目映射"),
+    ("sheet_prohibited", "PROHIBITED", "禁售政策"),
+    ("sheet_pt_meta", "PT_META", "PT 元数据"),
+    ("sheet_violation_daily", "VIOLATION_DAILY", "违规日报"),
+    ("sheet_phase0_blacklist", "PHASE0_BLACKLIST", "Phase0 黑名单"),
+    ("sheet_audit_task", "AUDIT_TASK", "批量审核任务表"),
+]
+
+_SECRET_HINT = ("KEY", "TOKEN", "WEBHOOK", "PASSWORD")
+
+
+def _mask(name: str, value: str) -> str:
+    """密钥类只显示首尾几位, 避免 --check 输出被贴到聊天/工单里泄漏。"""
+    if not value:
+        return "(空)"
+    if any(h in name.upper() for h in _SECRET_HINT) and len(value) > 8:
+        return f"{value[:4]}…{value[-4:]} ({len(value)} 位)"
+    return value
+
+
+def check(verbose: bool = True) -> int:
+    """打印生效配置与来源。返回缺失的关键项数量 (0 = 全部就绪)。"""
+    s = get_settings()
+    missing_critical = 0
+    from_default = 0
+
+    def line(label: str, env_name: str, value: str, critical: bool) -> None:
+        nonlocal missing_critical, from_default
+        raw = os.getenv(env_name)
+        if raw:
+            src = " env  "
+        else:
+            src = "[默认] "
+            from_default += 1
+        flag = ""
+        if critical and not value:
+            flag = "   ❌ 关键项为空"
+            missing_critical += 1
+        elif not raw and critical:
+            flag = "   ⚠️ 用内置默认值, 换环境后请确认"
+        shown = _mask(env_name, value)
+        if len(shown) > 44:                      # 长连接串截断, 保住列对齐
+            shown = shown[:41] + "..."
+        if verbose:
+            print(f"  {src}{env_name:<30} {shown:<46}{label}{flag}")
+
+    if verbose:
+        print(f"配置来源: {_env_path if _env_path.exists() else '(无 .env, 仅系统环境变量)'}")
+        print(f"\n=== 服务地址 / 凭证 ===")
+    for env_name, label, critical in _AUDIT_ITEMS:
+        if env_name == "AUDIT_SERVER_URL":
+            value = os.getenv(env_name, "")
+        else:
+            attr = env_name.lower()
+            value = str(getattr(s, attr, os.getenv(env_name, "")))
+        line(label, env_name, value, critical)
+
+    if verbose:
+        print(f"\n=== 飞书表 (换表改这些; token 为父表, sheet_id 为子表) ===")
+    for attr, prefix, label in _AUDIT_SHEETS:
+        ref: SheetRef = getattr(s, attr)
+        line(f"{label} (父表)", f"LARK_{prefix}_TOKEN", ref.token, True)
+        if ref.sheet_id or os.getenv(f"LARK_{prefix}_SHEET_ID"):
+            line(f"{label} (子表)", f"LARK_{prefix}_SHEET_ID", ref.sheet_id, False)
+        if ref.last_col or os.getenv(f"LARK_{prefix}_LAST_COL"):
+            line(f"{label} (列范围)", f"LARK_{prefix}_LAST_COL", ref.last_col, False)
+
+    if verbose:
+        print()
+        if missing_critical:
+            print(f"❌ {missing_critical} 个关键项为空 — 补 .env 后再启动")
+        elif from_default:
+            print(f"⚠️  {from_default} 项在用内置默认值 (上面标 [默认] 的行)。")
+            print("    新环境请逐项确认: 内置默认值来自上一个部署环境, 不会报错但可能连错地方。")
+        else:
+            print("✅ 全部配置项来自 .env / 环境变量")
+    return missing_critical
+
+
+def _cli() -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser(description="配置自检 — 打印生效值与来源")
+    ap.add_argument("--check", action="store_true", help="打印全部配置项与来源")
+    args = ap.parse_args()
+    if not args.check:
+        ap.print_help()
+        return 0
+    return 1 if check() else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_cli())
