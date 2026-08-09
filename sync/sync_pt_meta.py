@@ -32,15 +32,13 @@ from ._common import SyncResult, batched, db_conn, finish_sync_run, start_sync_r
 
 log = logging.getLogger(__name__)
 
-SHEET_ID = "0bdc8b"
-LAST_COL = "J"
-WIKI_TOKEN_FALLBACK = "UKdZwr7JqiO6UckjSnPcwTCgnvd"
+# 表定位统一走 config.settings (换表改 .env: LARK_PT_META_TOKEN/_SHEET_ID/_LAST_COL)
 
 _ZH_BLOCK_KEYWORDS = ("否", "不可做", "进不去", "禁售")
 
 
 def _resolve_obj_token() -> str:
-    token = get_settings().lark_wiki_category_map or WIKI_TOKEN_FALLBACK
+    token = get_settings().sheet_pt_meta.token
     node = lc.resolve_wiki_node(token)
     if node["obj_type"] != "sheet":
         raise RuntimeError(f"期望 sheet, 实际 obj_type={node['obj_type']}")
@@ -180,8 +178,9 @@ def run() -> SyncResult:
     total_out = 0
     try:
         obj_token = _resolve_obj_token()
-        log.info("reading sheet %s ...", SHEET_ID)
-        rows = lc.read_paginated(obj_token, SHEET_ID, last_col_letter=LAST_COL, page_size=500)
+        ref = get_settings().sheet_pt_meta
+        log.info("reading sheet %s ...", ref.sheet_id)
+        rows = lc.read_paginated(obj_token, ref.sheet_id, last_col_letter=ref.last_col, page_size=500)
         log.info("fetched %d rows", len(rows))
         total_in = len(rows)
 

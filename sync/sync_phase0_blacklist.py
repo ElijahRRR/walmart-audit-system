@@ -28,6 +28,7 @@ import argparse
 import logging
 import time
 
+from config import get_settings
 from integrations import lark_client as lc
 from pipelines.phase0_lark_blacklist import (
     normalize_amazon_category,
@@ -39,14 +40,12 @@ from ._common import SyncResult, db_conn, finish_sync_run, start_sync_run
 log = logging.getLogger(__name__)
 
 # 飞书表配置 (固定; 表结构变了改这里)
-WIKI_TOKEN = "QNIpwrRWxiYPeVk86f8cemyenBb"
-SHEET_ID = "8280e8"
-LAST_COL = "C"
+# 表定位统一走 config.settings (换表改 .env: LARK_PHASE0_BLACKLIST_TOKEN/_SHEET_ID/_LAST_COL)
 
 
 def _resolve_obj_token() -> str:
     """wiki node → spreadsheet obj_token。"""
-    node = lc.resolve_wiki_node(WIKI_TOKEN)
+    node = lc.resolve_wiki_node(get_settings().sheet_phase0_blacklist.token)
     if node["obj_type"] != "sheet":
         raise RuntimeError(f"期望 sheet, 实际 obj_type={node['obj_type']}")
     return node["obj_token"]
@@ -139,8 +138,9 @@ def run() -> SyncResult:
         obj_token = _resolve_obj_token()
         log.info("spreadsheet obj_token=%s", obj_token[:12])
 
-        log.info("reading sheet %s (last_col=%s) …", SHEET_ID, LAST_COL)
-        rows = lc.read_paginated(obj_token, SHEET_ID, last_col_letter=LAST_COL, page_size=5000)
+        ref = get_settings().sheet_phase0_blacklist
+        log.info("reading sheet %s (last_col=%s) …", ref.sheet_id, ref.last_col)
+        rows = lc.read_paginated(obj_token, ref.sheet_id, last_col_letter=ref.last_col, page_size=5000)
         total_in = len(rows)
         log.info("  fetched %d rows", total_in)
 

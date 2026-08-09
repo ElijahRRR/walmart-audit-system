@@ -155,6 +155,9 @@ pip install -r server/deploy/requirements.txt # server 额外依赖
 # 4. 环境变量
 cp .env.example .env
 # 填入 DMIT_API_KEY / DASHSCOPE_API_KEY / DEEPSEEK_API_KEY / VOLCENGINE_API_KEY
+
+# 5. 配置自检 —— 逐项打印生效值与来源, 标 [默认] 的说明 .env 没配
+python3 -m config --check
 ```
 
 ### 数据同步（首次必跑）
@@ -314,13 +317,35 @@ python3 -m cli.audit_asin_list --input failed.csv --filter-stage L3   # 只重�
 | 阿里 DashScope (Qwen) | 文本 / 视觉 / embedding | `DASHSCOPE_API_KEY` |
 | DeepSeek | L1 / L3 文本判定 | `DEEPSEEK_API_KEY` / `_L1` / `_L3` |
 | 火山方舟（豆包） | **默认视觉** 提供商 | `VOLCENGINE_API_KEY` |
-| 飞书 Lark | 黑名单 / 类目 / 违规表 | `LARK_WIKI_BLACKLIST` / `LARK_WIKI_CATEGORY_MAP` / `LARK_SHEET_VIOLATION` |
+| 飞书 Lark | 黑名单 / 类目 / 违规 / Phase0 / 审核任务表 | `LARK_*_TOKEN` / `_SHEET_ID` / `_LAST_COL`（见下） |
 | `lark-cli` | 飞书读写命令行 | 需系统已 `lark-cli auth login` |
 
 ### 关键运行参数
 `SCORE_THRESHOLD=60` · `LLM_CONCURRENCY=100` · `LLM_RETRY_ATTEMPTS=3` · `LLM_RETRY_BASE_DELAY=1` · `L4_MAX_IMAGES_PER_PRODUCT=5` · `LOG_LEVEL=INFO`
 
 完整配置见 [config/settings.py](config/settings.py) 和 [.env.example](.env.example)。
+
+### 换服务器 / 换飞书表（只改 `.env`，不进代码）
+
+**约定：凡是跨环境会变的值（地址 / 凭证 / 表 ID / 列范围）一律走 `.env`，业务代码里不出现字面量。**
+新增这类配置时同步加进 `config/settings.py` 与 `.env.example`。
+
+```bash
+# 1. 改 .env
+#    换服务器: DATABASE_URL / USPTO_DATABASE_URL / DMIT_BASE_URL / AUDIT_SERVER_URL
+#    换飞书表: LARK_<名字>_TOKEN（父表）+ _SHEET_ID（子表）+ _LAST_COL（列范围）
+# 2. 自检 —— 标 [默认] 的行说明 .env 没配, 用的是内置值（很可能是上个环境的）
+python3 -m config --check
+# 3. 重启生效
+scripts/stop_workers.sh && scripts/start_workers.sh
+```
+
+`python3 -m config --check` 会逐项打印**生效值 + 来源**（`env` / `[默认]`），密钥自动打码；
+关键项为空时退出码为 1，可直接串进部署脚本做卡点。
+
+飞书表的 token / sheet_id 从表格链接里取：
+`https://xxx.feishu.cn/wiki/<TOKEN>?sheet=<SHEET_ID>`。
+cron 巡检脚本（`scripts/_cron_*`）也读同一份 `.env`，换地址不用单独改它们。
 
 ---
 

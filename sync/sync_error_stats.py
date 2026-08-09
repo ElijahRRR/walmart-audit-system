@@ -34,11 +34,12 @@ import subprocess
 from datetime import date, datetime
 from typing import Any
 
+from config import get_settings
 from sync._common import batched, db_conn, finish_sync_run, start_sync_run, to_jsonb
 
 log = logging.getLogger(__name__)
 
-SPREADSHEET_TOKEN = "YlA1szPAAhW7CCtmG5hcp6vkndd"
+# 表定位统一走 config.settings (与违规日报同一张表)
 
 # 9 个日报 sheet (sheet_id → (title, report_date))
 DAILY_SHEETS: dict[str, tuple[str, str]] = {
@@ -196,7 +197,7 @@ def _lark_read(sheet_id: str, rng: str) -> list[list[Any]]:
     """调 lark-cli +read, 返回 values (list of rows)。"""
     cmd = [
         "lark-cli", "sheets", "+read",
-        "--spreadsheet-token", SPREADSHEET_TOKEN,
+        "--spreadsheet-token", get_settings().sheet_violation_daily.token,
         "--range", f"{sheet_id}!{rng}",
     ]
     try:
@@ -240,7 +241,7 @@ def _get_sheet_row_count(sheet_id: str) -> int:
     """读 sheet 元数据拿 row_count。"""
     cmd = [
         "lark-cli", "sheets", "+info",
-        "--spreadsheet-token", SPREADSHEET_TOKEN,
+        "--spreadsheet-token", get_settings().sheet_violation_daily.token,
     ]
     try:
         r = subprocess.run(cmd, capture_output=True, timeout=30, text=True)

@@ -24,12 +24,12 @@ SHEETS = [
     {"id": "jF8dOw", "last_col": "C", "source": "飞书-黑名单品牌", "kind": "simple",  # 精简黑名单 (3 列)
      "desc": "员工手工维护的权威黑名单"},
 ]
-WIKI_TOKEN_FALLBACK = "UhZJw3EtsiFN9skbG0Ac24Dgn4b"
+# 表定位统一走 config.settings (换表改 .env: LARK_BLACKLIST_BRANDS_TOKEN)
 
 
 def _resolve_obj_token() -> str:
     """把 wiki token 解析到真实 sheet obj_token。"""
-    token = get_settings().lark_wiki_blacklist or WIKI_TOKEN_FALLBACK
+    token = get_settings().sheet_blacklist_brands.token
     node = lc.resolve_wiki_node(token)
     if node["obj_type"] != "sheet":
         raise RuntimeError(f"期望 sheet, 实际 obj_type={node['obj_type']}")

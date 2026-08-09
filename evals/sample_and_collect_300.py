@@ -14,11 +14,12 @@ import time
 from pathlib import Path
 
 import httpx
+from config import get_settings
 
 OUT = Path(__file__).parent / "out"
 GT_IN = OUT / "groundtruth_bl550.json"
 GT_OUT = OUT / "groundtruth_test300.json"
-DMIT_BASE = "http://47.108.92.213/amazon"
+DMIT_BASE = get_settings().dmit_base_url   # 换服务器改 .env 的 DMIT_BASE_URL
 
 
 def sample() -> list[dict]:

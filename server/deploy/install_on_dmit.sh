@@ -68,7 +68,7 @@ curl -sf http://127.0.0.1:8200/api/health && echo "" || echo "❌ 健康检查�
 echo ""
 echo "✓ 部署完成."
 echo "  内部访问: http://127.0.0.1:8200"
-echo "  公网访问: http://47.108.92.213/audit  (经 nginx 反代)"
+echo "  公网访问: ${AUDIT_SERVER_URL:-http://<本机公网IP>/audit}  (经 nginx 反代)"
 echo "  日志:    tail -f /var/log/audit-server.log"
 echo "  停服:    systemctl stop audit-server"
 echo "  重启:    systemctl restart audit-server"
