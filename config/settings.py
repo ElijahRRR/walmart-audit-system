@@ -27,20 +27,42 @@ if _env_path.exists():
 
 @dataclass(frozen=True)
 class SheetRef:
-    """一张飞书表的完整定位: 父表 token + 子表 ID + 读取列范围。
+    """一张飞书表(的一个数据源)的完整定位。
 
     token:    wiki node token (走 resolve_wiki_node) 或 spreadsheet token (直读)
     sheet_id: 子表 ID; 空 = 运行时按表名动态查找 (如违规日报按日期找 sheet)
     last_col: 读取列范围上界字母; 表结构变宽时改这里
+    col:      本数据源取哪一列 (字母); 空 = 用整行 (多列/结构化表用)
+
+    col 的意义: 让"一张表喂多个数据源"和"每个数据源一张表"变成同一套配置的
+    两种填法 —— 前者三个源 token/sheet_id 相同、col 不同; 后者 token 各异、
+    col 都填 A。将来拆表只改 .env, 不动代码。
     """
 
     token: str
     sheet_id: str = ""
     last_col: str = ""
+    col: str = ""
 
     @property
     def configured(self) -> bool:
         return bool(self.token)
+
+    @property
+    def col_index(self) -> int:
+        """列字母 → 0-based 下标 (A→0, B→1, AA→26)。未指定 col 时返回 0。"""
+        letters = (self.col or "A").strip().upper()
+        idx = 0
+        for ch in letters:
+            if not ("A" <= ch <= "Z"):
+                raise ValueError(f"非法列字母: {self.col!r}")
+            idx = idx * 26 + (ord(ch) - ord("A") + 1)
+        return idx - 1
+
+    @property
+    def sheet_key(self) -> tuple[str, str, str]:
+        """同一张物理表的标识 —— 多个源共表时用它去重, 保证只读一次。"""
+        return (self.token, self.sheet_id, self.last_col)
 
 
 @dataclass(frozen=True)
@@ -88,8 +110,15 @@ class Settings:
     sheet_prohibited: SheetRef          # Walmart 37 条禁售政策 (与 category_map 同父表)
     sheet_pt_meta: SheetRef             # Walmart PT 元数据 (与 category_map 同父表)
     sheet_violation_daily: SheetRef     # 每日违规商品 (sheet_id 按日期动态找)
-    sheet_phase0_blacklist: SheetRef    # Phase0 黑名单 (卖家/ASIN/类目)
     sheet_audit_task: SheetRef          # 飞书表批量审核的任务表 (读 ASIN + 回写结果)
+
+    # Phase0 黑名单 = 三个独立数据源, 各自声明表 + 列。
+    # 现状: 三者同表不同列 (A/B/C); 将来拆成三张表 → 只改 .env 的 TOKEN/SHEET_ID,
+    #       COL 都填 A 即可, 代码不用动。
+    sheet_phase0_blacklist: SheetRef    # 共用默认值来源 (兼容旧 env 名, 不直接读)
+    sheet_phase0_sellers: SheetRef      # 黑名单卖家店铺 ID
+    sheet_phase0_asins: SheetRef        # 黑名单 ASIN
+    sheet_phase0_cats: SheetRef         # 黑名单 Amazon 类目
 
     # --- LLM 路由与故障切换 ---
     llm_routes_file: str            # 路由配置 YAML 路径 (不存在时从 env 合成 legacy 链)
@@ -122,15 +151,17 @@ def _get_float(key: str, default: float) -> float:
     return float(raw) if raw else default
 
 
-def _sheet(prefix: str, *, token: str, sheet_id: str = "", last_col: str = "") -> SheetRef:
-    """按统一命名读一张表的三个维度, 任一维度都可被 .env 覆盖。
+def _sheet(prefix: str, *, token: str, sheet_id: str = "", last_col: str = "",
+           col: str = "") -> SheetRef:
+    """按统一命名读一个数据源的定位, 每个维度都可被 .env 单独覆盖。
 
-    env: LARK_{prefix}_TOKEN / LARK_{prefix}_SHEET_ID / LARK_{prefix}_LAST_COL
+    env: LARK_{prefix}_TOKEN / _SHEET_ID / _LAST_COL / _COL
     """
     return SheetRef(
         token=_get(f"LARK_{prefix}_TOKEN", token),
         sheet_id=_get(f"LARK_{prefix}_SHEET_ID", sheet_id),
         last_col=_get(f"LARK_{prefix}_LAST_COL", last_col),
+        col=_get(f"LARK_{prefix}_COL", col),
     )
 
 
@@ -140,6 +171,9 @@ def get_settings() -> Settings:
     _wiki_blacklist = _get("LARK_WIKI_BLACKLIST", "UhZJw3EtsiFN9skbG0Ac24Dgn4b")
     _wiki_category_map = _get("LARK_WIKI_CATEGORY_MAP", "UKdZwr7JqiO6UckjSnPcwTCgnvd")
     _sheet_violation = _get("LARK_SHEET_VIOLATION", "YlA1szPAAhW7CCtmG5hcp6vkndd")
+    # Phase0 三个源的共同默认值 (旧 env 名 LARK_PHASE0_BLACKLIST_* 仍生效)
+    _phase0_base = _sheet("PHASE0_BLACKLIST", token="QNIpwrRWxiYPeVk86f8cemyenBb",
+                          sheet_id="8280e8", last_col="C")
 
     return Settings(
         database_url=_get("DATABASE_URL", "postgresql://nextderboy@localhost:5432/walmart_audit"),
@@ -185,10 +219,20 @@ def get_settings() -> Settings:
                              sheet_id="0bdc8b", last_col="J"),
         # 违规日报: sheet_id 留空 — 运行时按 "YYYY.M.D问题商品" 表名动态找
         sheet_violation_daily=_sheet("VIOLATION_DAILY", token=_sheet_violation, last_col="M"),
-        sheet_phase0_blacklist=_sheet("PHASE0_BLACKLIST", token="QNIpwrRWxiYPeVk86f8cemyenBb",
-                                      sheet_id="8280e8", last_col="C"),
         sheet_audit_task=_sheet("AUDIT_TASK", token="MO2escopjhLFzVtOzVlcq8xvnmI",
                                 sheet_id="e7834a"),
+        # Phase0 三个数据源: 默认都指向同一张表的 A/B/C 列 (现状),
+        # 拆表时把某个源的 TOKEN/SHEET_ID 指到新表 + COL 改 A 即可
+        sheet_phase0_blacklist=_phase0_base,
+        sheet_phase0_sellers=_sheet("PHASE0_SELLERS", token=_phase0_base.token,
+                                    sheet_id=_phase0_base.sheet_id,
+                                    last_col=_phase0_base.last_col, col="A"),
+        sheet_phase0_asins=_sheet("PHASE0_ASINS", token=_phase0_base.token,
+                                  sheet_id=_phase0_base.sheet_id,
+                                  last_col=_phase0_base.last_col, col="B"),
+        sheet_phase0_cats=_sheet("PHASE0_CATS", token=_phase0_base.token,
+                                 sheet_id=_phase0_base.sheet_id,
+                                 last_col=_phase0_base.last_col, col="C"),
         score_threshold=_get_int("SCORE_THRESHOLD", 60),
         llm_concurrency=_get_int("LLM_CONCURRENCY", 100),
         llm_retry_attempts=_get_int("LLM_RETRY_ATTEMPTS", 3),
@@ -228,7 +272,10 @@ _AUDIT_SHEETS: list[tuple[str, str, str]] = [
     ("sheet_prohibited", "PROHIBITED", "禁售政策"),
     ("sheet_pt_meta", "PT_META", "PT 元数据"),
     ("sheet_violation_daily", "VIOLATION_DAILY", "违规日报"),
-    ("sheet_phase0_blacklist", "PHASE0_BLACKLIST", "Phase0 黑名单"),
+    ("sheet_phase0_blacklist", "PHASE0_BLACKLIST", "Phase0 黑名单 (三源共享默认)"),
+    ("sheet_phase0_sellers", "PHASE0_SELLERS", "└ 卖家店铺 ID"),
+    ("sheet_phase0_asins", "PHASE0_ASINS", "└ 黑名单 ASIN"),
+    ("sheet_phase0_cats", "PHASE0_CATS", "└ 黑名单类目"),
     ("sheet_audit_task", "AUDIT_TASK", "批量审核任务表"),
 ]
 
@@ -290,6 +337,8 @@ def check(verbose: bool = True) -> int:
             line(f"{label} (子表)", f"LARK_{prefix}_SHEET_ID", ref.sheet_id, False)
         if ref.last_col or os.getenv(f"LARK_{prefix}_LAST_COL"):
             line(f"{label} (列范围)", f"LARK_{prefix}_LAST_COL", ref.last_col, False)
+        if ref.col or os.getenv(f"LARK_{prefix}_COL"):
+            line(f"{label} (取哪列)", f"LARK_{prefix}_COL", ref.col, False)
 
     if verbose:
         print()

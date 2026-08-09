@@ -347,6 +347,24 @@ scripts/stop_workers.sh && scripts/start_workers.sh
 `https://xxx.feishu.cn/wiki/<TOKEN>?sheet=<SHEET_ID>`。
 cron 巡检脚本（`scripts/_cron_*`）也读同一份 `.env`，换地址不用单独改它们。
 
+**表拆分 / 合并也是纯 `.env` 操作**（以 Phase0 黑名单为例）。它是三个独立数据源
+（卖家 ID / ASIN / 类目），每个源声明"读哪张表的哪一列"：
+
+```bash
+# 现状：一张表三列 —— 三个源共用下面三行，分别取 A/B/C 列
+LARK_PHASE0_BLACKLIST_TOKEN=...
+LARK_PHASE0_BLACKLIST_SHEET_ID=8280e8
+LARK_PHASE0_BLACKLIST_LAST_COL=C
+
+# 将来拆成三张表：给要拆出去的源单独指定表，COL 填 A。代码不用动
+LARK_PHASE0_CATS_TOKEN=<新表>
+LARK_PHASE0_CATS_SHEET_ID=<新子表>
+LARK_PHASE0_CATS_COL=A
+```
+
+只拆一部分也支持（如只把类目独立成表，卖家/ASIN 继续共表）。
+多个源指向同一张物理表时**自动只读一次**，所以"一表三列"的拉取开销与拆表前相同。
+
 ---
 
 ## ⚠️ 注意事项
